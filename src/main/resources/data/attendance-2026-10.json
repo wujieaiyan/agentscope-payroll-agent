@@ -1,0 +1,62 @@
+[
+  {
+    "employee_id": "EMP001",
+    "period": "2026-10",
+    "personal_leave_days": 2.0,
+    "sick_leave_days": 0.0,
+    "absent_days": 0.0,
+    "weekday_overtime_hours": 10.0,
+    "rest_day_overtime_hours": 8.0,
+    "holiday_overtime_hours": 0.0
+  },
+  {
+    "employee_id": "EMP002",
+    "period": "2026-10",
+    "personal_leave_days": 0.0,
+    "sick_leave_days": 1.0,
+    "absent_days": 0.0,
+    "weekday_overtime_hours": 0.0,
+    "rest_day_overtime_hours": 4.0,
+    "holiday_overtime_hours": 8.0
+  },
+  {
+    "employee_id": "EMP003",
+    "period": "2026-10",
+    "personal_leave_days": 0.0,
+    "sick_leave_days": 0.0,
+    "absent_days": 2.0,
+    "weekday_overtime_hours": 20.0,
+    "rest_day_overtime_hours": 16.0,
+    "holiday_overtime_hours": 0.0
+  },
+  {
+    "employee_id": "EMP004",
+    "period": "2026-10",
+    "personal_leave_days": 0.0,
+    "sick_leave_days": 0.0,
+    "absent_days": 0.0,
+    "weekday_overtime_hours": 0.0,
+    "rest_day_overtime_hours": 0.0,
+    "holiday_overtime_hours": 0.0
+  },
+  {
+    "employee_id": "EMP005",
+    "period": "2026-10",
+    "personal_leave_days": 0.5,
+    "sick_leave_days": 0.0,
+    "absent_days": 0.0,
+    "weekday_overtime_hours": 6.0,
+    "rest_day_overtime_hours": 0.0,
+    "holiday_overtime_hours": 0.0
+  },
+  {
+    "employee_id": "EMP006",
+    "period": "2026-10",
+    "personal_leave_days": 0.0,
+    "sick_leave_days": 0.0,
+    "absent_days": 0.0,
+    "weekday_overtime_hours": 0.0,
+    "rest_day_overtime_hours": 0.0,
+    "holiday_overtime_hours": 0.0
+  }
+]

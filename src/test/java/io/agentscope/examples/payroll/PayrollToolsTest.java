@@ -1,0 +1,71 @@
+package io.agentscope.examples.payroll;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.agentscope.examples.payroll.agent.PayrollTools;
+import io.agentscope.examples.payroll.domain.PayrollPolicy;
+import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
+import io.agentscope.examples.payroll.service.PayrollEngine;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+class PayrollToolsTest {
+
+    private PayrollTools tools;
+
+    @BeforeEach
+    void setUp() {
+        tools =
+                new PayrollTools(
+                        new PayrollEngine(
+                                JsonPayrollRepository.demo(), PayrollPolicy.demoPolicy()));
+    }
+
+    @Test
+    @DisplayName("工具返回结构化成功结果")
+    void returnsStructuredSuccess() {
+        String json = tools.calculatePayroll("EMP001", "2026-10");
+
+        assertTrue(json.contains("\"status\":\"OK\""));
+        assertTrue(json.contains("\"net_pay\":27661.39"));
+        assertTrue(json.contains("\"employee_name\":\"张伟\""));
+    }
+
+    @Test
+    @DisplayName("业务异常转成可解释错误而不是抛栈")
+    void returnsStructuredError() {
+        String json = tools.calculatePayroll("EMP999", "2026-10");
+
+        assertTrue(json.contains("\"status\":\"ERROR\""));
+        assertTrue(json.contains("员工工号不存在"));
+    }
+
+    @Test
+    @DisplayName("期间格式错误可被模型理解并追问")
+    void validatesPeriodFormat() {
+        String json = tools.calculatePayroll("EMP001", "2026/10");
+
+        assertTrue(json.contains("\"status\":\"ERROR\""));
+        assertTrue(json.contains("YYYY-MM"));
+    }
+
+    @Test
+    @DisplayName("工资条工具输出实发金额")
+    void generatesPayslip() {
+        String json = tools.generatePayslip("EMP001", "2026-10");
+
+        assertTrue(json.contains("工资条"));
+        assertTrue(json.contains("27,661.39"));
+    }
+
+    @Test
+    @DisplayName("政策工具返回考勤就绪月份与税率表")
+    void returnsPolicy() {
+        String json = tools.getPayrollPolicy();
+
+        assertTrue(json.contains("\"data_through_period\":\"2026-10\""));
+        assertTrue(json.contains("\"tax_brackets\""));
+        assertTrue(json.contains("累计预扣"));
+    }
+}
