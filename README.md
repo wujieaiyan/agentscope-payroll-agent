@@ -11,7 +11,7 @@
 用户自然语言
       │
       ▼
-ReActAgent（dashscope:qwen-plus）
+ReActAgent（默认 ollama:qwen2.5:3b-instruct，可切换 dashscope:qwen-plus）
   ├─ 意图识别 / 追问补参 / 工具编排 / 结果解释
   │
   ▼ @Tool（8 个工具，返回结构化 JSON）
@@ -39,11 +39,11 @@ PayrollRepository（演示 JSON；生产替换为 HR 主数据 / 考勤 / 绩效
 | 发薪前校验 | 勾稽关系、社保基数上下限、实发是否为负等 6 项检查 |
 | 考勤核对 | 事假、病假、旷工、工作日/休息日/法定节假日加班 |
 | 政策问答 | 税率表、社保比例、基数上下限、考勤数据就绪月份 |
-| 结构化意图抽取 | 将自然语言解析为 `action / employeeId / period / department` |
+| 结构化意图抽取 | 将自然语言解析为 `action / employeeId / period / department`（建议使用 DashScope 模型） |
 
 ## 快速开始
 
-环境：JDK 17、Maven 3.6+。
+环境：JDK 17、Maven 3.6+、[Ollama](https://ollama.com/)（本地模型对话时需要）。
 
 ```bash
 mvn clean package
@@ -58,10 +58,19 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --payroll EMP001 --peri
 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --department 研发部 --period 2026-10
 ```
 
-在线对话：
+本地模型对话（默认，无需 API Key）：
+
+```bash
+ollama serve
+ollama pull qwen2.5:3b-instruct
+java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+```
+
+使用 DashScope 在线模型：
 
 ```bash
 export DASHSCOPE_API_KEY=sk-xxx          # Windows: set DASHSCOPE_API_KEY=sk-xxx
+export PAYROLL_MODEL=dashscope:qwen-plus # Windows: set PAYROLL_MODEL=dashscope:qwen-plus
 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 ```
 
@@ -73,7 +82,20 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 - `社保基数是怎么定的？`
 - `替我检查 EMP005 10 月工资能不能发`
 
-模型可通过环境变量覆盖：`PAYROLL_MODEL=dashscope:qwen-max`。
+### 模型配置
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PAYROLL_MODEL` | `ollama:qwen2.5:3b-instruct` | 模型标识；Ollama 用 `ollama:<模型名>`，DashScope 用 `dashscope:<模型名>` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
+| `PAYROLL_OLLAMA_NUM_CTX` | `8192` | Ollama 上下文窗口 |
+| `PAYROLL_OLLAMA_TEMPERATURE` | `0.1` | 采样温度，核算场景建议保持低温度 |
+| `DASHSCOPE_API_KEY` | 无 | 仅 `dashscope:` 模型必填 |
+
+启动时会预检 Ollama 服务与模型是否就绪，未启动或未拉取模型会直接给出中文提示。
+本地小模型（1B–3B）在长系统提示下可能漏调工具，建议使用 7B 以上模型或在线模型；
+核算金额始终来自确定性引擎，模型漏调工具时不会产生错误金额，但会影响回答完整性。
+`--extract` 依赖结构化输出能力，Ollama 扩展暂不提供该元数据，建议改用 DashScope 模型执行。
 
 > Windows 控制台如出现中文乱码，请加 `-Dfile.encoding=UTF-8`，或先执行 `chcp 65001`。
 

@@ -115,17 +115,30 @@ public final class PayrollApplication {
         if (msg == null) {
             throw new PayrollException("模型未返回结构化结果");
         }
-        PayrollIntent intent = msg.getStructuredData(PayrollIntent.class);
+        PayrollIntent intent;
+        try {
+            intent = msg.getStructuredData(PayrollIntent.class);
+        } catch (RuntimeException e) {
+            intent = null;
+        }
         if (intent == null) {
-            throw new PayrollException("模型未返回可解析的结构化意图");
+            throw new PayrollException(
+                    "当前模型未返回结构化意图。本地 Ollama 小模型的工具调用稳定性有限，"
+                            + "请改用交互式对话，或设置 PAYROLL_MODEL=dashscope:qwen-plus 后重试。");
         }
         System.out.println("结构化意图：");
         System.out.println(JsonSupport.toJson(intent));
     }
 
     private static void runInteractive(ReActAgent agent) throws Exception {
+        String modelId = PayrollAgentFactory.modelId();
         System.out.println("=".repeat(72));
-        System.out.println("薪酬核算智能体  模型：" + PayrollAgentFactory.modelId());
+        System.out.println(
+                "薪酬核算智能体  模型："
+                        + modelId
+                        + (modelId.startsWith("ollama:")
+                                ? "  Ollama：" + PayrollAgentFactory.ollamaBaseUrl()
+                                : ""));
         System.out.println("示例：算一下张伟 2026-10 的工资 / 研发部 10 月工资表 / 社保基数怎么定");
         System.out.println("输入 exit 退出");
         System.out.println("=".repeat(72));
@@ -226,15 +239,24 @@ public final class PayrollApplication {
                 薪酬核算智能体
 
                 用法：
-                  --demo                              离线演示（无需 API Key）
+                  --demo                              离线演示（无需模型）
                   --payroll EMP001 --period 2026-10   单人核算并打印工资条
                   --department 研发部 --period 2026-10 部门批量核算
-                  --extract "帮我算下张伟10月的工资"    结构化意图抽取
+                  --extract "帮我算下张伟10月的工资"    结构化意图抽取（建议使用 DashScope 模型）
                   无参数                               交互式对话
 
+                本地模型（默认）：
+                  1. ollama serve
+                  2. ollama pull qwen2.5:3b-instruct
+                  3. java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+
                 环境变量：
-                  DASHSCOPE_API_KEY    DashScope API Key（在线对话必填）
-                  PAYROLL_MODEL        模型标识，默认 dashscope:qwen-plus
+                  PAYROLL_MODEL              模型标识，默认 ollama:qwen2.5:3b-instruct
+                                             DashScope 可设为 dashscope:qwen-plus
+                  OLLAMA_BASE_URL            Ollama 地址，默认 http://localhost:11434
+                  PAYROLL_OLLAMA_NUM_CTX     Ollama 上下文窗口，默认 8192
+                  PAYROLL_OLLAMA_TEMPERATURE Ollama 温度，默认 0.1
+                  DASHSCOPE_API_KEY          仅 DashScope 模型必填
                 """);
     }
 
