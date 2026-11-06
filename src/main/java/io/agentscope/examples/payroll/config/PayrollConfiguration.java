@@ -1,17 +1,23 @@
 package io.agentscope.examples.payroll.config;
 
+import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
+import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.PayrollChat;
+import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -22,6 +28,8 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 /** Spring 容器中的薪酬组件装配，与 CLI 使用同一套领域实现。 */
 @Configuration(proxyBeanMethods = false)
@@ -69,6 +77,56 @@ public class PayrollConfiguration {
     @Bean
     public PayrollChat payrollChat(PayrollEngine engine) {
         return new PayrollChatService(engine);
+    }
+
+    @Bean
+    public PayrollChatFactory payrollChatFactory(PayrollEngine engine) {
+        return () -> new PayrollChatService(engine);
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public H2AdminRepository adminRepository(
+            PayrollDatabase database,
+            PasswordEncoder passwordEncoder,
+            @Value("${payroll.auth.admin-password:admin123}") String adminPassword) {
+        H2AdminRepository repository = new H2AdminRepository(database);
+        if (repository.ensureAdminUser(passwordEncoder.encode(adminPassword))) {
+            if ("admin123".equals(adminPassword)) {
+                log.warn("已创建默认管理员 admin / admin123，请登录后立即修改密码");
+            } else {
+                log.info("已创建管理员 admin，密码取自 PAYROLL_ADMIN_PASSWORD");
+            }
+        }
+        return repository;
+    }
+
+    @Bean
+    public H2ChatStore chatStore(PayrollDatabase database) {
+        return new H2ChatStore(database);
+    }
+
+    @Bean(destroyMethod = "close")
+    public ChatSessionManager chatSessionManager(
+            H2ChatStore chatStore, PayrollChatFactory chatFactory) {
+        return new ChatSessionManager(chatStore, chatFactory);
+    }
+
+    @Bean
+    public AuthService authService(
+            H2AdminRepository adminRepository,
+            PasswordEncoder passwordEncoder,
+            @Value("${payroll.auth.enabled:true}") boolean authEnabled) {
+        return new AuthService(adminRepository, passwordEncoder, authEnabled);
+    }
+
+    @Bean
+    public AuthInterceptor authInterceptor(AuthService authService) {
+        return new AuthInterceptor(authService);
     }
 
     @Bean

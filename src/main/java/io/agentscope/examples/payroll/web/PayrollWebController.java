@@ -9,13 +9,12 @@ import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.domain.PayrollRun;
 import io.agentscope.examples.payroll.domain.PerformanceReview;
 import io.agentscope.examples.payroll.domain.ReviewView;
-import io.agentscope.examples.payroll.service.ChatStreamListener;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
-import io.agentscope.examples.payroll.support.JsonSupport;
+import io.agentscope.examples.payroll.support.Permissions;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -50,8 +49,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 /**
  * 薪酬管理台 REST API。
  *
- * <p>接口契约与原管理台保持一致；仅绑定 127.0.0.1，无登录鉴权，
- * 定位是单机 HR 工具。邮件发送固定走 dry-run 网关。
+ * <p>接口按角色权限校验；登录认证由 {@link AuthInterceptor} 统一处理。
+ * 邮件发送固定走 dry-run 网关。
  */
 @RestController
 @RequestMapping("/api")
@@ -86,6 +85,7 @@ public class PayrollWebController {
     }
 
     @GetMapping("/employees")
+    @RequirePermission(Permissions.EMPLOYEE_READ)
     public ApiResponse employees(
             @RequestParam(name = "include_inactive", defaultValue = "false")
                     boolean includeInactive) {
@@ -93,6 +93,7 @@ public class PayrollWebController {
     }
 
     @PostMapping("/employees")
+    @RequirePermission(Permissions.EMPLOYEE_WRITE)
     public ApiResponse saveEmployee(@RequestBody Employee employee) {
         H2PayrollRepository repository = services.repository();
         repository.saveEmployee(employee);
@@ -103,12 +104,14 @@ public class PayrollWebController {
     }
 
     @PostMapping("/employees/{employeeId}/deactivate")
+    @RequirePermission(Permissions.EMPLOYEE_WRITE)
     public ApiResponse deactivateEmployee(@PathVariable String employeeId) {
         services.repository().deactivateEmployee(employeeId);
         return ApiResponse.ok(Map.of("employee_id", employeeId, "active", false));
     }
 
     @GetMapping("/reviews")
+    @RequirePermission(Permissions.REVIEW_READ)
     public ApiResponse reviews(@RequestParam(required = false) String period) {
         H2PayrollRepository repository = services.repository();
         Map<String, String> names = new LinkedHashMap<>();
@@ -131,6 +134,7 @@ public class PayrollWebController {
     }
 
     @PostMapping("/reviews")
+    @RequirePermission(Permissions.REVIEW_WRITE)
     public ApiResponse saveReview(@RequestBody PerformanceReview review) {
         H2PayrollRepository repository = services.repository();
         if (repository.findEmployee(review.employeeId()).isEmpty()) {
@@ -140,6 +144,7 @@ public class PayrollWebController {
     }
 
     @DeleteMapping("/reviews/{employeeId}/{period}")
+    @RequirePermission(Permissions.REVIEW_WRITE)
     public ApiResponse deleteReview(
             @PathVariable String employeeId, @PathVariable String period) {
         services.repository().deleteReview(employeeId, period);
@@ -147,11 +152,13 @@ public class PayrollWebController {
     }
 
     @GetMapping("/policies")
+    @RequirePermission(Permissions.POLICY_READ)
     public ApiResponse policies() {
         return ApiResponse.ok(services.repository().policies());
     }
 
     @PutMapping("/policies/{city}")
+    @RequirePermission(Permissions.POLICY_WRITE)
     public ApiResponse savePolicy(
             @PathVariable String city, @RequestBody PayrollPolicy policy) {
         services.repository().savePolicy(new CityPolicy(city, policy, null));
@@ -159,12 +166,14 @@ public class PayrollWebController {
     }
 
     @GetMapping("/attendance")
+    @RequirePermission(Permissions.ATTENDANCE_READ)
     public ApiResponse attendance(@RequestParam(required = false) String period) {
         return ApiResponse.ok(
                 services.repository().attendanceForPeriod(requirePeriod(period)));
     }
 
     @PutMapping("/attendance/{employeeId}/{period}")
+    @RequirePermission(Permissions.ATTENDANCE_WRITE)
     public ApiResponse saveAttendance(
             @PathVariable String employeeId,
             @PathVariable String period,
@@ -181,6 +190,7 @@ public class PayrollWebController {
     }
 
     @PostMapping("/chat")
+    @RequirePermission(Permissions.CHAT_USE)
     public ApiResponse chat(@RequestBody(required = false) ChatRequest request) {
         return ApiResponse.ok(services.chat().chat(requireChatMessage(request)));
     }
@@ -192,6 +202,7 @@ public class PayrollWebController {
      * {@code text/event-stream} 并自行解析事件。
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @RequirePermission(Permissions.CHAT_USE)
     public SseEmitter chatStream(@RequestBody(required = false) ChatRequest request) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         emitter.onTimeout(emitter::complete);
@@ -201,7 +212,8 @@ public class PayrollWebController {
             message = requireChatMessage(request);
         } catch (PayrollException e) {
             // 客户端只接受 text/event-stream，校验错误也必须以 SSE 事件返回。
-            new SseChannel(emitter).send("error", payload("message", e.getMessage()));
+            ChatSse.Channel channel = new ChatSse.Channel(emitter);
+            channel.send("error", ChatSse.payload("message", e.getMessage()));
             emitter.complete();
             return emitter;
         }
@@ -210,98 +222,12 @@ public class PayrollWebController {
     }
 
     private void streamChat(String message, SseEmitter emitter) {
-        SseChannel channel = new SseChannel(emitter);
+        ChatSse.Channel channel = new ChatSse.Channel(emitter);
         long startedAt = System.currentTimeMillis();
         log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
         try {
             services.chat()
-                    .stream(
-                            message,
-                            new ChatStreamListener() {
-                                @Override
-                                public void onStart(String model) {
-                                    channel.send("start", payload("model", model));
-                                }
-
-                                @Override
-                                public void onAgentStart(String agent, String label) {
-                                    channel.send(
-                                            "agent_start",
-                                            payload("agent", agent, "label", label));
-                                }
-
-                                @Override
-                                public void onAgentOutput(String agent, String delta) {
-                                    channel.send(
-                                            "agent_text",
-                                            payload("agent", agent, "text", delta));
-                                }
-
-                                @Override
-                                public void onAgentEnd(String agent) {
-                                    channel.send("agent_end", payload("agent", agent));
-                                }
-
-                                @Override
-                                public void onThinking(String delta) {
-                                    channel.send("thinking", payload("text", delta));
-                                }
-
-                                @Override
-                                public void onPhase(String label) {
-                                    channel.send("phase", payload("label", label));
-                                }
-
-                                @Override
-                                public void onToolStart(String toolCallId, String toolName) {
-                                    channel.send(
-                                            "tool_start",
-                                            payload(
-                                                    "tool_call_id",
-                                                    toolCallId,
-                                                    "name",
-                                                    toolName));
-                                }
-
-                                @Override
-                                public void onToolArgs(String toolCallId, String delta) {
-                                    channel.send(
-                                            "tool_args",
-                                            payload("tool_call_id", toolCallId, "text", delta));
-                                }
-
-                                @Override
-                                public void onToolResult(
-                                        String toolCallId, String toolName, String state) {
-                                    channel.send(
-                                            "tool_result",
-                                            payload(
-                                                    "tool_call_id",
-                                                    toolCallId,
-                                                    "name",
-                                                    toolName,
-                                                    "state",
-                                                    state));
-                                }
-
-                                @Override
-                                public void onText(String delta) {
-                                    channel.send("text", payload("text", delta));
-                                }
-
-                                @Override
-                                public void onDone(PayrollChat.Reply reply) {
-                                    channel.send(
-                                            "done",
-                                            payload(
-                                                    "reply",
-                                                    reply.reply(),
-                                                    "tools",
-                                                    reply.tools(),
-                                                    "model",
-                                                    reply.model()));
-                                }
-                            });
+                    .stream(message, ChatSse.bridge(channel, reply -> { }));
             emitter.complete();
             log.info("[SSE] 对话完成：耗时={}ms", System.currentTimeMillis() - startedAt);
         } catch (PayrollException e) {
@@ -309,22 +235,24 @@ public class PayrollWebController {
                     "[SSE] 对话失败：耗时={}ms，原因={}",
                     System.currentTimeMillis() - startedAt,
                     e.getMessage());
-            channel.send("error", payload("message", e.getMessage()));
+            channel.send("error", ChatSse.payload("message", e.getMessage()));
             emitter.complete();
         } catch (RuntimeException e) {
             log.error("[SSE] 流式对话异常", e);
-            channel.send("error", payload("message", "对话失败，请查看服务端日志"));
+            channel.send("error", ChatSse.payload("message", "对话失败，请查看服务端日志"));
             emitter.complete();
         }
     }
 
     @PostMapping("/chat/reset")
+    @RequirePermission(Permissions.CHAT_USE)
     public ApiResponse resetChat() {
         services.chat().reset();
         return ApiResponse.ok(Map.of("reset", true));
     }
 
     @GetMapping("/import/templates/{type}")
+    @RequirePermission(Permissions.IMPORT_USE)
     public ResponseEntity<byte[]> downloadTemplate(@PathVariable String type) {
         ImportType importType = ImportType.fromPath(type);
         byte[] body = services.excelImportService().template(importType);
@@ -338,6 +266,7 @@ public class PayrollWebController {
     }
 
     @PostMapping("/import/{type}")
+    @RequirePermission(Permissions.IMPORT_USE)
     public ApiResponse importExcel(
             @PathVariable String type, @RequestBody(required = false) byte[] body) {
         ImportType importType = ImportType.fromPath(type);
@@ -350,16 +279,19 @@ public class PayrollWebController {
     }
 
     @GetMapping("/runs")
+    @RequirePermission(Permissions.PAYROLL_READ)
     public ApiResponse runs() {
         return ApiResponse.ok(services.runService().runs());
     }
 
     @GetMapping("/runs/{runId}")
+    @RequirePermission(Permissions.PAYROLL_READ)
     public ApiResponse runDetail(@PathVariable String runId) {
         return ApiResponse.ok(services.runService().detail(parseLong(runId, "批次号")));
     }
 
     @PostMapping("/runs/preview")
+    @RequirePermission(Permissions.PAYROLL_WRITE)
     public ApiResponse preview(@RequestBody PreviewRequest request) {
         PayrollRunService runService = services.runService();
         return ApiResponse.ok(
@@ -370,12 +302,14 @@ public class PayrollWebController {
     }
 
     @PostMapping("/runs/{runId}/finalize")
+    @RequirePermission(Permissions.PAYROLL_WRITE)
     public ApiResponse finalizeRun(@PathVariable String runId) {
         return ApiResponse.ok(
                 services.runService().finalizeRun(parseLong(runId, "批次号")));
     }
 
     @PostMapping("/runs/{runId}/send")
+    @RequirePermission(Permissions.PAYROLL_WRITE)
     public ApiResponse sendRun(
             @PathVariable String runId,
             @RequestBody(required = false) SendRequest request) {
@@ -385,6 +319,7 @@ public class PayrollWebController {
     }
 
     @GetMapping("/runs/{runId}/excel")
+    @RequirePermission(Permissions.PAYROLL_READ)
     public ResponseEntity<Resource> downloadExcel(@PathVariable String runId)
             throws IOException {
         PayrollRun run =
@@ -443,43 +378,9 @@ public class PayrollWebController {
         return message;
     }
 
-    /** 构造允许空值的 SSE 事件负载（Jackson 会跳过 null 字段）。 */
-    private static Map<String, Object> payload(Object... pairs) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        for (int i = 0; i + 1 < pairs.length; i += 2) {
-            if (pairs[i + 1] != null) {
-                payload.put((String) pairs[i], pairs[i + 1]);
-            }
-        }
-        return payload;
-    }
-
     private static String abbreviate(String text, int limit) {
         String flattened = text == null ? "" : text.replaceAll("\\s+", " ").trim();
         return flattened.length() <= limit ? flattened : flattened.substring(0, limit) + "…";
-    }
-
-    /** 客户端断开后停止写入，避免异常打断 Agent 事件流。 */
-    private static final class SseChannel {
-
-        private final SseEmitter emitter;
-        private boolean closed;
-
-        private SseChannel(SseEmitter emitter) {
-            this.emitter = emitter;
-        }
-
-        private void send(String event, Map<String, Object> data) {
-            if (closed) {
-                return;
-            }
-            try {
-                emitter.send(SseEmitter.event().name(event).data(JsonSupport.toJson(data)));
-            } catch (IOException | IllegalStateException e) {
-                closed = true;
-                log.debug("SSE 连接已关闭，停止推送 {} 事件", event);
-            }
-        }
     }
 
     /** 预览请求：period + scope + 可选微调。 */

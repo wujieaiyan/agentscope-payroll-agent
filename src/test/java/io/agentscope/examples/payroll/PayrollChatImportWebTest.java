@@ -43,6 +43,7 @@ class PayrollChatImportWebTest {
         registry.add("payroll.db.user", () -> "sa");
         registry.add("payroll.db.password", () -> "");
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
+        registry.add("payroll.auth.enabled", () -> "false");
     }
 
     @LocalServerPort

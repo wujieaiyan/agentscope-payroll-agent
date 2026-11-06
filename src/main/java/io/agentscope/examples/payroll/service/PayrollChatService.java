@@ -119,23 +119,31 @@ public final class PayrollChatService implements PayrollChat {
                         preview(validation, LOG_PREVIEW_LIMIT));
             }
 
-            StageResult accounting;
-            try {
-                accounting =
-                        runStage(
-                                "accountant",
-                                "③ 核算智能体：汇总计算与验证结论",
-                                current.accountant(),
-                                accountingInput(question, calculation.text(), validation),
-                                listener,
-                                true,
-                                tools);
-            } catch (RuntimeException e) {
-                throw chatFailure(e);
-            }
-            String reply = accounting.text().trim();
-            if (reply.isBlank()) {
-                throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
+            String reply;
+            if (calculation.targets().isEmpty()) {
+                // 查询类问题（员工清单/档案/政策/考勤）直接返回计算记录，避免小模型改写出错误的工资结论。
+                reply = calculation.text().trim();
+                listener.onText(reply);
+                log.info("[多智能体] ③ 跳过核算汇总：查询类问题直接返回计算记录");
+            } else {
+                StageResult accounting;
+                try {
+                    accounting =
+                            runStage(
+                                    "accountant",
+                                    "③ 核算智能体：汇总计算与验证结论",
+                                    current.accountant(),
+                                    accountingInput(question, calculation.text(), validation),
+                                    listener,
+                                    true,
+                                    tools);
+                } catch (RuntimeException e) {
+                    throw chatFailure(e);
+                }
+                reply = accounting.text().trim();
+                if (reply.isBlank()) {
+                    throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
+                }
             }
             log.info(
                     "[多智能体] 完成：总耗时={}ms，工具={}，答复长度={}",
@@ -187,6 +195,7 @@ public final class PayrollChatService implements PayrollChat {
             Set<String> allTools) {
         listener.onAgentStart(stageKey, stageLabel);
         long startedAt = System.currentTimeMillis();
+        clearHistory(agent, stageKey);
         log.info("[多智能体][{}] 阶段开始：{}", stageKey, stageLabel);
         log.debug("[多智能体][{}] 输入：\n{}", stageKey, input);
 
@@ -274,6 +283,20 @@ public final class PayrollChatService implements PayrollChat {
         }
         log.debug("[多智能体][{}] 输出：\n{}", stageKey, text);
         return new StageResult(text, List.copyOf(targets), System.currentTimeMillis() - startedAt);
+    }
+
+    /**
+     * 每轮阶段开始前清空历史上下文，避免模型复述上一轮缓存的员工清单或金额。
+     *
+     * <p>主数据可能在对话期间被管理台修改；保留历史会让模型跳过工具调用，直接使用过期结果。
+     */
+    private static void clearHistory(ReActAgent agent, String stageKey) {
+        try {
+            agent.clearContext(agent.getRuntimeContext());
+            log.debug("[多智能体][{}] 已清理历史上下文", stageKey);
+        } catch (RuntimeException e) {
+            log.warn("[多智能体][{}] 清理历史上下文失败：{}", stageKey, rootMessage(e));
+        }
     }
 
     private static String validationInput(

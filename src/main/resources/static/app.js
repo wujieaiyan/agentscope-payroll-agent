@@ -13,7 +13,18 @@ const state = {
   previewDirty: false,
   runs: [],
   dataThrough: null,
+  me: null,
+  permissions: new Set(),
+  authEnabled: false,
+  departments: [],
+  users: [],
+  roles: [],
+  permissionOptions: [],
+  selectedRoleCode: null,
   chatBusy: false,
+  chatSessions: [],
+  chatSessionId: null,
+  chatController: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -50,6 +61,16 @@ function num(value) {
   if (value === '' || value === null || value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function can(permission) {
+  return state.permissions.has(permission);
+}
+
+function applyPermissions() {
+  $$('[data-permission]').forEach((element) => {
+    element.classList.toggle('hidden', !can(element.dataset.permission));
+  });
 }
 
 function money(value) {
@@ -108,6 +129,10 @@ async function api(path, options = {}) {
       throw new Error(text);
     }
   }
+  if (response.status === 401) {
+    window.location.href = '/login.html';
+    throw new Error('未登录或会话已过期');
+  }
   if (!response.ok || (payload && payload.status === 'ERROR')) {
     throw new Error((payload && payload.message) || `请求失败：HTTP ${response.status}`);
   }
@@ -140,6 +165,35 @@ async function loadHealth() {
   }
 }
 
+async function loadMe() {
+  const data = await api('/api/auth/me');
+  state.me = data.user;
+  state.authEnabled = Boolean(data.auth_enabled);
+  state.permissions = new Set(data.user.permissions || []);
+  const department = data.user.department_name ? ' · ' + data.user.department_name : '';
+  $('#current-user').textContent =
+    `${data.user.display_name} · ${data.user.role_name}${department}`;
+  $('#logout').classList.toggle('hidden', !state.authEnabled);
+  $('#change-password').classList.toggle('hidden', !state.authEnabled);
+  applyPermissions();
+}
+
+async function logout() {
+  try {
+    await api('/api/auth/logout', { method: 'POST' });
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    window.location.href = '/login.html';
+  }
+}
+
+function openPasswordDialog() {
+  const dialog = $('#password-dialog');
+  $('#password-form').reset();
+  dialog.showModal();
+}
+
 function showTab(name) {
   $$('#tabs button').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === name);
@@ -152,10 +206,19 @@ function showTab(name) {
   if (name === 'policies') loadPolicies().catch(showError);
   if (name === 'attendance') loadAttendance().catch(showError);
   if (name === 'payroll') loadRuns().catch(showError);
-  if (name === 'chat') setTimeout(() => $('#chat-input').focus(), 50);
+  if (name === 'chat') {
+    initChat().catch(showError);
+    setTimeout(() => $('#chat-input').focus(), 50);
+  }
+  if (name === 'users') loadUsersTab().catch(showError);
+  if (name === 'departments') loadDepartments(true).catch(showError);
+  if (name === 'roles') loadRolesTab().catch(showError);
 }
 
 async function loadEmployees() {
+  if (!state.departments.length) {
+    await loadDepartments(true).catch((error) => console.warn(error));
+  }
   const all = await api('/api/employees?include_inactive=true');
   state.allEmployees = all;
   state.employees = all.filter((employee) => employee.active);
@@ -164,8 +227,23 @@ async function loadEmployees() {
   fillScopeSelect();
 }
 
+function activeDepartmentNames() {
+  return state.departments.filter((department) => department.active).map((item) => item.name);
+}
+
+function fillEmployeeDepartmentSelect(selected) {
+  const select = $('#employee-department');
+  if (!select) return;
+  const names = activeDepartmentNames();
+  if (selected && !names.includes(selected)) names.push(selected);
+  select.innerHTML = names.map((name) => `<option>${esc(name)}</option>`).join('');
+  if (selected) select.value = selected;
+  else if (names.length) select.value = names[0];
+}
+
 function renderEmployees() {
   const showInactive = $('#employee-include-inactive').checked;
+  const writable = can('employee:write');
   const rows = state.allEmployees.filter((employee) => showInactive || employee.active);
   const body = $('#employee-rows');
   if (!rows.length) {
@@ -186,10 +264,12 @@ function renderEmployees() {
         <td class="num">${(Number(employee.housing_fund_rate) * 100).toFixed(2)}%</td>
         <td>${employee.email ? esc(employee.email) : '<span class="hint">未维护</span>'}</td>
         <td><span class="status ${employee.active ? 'SENT' : 'FAILED'}">${employee.active ? '在职' : '停用'}</span></td>
-        <td>
-          <button class="link" data-edit-employee="${esc(employee.employee_id)}">编辑</button>
-          ${employee.active ? `<button class="link danger-text" data-deactivate="${esc(employee.employee_id)}">停用</button>` : ''}
-        </td>
+        <td>${
+          writable
+            ? `<button class="link" data-edit-employee="${esc(employee.employee_id)}">编辑</button>
+          ${employee.active ? `<button class="link danger-text" data-deactivate="${esc(employee.employee_id)}">停用</button>` : ''}`
+            : '<span class="hint">只读</span>'
+        }</td>
       </tr>`
     )
     .join('');
@@ -201,6 +281,7 @@ function showEmployeeForm(employee) {
   $('#employee-form-title').textContent = employee
     ? `编辑员工 ${employee.employee_id}`
     : '新增员工';
+  fillEmployeeDepartmentSelect(employee ? employee.department : null);
   if (employee) {
     Object.entries(employee).forEach(([key, value]) => {
       const input = form.elements[key];
@@ -238,7 +319,12 @@ function fillEmployeeSelect() {
 function fillScopeSelect() {
   const select = $('#run-scope');
   const previous = select.value;
-  const departments = [...new Set(state.employees.map((employee) => employee.department))];
+  const departments = [
+    ...new Set([
+      ...activeDepartmentNames(),
+      ...state.employees.map((employee) => employee.department),
+    ]),
+  ].filter(Boolean);
   select.innerHTML =
     '<option value="全部">全部</option>' +
     departments.map((department) => `<option>${esc(department)}</option>`).join('');
@@ -255,6 +341,7 @@ async function loadReviews() {
 }
 
 function renderReviews() {
+  const writable = can('review:write');
   const body = $('#review-rows');
   if (!state.reviews.length) {
     body.innerHTML = '<tr><td colspan="7" class="hint">该期间暂无考核记录</td></tr>';
@@ -270,10 +357,12 @@ function renderReviews() {
         <td class="num">${Number(review.score).toFixed(2)}</td>
         <td class="num">${Number(review.coefficient).toFixed(4)}</td>
         <td>${esc(review.comment)}</td>
-        <td>
-          <button class="link" data-edit-review="${esc(review.employee_id)}" data-period="${esc(review.period)}">编辑</button>
-          <button class="link danger-text" data-delete-review="${esc(review.employee_id)}" data-period="${esc(review.period)}">删除</button>
-        </td>
+        <td>${
+          writable
+            ? `<button class="link" data-edit-review="${esc(review.employee_id)}" data-period="${esc(review.period)}">编辑</button>
+          <button class="link danger-text" data-delete-review="${esc(review.employee_id)}" data-period="${esc(review.period)}">删除</button>`
+            : '<span class="hint">只读</span>'
+        }</td>
       </tr>`
     )
     .join('');
@@ -316,9 +405,10 @@ function selectPolicy(city) {
   state.currentPolicy = item.policy;
   renderPolicyCities();
   $('#policy-title').textContent = `城市政策 · ${city}`;
+  const writable = can('policy:write');
   $('#policy-fields').innerHTML = POLICY_FIELDS.map(([key, label, step]) => {
     const value = item.policy[key];
-    return `<label>${esc(label)}<input name="${key}" type="number" step="${step}" value="${value === null || value === undefined ? '' : esc(value)}"></label>`;
+    return `<label>${esc(label)}<input name="${key}" type="number" step="${step}" value="${value === null || value === undefined ? '' : esc(value)}" ${writable ? '' : 'disabled'}></label>`;
   }).join('');
   $('#policy-tax-rows').innerHTML = (item.policy.tax_brackets || [])
     .map(
@@ -346,6 +436,7 @@ async function loadAttendance() {
 function renderAttendance(period) {
   const byEmployee = new Map(state.attendance.map((item) => [item.employee_id, item]));
   const body = $('#attendance-rows');
+  const editable = can('attendance:write');
   if (!state.employees.length) {
     body.innerHTML = '<tr><td colspan="11" class="hint">暂无在职员工</td></tr>';
     return;
@@ -361,7 +452,7 @@ function renderAttendance(period) {
         holiday_overtime_hours: 0,
       };
       const field = (name, label) =>
-        `<td class="num"><input class="small" type="number" min="0" step="0.5" data-field="${name}" value="${esc(item[name])}" aria-label="${label}"></td>`;
+        `<td class="num"><input class="small" type="number" min="0" step="0.5" data-field="${name}" value="${esc(item[name])}" aria-label="${label}" ${editable ? '' : 'disabled'}></td>`;
       return `
         <tr>
           <td>${esc(employee.employee_id)}</td>
@@ -374,7 +465,7 @@ function renderAttendance(period) {
           ${field('rest_day_overtime_hours', '休息日加班')}
           ${field('holiday_overtime_hours', '节假日加班')}
           <td>${byEmployee.has(employee.employee_id) ? '<span class="status SENT">已录入</span>' : '<span class="status PENDING">未录入</span>'}</td>
-          <td><button class="tiny primary" data-save-attendance="${esc(employee.employee_id)}" data-period="${esc(period)}">保存</button></td>
+          <td>${editable ? `<button class="tiny primary" data-save-attendance="${esc(employee.employee_id)}" data-period="${esc(period)}">保存</button>` : '<span class="hint">只读</span>'}</td>
         </tr>`;
     })
     .join('');
@@ -410,7 +501,7 @@ function renderRunDetail() {
     return;
   }
   const run = detail.run;
-  const editable = run.status === 'DRAFT';
+  const editable = run.status === 'DRAFT' && can('payroll:write');
   renderRunSummary(run);
   $('#run-panel').classList.remove('hidden');
   $('#run-title').textContent = `批次 #${run.run_id} · ${run.period} · ${run.scope}`;
@@ -463,7 +554,7 @@ function renderRunDetail() {
   $('#run-apply-adjust').classList.toggle('hidden', !editable);
   $('#run-finalize').classList.toggle('hidden', !editable);
   $('#run-finalize').disabled = state.previewDirty || failures.length > 0;
-  $('#run-send').classList.toggle('hidden', run.status !== 'FINALIZED');
+  $('#run-send').classList.toggle('hidden', run.status !== 'FINALIZED' || !can('payroll:write'));
   $('#run-send').disabled = state.previewDirty;
   const excel = $('#run-excel');
   const hasExcel = Boolean(run.excel_path);
@@ -762,6 +853,242 @@ async function importWorkbook(type, input) {
   }
 }
 
+// ---------------------------------------------------------------- 部门
+
+async function loadDepartments(includeInactive = true) {
+  state.departments = await api(
+    '/api/admin/departments?include_inactive=' + includeInactive
+  );
+  renderDepartments();
+  fillEmployeeDepartmentSelect($('#employee-department').value || null);
+  fillUserDepartmentSelect();
+  fillScopeSelect();
+}
+
+function renderDepartments() {
+  const body = $('#department-rows');
+  if (!body) return;
+  if (!state.departments.length) {
+    body.innerHTML = '<tr><td colspan="6" class="hint">暂无部门</td></tr>';
+    return;
+  }
+  body.innerHTML = state.departments
+    .map(
+      (department) => `
+      <tr>
+        <td>${esc(department.name)}</td>
+        <td>${esc(department.description) || '<span class="hint">—</span>'}</td>
+        <td class="num">${department.employee_count}</td>
+        <td class="num">${department.user_count}</td>
+        <td><span class="status ${department.active ? 'SENT' : 'FAILED'}">${department.active ? '启用' : '停用'}</span></td>
+        <td>
+          <button class="link" data-edit-department="${department.id}">编辑</button>
+          <button class="link danger-text" data-delete-department="${department.id}">删除</button>
+        </td>
+      </tr>`
+    )
+    .join('');
+}
+
+function showDepartmentForm(department) {
+  const form = $('#department-form');
+  form.reset();
+  form.dataset.departmentId = department ? department.id : '';
+  $('#department-form-title').textContent = department
+    ? `编辑部门 · ${department.name}`
+    : '新增部门';
+  form.elements.name.value = department ? department.name : '';
+  form.elements.description.value = department ? department.description : '';
+  form.elements.active.checked = department ? department.active : true;
+  form.classList.remove('hidden');
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function fillUserDepartmentSelect() {
+  const select = $('#user-department');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML =
+    '<option value="">未分配</option>' +
+    state.departments
+      .map(
+        (department) =>
+          `<option value="${department.id}">${esc(department.name)}${department.active ? '' : '（停用）'}</option>`
+      )
+      .join('');
+  if (previous) select.value = previous;
+}
+
+// ---------------------------------------------------------------- 角色
+
+async function loadRolesTab() {
+  if (!state.permissionOptions.length) {
+    state.permissionOptions = await api('/api/admin/permissions');
+  }
+  await loadRoles();
+  if (state.selectedRoleCode) {
+    selectRole(state.selectedRoleCode);
+  } else if (state.roles.length) {
+    selectRole(state.roles[0].code);
+  } else {
+    showRoleForm(null);
+  }
+}
+
+async function loadRoles() {
+  state.roles = await api('/api/admin/roles');
+  renderRoleList();
+  fillUserRoleSelect();
+}
+
+function renderRoleList() {
+  const list = $('#role-list');
+  if (!list) return;
+  list.innerHTML = state.roles
+    .map(
+      (role) => `
+      <li data-role="${esc(role.code)}" class="${role.code === state.selectedRoleCode ? 'active' : ''}">
+        <span>${esc(role.name)} <span class="hint">${esc(role.code)}</span>
+          ${role.builtin ? '<span class="status SENT">内置</span>' : ''}</span>
+        <span class="hint">${role.user_count} 人
+          ${role.builtin ? '' : `<button class="link danger-text" data-delete-role="${esc(role.code)}">删除</button>`}
+        </span>
+      </li>`
+    )
+    .join('');
+}
+
+function selectRole(code) {
+  const role = state.roles.find((item) => item.code === code);
+  if (!role) {
+    showRoleForm(null);
+    return;
+  }
+  state.selectedRoleCode = role.code;
+  const form = $('#role-form');
+  form.dataset.mode = 'edit';
+  form.dataset.code = role.code;
+  $('#role-form-title').textContent = `编辑角色 · ${role.name}`;
+  form.elements.code.value = role.code;
+  form.elements.code.readOnly = true;
+  form.elements.name.value = role.name;
+  form.elements.description.value = role.description || '';
+  renderRolePermissions(role.permissions || [], role.builtin);
+  $('#role-hint').textContent = role.builtin
+    ? '内置角色不可修改权限或删除。'
+    : `${role.user_count} 个用户正在使用该角色。`;
+  $('#role-save').disabled = role.builtin;
+  renderRoleList();
+}
+
+function showRoleForm() {
+  state.selectedRoleCode = null;
+  const form = $('#role-form');
+  form.reset();
+  form.dataset.mode = 'new';
+  form.dataset.code = '';
+  $('#role-form-title').textContent = '新建角色';
+  form.elements.code.readOnly = false;
+  renderRolePermissions([], false);
+  $('#role-hint').textContent = '自定义角色可自由组合下列权限。';
+  $('#role-save').disabled = false;
+  renderRoleList();
+}
+
+function renderRolePermissions(selected, disabled) {
+  $('#role-permissions').innerHTML = state.permissionOptions
+    .map(
+      (permission) => `
+      <label class="permission-item">
+        <input type="checkbox" value="${esc(permission.code)}"
+          ${selected.includes(permission.code) ? 'checked' : ''}
+          ${disabled ? 'disabled' : ''}>
+        <span>${esc(permission.label)}</span>
+      </label>`
+    )
+    .join('');
+}
+
+function fillUserRoleSelect() {
+  const select = $('#user-role');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = state.roles
+    .map(
+      (role) =>
+        `<option value="${esc(role.code)}">${esc(role.name)}（${esc(role.code)}）</option>`
+    )
+    .join('');
+  if (previous && state.roles.some((role) => role.code === previous)) {
+    select.value = previous;
+  }
+}
+
+// ---------------------------------------------------------------- 用户
+
+async function loadUsersTab() {
+  if (!state.roles.length) await loadRoles();
+  if (!state.departments.length) await loadDepartments(true);
+  await loadUsers();
+}
+
+async function loadUsers() {
+  state.users = await api('/api/admin/users');
+  renderUsers();
+}
+
+function renderUsers() {
+  const body = $('#user-rows');
+  if (!body) return;
+  if (!state.users.length) {
+    body.innerHTML = '<tr><td colspan="7" class="hint">暂无用户</td></tr>';
+    return;
+  }
+  body.innerHTML = state.users
+    .map(
+      (user) => `
+      <tr>
+        <td>${esc(user.username)}</td>
+        <td>${esc(user.display_name)}</td>
+        <td>${esc(user.role_name || user.role_code)}</td>
+        <td>${user.department_name ? esc(user.department_name) : '<span class="hint">未分配</span>'}</td>
+        <td><span class="status ${user.active ? 'SENT' : 'FAILED'}">${user.active ? '启用' : '停用'}</span></td>
+        <td>${formatDateTime(user.last_login_at)}</td>
+        <td>
+          <button class="link" data-edit-user="${user.id}">编辑</button>
+          ${
+            state.me && user.id === state.me.id
+              ? ''
+              : `<button class="link ${user.active ? 'danger-text' : ''}" data-toggle-user="${user.id}">${user.active ? '停用' : '启用'}</button>`
+          }
+        </td>
+      </tr>`
+    )
+    .join('');
+}
+
+function showUserForm(user) {
+  const form = $('#user-form');
+  form.reset();
+  form.dataset.userId = user ? user.id : '';
+  $('#user-form-title').textContent = user ? `编辑用户 · ${user.username}` : '新增用户';
+  fillUserRoleSelect();
+  fillUserDepartmentSelect();
+  form.elements.username.readOnly = Boolean(user);
+  form.elements.username.value = user ? user.username : '';
+  form.elements.display_name.value = user ? user.display_name : '';
+  form.elements.role_code.value = user ? user.role_code : state.roles[0]?.code || '';
+  form.elements.department_id.value =
+    user && user.department_id ? String(user.department_id) : '';
+  form.elements.active.checked = user ? user.active : true;
+  form.elements.password.value = '';
+  form.elements.password.required = !user;
+  const passwordLabel = $('#user-password-label');
+  passwordLabel.childNodes[0].nodeValue = user ? '重置密码（留空不修改）' : '密码';
+  form.classList.remove('hidden');
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function chatEmptyMarkup() {
   return `
     <div class="chat-empty">
@@ -775,29 +1102,142 @@ function chatEmptyMarkup() {
     </div>`;
 }
 
-function appendChatMessage(role, text, tools, isError) {
+const CHAT_GROUP_WINDOW_MS = 2 * 60 * 1000;
+const chatRender = { role: null, dayKey: null, time: 0 };
+
+function resetChatRender() {
+  chatRender.role = null;
+  chatRender.dayKey = null;
+  chatRender.time = 0;
+}
+
+function chatMessageDate(value) {
+  if (!value) return new Date();
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? new Date() : date;
+}
+
+function chatDayKey(date) {
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function chatDayLabel(date) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(date);
+  target.setHours(0, 0, 0, 0);
+  const days = Math.round((today.getTime() - target.getTime()) / 86400000);
+  if (days === 0) return '今天';
+  if (days === 1) return '昨天';
+  if (date.getFullYear() === today.getFullYear()) {
+    return `${date.getMonth() + 1}月${date.getDate()}日`;
+  }
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function chatClock(date) {
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function chatAvatarText(role) {
+  if (role === 'assistant') return '薪';
+  const name = state.me && (state.me.display_name || state.me.username);
+  return Array.from(String(name || '我').trim())[0] || '我';
+}
+
+function appendChatDayDivider(container, date) {
+  const divider = document.createElement('div');
+  divider.className = 'chat-day';
+  divider.textContent = chatDayLabel(date);
+  container.append(divider);
+}
+
+function appendChatNotice(text) {
   const container = $('#chat-messages');
   const empty = container.querySelector('.chat-empty');
   if (empty) empty.remove();
-  const wrapper = document.createElement('div');
-  wrapper.className =
-    'chat-message ' + (role === 'user' ? 'user' : 'assistant') + (isError ? ' error' : '');
-  const label = document.createElement('div');
-  label.className = 'chat-role';
-  label.textContent = role === 'user' ? '你' : '薪酬智能体';
+  const notice = document.createElement('div');
+  notice.className = 'chat-notice';
+  const body = document.createElement('span');
+  body.textContent = text || '对话失败';
+  notice.append(body);
+  container.append(notice);
+  container.scrollTop = container.scrollHeight;
+  return notice;
+}
+
+function appendChatMessage(role, text, tools, isError, options = {}) {
+  const container = $('#chat-messages');
+  const empty = container.querySelector('.chat-empty');
+  if (empty) empty.remove();
+
+  const date = chatMessageDate(options.createdAt);
+  const dayKey = chatDayKey(date);
+  if (chatRender.dayKey !== dayKey) {
+    appendChatDayDivider(container, date);
+    chatRender.dayKey = dayKey;
+  }
+  if (isError) {
+    appendChatNotice(text);
+    chatRender.role = null;
+    chatRender.time = date.getTime();
+    return null;
+  }
+
+  const gap = date.getTime() - chatRender.time;
+  const grouped =
+    chatRender.role === role &&
+    chatRender.dayKey === dayKey &&
+    gap >= 0 &&
+    gap <= CHAT_GROUP_WINDOW_MS;
+  const row = document.createElement('div');
+  row.className =
+    'chat-row ' + role + (grouped ? ' grouped' : '') + (options.animate ? ' chat-enter' : '');
+
+  const avatar = document.createElement('div');
+  avatar.className = 'chat-avatar ' + role;
+  avatar.textContent = chatAvatarText(role);
+
+  const main = document.createElement('div');
+  main.className = 'chat-main';
+  if (!grouped) {
+    const meta = document.createElement('div');
+    meta.className = 'chat-meta';
+    const name = document.createElement('span');
+    name.className = 'chat-name';
+    name.textContent = role === 'user' ? '你' : '薪酬智能体';
+    const time = document.createElement('span');
+    time.className = 'chat-time';
+    time.textContent = chatClock(date);
+    meta.append(name, time);
+    main.append(meta);
+  }
+
   const bubble = document.createElement('div');
   bubble.className = 'chat-bubble';
   bubble.textContent = text;
-  wrapper.append(label, bubble);
+  main.append(bubble);
+
   if (tools && tools.length) {
     const toolLabel = document.createElement('div');
     toolLabel.className = 'chat-tools';
     toolLabel.textContent = '调用工具：' + tools.join('、');
-    wrapper.append(toolLabel);
+    main.append(toolLabel);
   }
-  container.append(wrapper);
+
+  if (role === 'user') {
+    row.append(main, avatar);
+  } else {
+    row.append(avatar, main);
+  }
+  container.append(row);
+  chatRender.role = role;
+  chatRender.dayKey = dayKey;
+  chatRender.time = date.getTime();
   container.scrollTop = container.scrollHeight;
-  return wrapper;
+  return row;
 }
 
 const CHAT_TOOL_STATE = {
@@ -813,12 +1253,40 @@ function appendStreamingMessage() {
   const empty = container.querySelector('.chat-empty');
   if (empty) empty.remove();
 
-  const wrapper = document.createElement('div');
-  wrapper.className = 'chat-message assistant';
+  const date = new Date();
+  const dayKey = chatDayKey(date);
+  if (chatRender.dayKey !== dayKey) {
+    appendChatDayDivider(container, date);
+    chatRender.dayKey = dayKey;
+  }
+  const gap = date.getTime() - chatRender.time;
+  const grouped =
+    chatRender.role === 'assistant' &&
+    chatRender.dayKey === dayKey &&
+    gap >= 0 &&
+    gap <= CHAT_GROUP_WINDOW_MS;
 
-  const label = document.createElement('div');
-  label.className = 'chat-role';
-  label.textContent = '薪酬智能体';
+  const wrapper = document.createElement('div');
+  wrapper.className = 'chat-row assistant chat-enter' + (grouped ? ' grouped' : '');
+
+  const avatar = document.createElement('div');
+  avatar.className = 'chat-avatar assistant';
+  avatar.textContent = chatAvatarText('assistant');
+
+  const main = document.createElement('div');
+  main.className = 'chat-main';
+  if (!grouped) {
+    const meta = document.createElement('div');
+    meta.className = 'chat-meta';
+    const label = document.createElement('span');
+    label.className = 'chat-name';
+    label.textContent = '薪酬智能体';
+    const time = document.createElement('span');
+    time.className = 'chat-time';
+    time.textContent = chatClock(date);
+    meta.append(label, time);
+    main.append(meta);
+  }
 
   const thinking = document.createElement('details');
   thinking.className = 'chat-thinking empty';
@@ -837,12 +1305,20 @@ function appendStreamingMessage() {
 
   const bubble = document.createElement('div');
   bubble.className = 'chat-bubble chat-streaming';
+  const typing = document.createElement('span');
+  typing.className = 'chat-typing';
+  typing.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+  bubble.append(typing);
 
   const toolsLine = document.createElement('div');
   toolsLine.className = 'chat-tools hidden';
 
-  wrapper.append(label, thinking, bubble, toolsLine);
+  main.append(thinking, bubble, toolsLine);
+  wrapper.append(avatar, main);
   container.append(wrapper);
+  chatRender.role = 'assistant';
+  chatRender.dayKey = dayKey;
+  chatRender.time = date.getTime();
   container.scrollTop = container.scrollHeight;
 
   const startedAt = Date.now();
@@ -855,6 +1331,9 @@ function appendStreamingMessage() {
 
   const scroll = () => {
     container.scrollTop = container.scrollHeight;
+  };
+  const clearTyping = () => {
+    if (typing.isConnected) typing.remove();
   };
   const revealThinking = () => {
     thinking.classList.remove('empty');
@@ -963,6 +1442,7 @@ function appendStreamingMessage() {
     },
     appendText(delta) {
       if (!delta) return;
+      clearTyping();
       fullText += delta;
       bubble.textContent = fullText;
       scroll();
@@ -971,6 +1451,7 @@ function appendStreamingMessage() {
       if (finished) return;
       finished = true;
       activeAgent = null;
+      clearTyping();
       bubble.classList.remove('chat-streaming');
       if (!fullText && reply && reply.reply) {
         fullText = reply.reply;
@@ -990,24 +1471,38 @@ function appendStreamingMessage() {
     fail(message) {
       if (finished) return;
       finished = true;
-      wrapper.classList.add('error');
-      bubble.classList.remove('chat-streaming');
-      bubble.textContent = message || '对话失败';
-      summaryState.textContent = '失败';
-      if (!thinking.classList.contains('empty')) {
-        thinking.open = false;
+      clearTyping();
+      if (!wrapper.isConnected) return;
+      const hasThinking = !thinking.classList.contains('empty');
+      if (fullText) {
+        bubble.classList.remove('chat-streaming');
+        bubble.textContent = fullText;
+      } else {
+        bubble.remove();
       }
-      scroll();
+      summaryState.textContent = '失败';
+      if (hasThinking) {
+        thinking.open = false;
+      } else if (!fullText) {
+        wrapper.remove();
+      }
+      appendChatNotice(message || '对话失败');
+      chatRender.role = null;
     },
   };
 }
 
-async function streamChat(message, onEvent) {
-  const response = await fetch('/api/chat/stream', {
+async function streamChat(message, sessionId, onEvent, signal) {
+  const response = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({ message }),
+    signal,
   });
+  if (response.status === 401) {
+    window.location.href = '/login.html';
+    throw new Error('未登录或会话已过期');
+  }
   if (!response.ok) {
     let payload = null;
     try {
@@ -1061,6 +1556,141 @@ async function streamChat(message, onEvent) {
   }
 }
 
+function abortChatStream() {
+  if (state.chatController) {
+    state.chatController.abort();
+    state.chatController = null;
+  }
+  state.chatBusy = false;
+  $('#chat-send').disabled = false;
+}
+
+async function loadChatSessions() {
+  state.chatSessions = await api('/api/chat/sessions');
+  renderChatSessions();
+  renderChatTitle();
+}
+
+function renderChatSessions() {
+  const container = $('#chat-sessions');
+  if (!state.chatSessions.length) {
+    container.innerHTML = '<p class="hint">暂无会话</p>';
+    return;
+  }
+  container.innerHTML = state.chatSessions
+    .map(
+      (session) => `
+      <div class="chat-session-item ${session.id === state.chatSessionId ? 'active' : ''}"
+           data-session-id="${session.id}">
+        <div class="chat-session-info">
+          <div class="chat-session-title">${esc(session.title)}</div>
+          <div class="chat-session-meta">${formatDateTime(session.updated_at)} · ${session.message_count} 条</div>
+        </div>
+        <div class="chat-session-actions">
+          <button class="link" data-rename-session="${session.id}">改名</button>
+          <button class="link danger-text" data-delete-session="${session.id}">删除</button>
+        </div>
+      </div>`
+    )
+    .join('');
+}
+
+function renderChatTitle() {
+  const session = state.chatSessions.find(
+    (item) => item.id === state.chatSessionId
+  );
+  $('#chat-title').textContent = session ? session.title : '新会话';
+}
+
+async function initChat() {
+  if (state.chatBusy) return;
+  await loadChatSessions();
+  const exists = state.chatSessions.some(
+    (item) => item.id === state.chatSessionId
+  );
+  if (exists) {
+    renderChatTitle();
+    return;
+  }
+  if (state.chatSessions.length) {
+    await selectChatSession(state.chatSessions[0].id);
+  } else {
+    await createChatSession();
+  }
+}
+
+async function createChatSession() {
+  const session = await api('/api/chat/sessions', {
+    method: 'POST',
+    body: { title: '新会话' },
+  });
+  await loadChatSessions();
+  await selectChatSession(session.id, true);
+  return session;
+}
+
+async function selectChatSession(sessionId, force) {
+  if (!force && state.chatSessionId === sessionId) {
+    renderChatSessions();
+    return;
+  }
+  abortChatStream();
+  state.chatSessionId = sessionId;
+  renderChatSessions();
+  renderChatTitle();
+  await loadChatMessages(sessionId);
+}
+
+async function loadChatMessages(sessionId) {
+  const messages = await api(`/api/chat/sessions/${sessionId}/messages`);
+  if (state.chatSessionId !== sessionId) return;
+  const container = $('#chat-messages');
+  container.innerHTML = '';
+  resetChatRender();
+  if (!messages.length) {
+    container.innerHTML = chatEmptyMarkup();
+    return;
+  }
+  messages.forEach((message) => appendStoredMessage(message));
+  container.scrollTop = container.scrollHeight;
+}
+
+function appendStoredMessage(message) {
+  const isUser = message.role === 'USER';
+  appendChatMessage(
+    isUser ? 'user' : 'assistant',
+    message.content,
+    message.tools,
+    message.role === 'ERROR',
+    { createdAt: message.created_at, animate: false }
+  );
+}
+
+async function renameChatSession(sessionId) {
+  const session = state.chatSessions.find((item) => item.id === sessionId);
+  const title = prompt('会话名称', session ? session.title : '');
+  if (title === null || !title.trim()) return;
+  await api(`/api/chat/sessions/${sessionId}`, {
+    method: 'PUT',
+    body: { title: title.trim() },
+  });
+  await loadChatSessions();
+}
+
+async function deleteChatSession(sessionId) {
+  const session = state.chatSessions.find((item) => item.id === sessionId);
+  if (!confirm(`删除会话「${session ? session.title : sessionId}」及其全部消息？`)) {
+    return;
+  }
+  await api(`/api/chat/sessions/${sessionId}`, { method: 'DELETE' });
+  if (state.chatSessionId === sessionId) {
+    state.chatSessionId = null;
+    $('#chat-messages').innerHTML = chatEmptyMarkup();
+    resetChatRender();
+  }
+  await initChat();
+}
+
 async function sendChat(override) {
   if (state.chatBusy) return;
   const input = $('#chat-input');
@@ -1069,15 +1699,26 @@ async function sendChat(override) {
     input.focus();
     return;
   }
-  appendChatMessage('user', message);
+  if (!state.chatSessionId) {
+    try {
+      await createChatSession();
+    } catch (error) {
+      showError(error);
+      return;
+    }
+  }
+  const sessionId = state.chatSessionId;
+  appendChatMessage('user', message, null, false, { animate: true });
   input.value = '';
   state.chatBusy = true;
   const button = $('#chat-send');
   button.disabled = true;
   const view = appendStreamingMessage();
+  const controller = new AbortController();
+  state.chatController = controller;
   let done = false;
   try {
-    await streamChat(message, (event, data) => {
+    await streamChat(message, sessionId, (event, data) => {
       switch (event) {
         case 'agent_start':
           view.startAgent(data.agent, data.label);
@@ -1118,23 +1759,37 @@ async function sendChat(override) {
     });
     if (!done) view.finish(null);
   } catch (error) {
-    view.fail(error.message);
+    if (error.name === 'AbortError') {
+      view.fail('已切换会话，本次回答会在后台继续并写入会话记录');
+    } else {
+      view.fail(error.message);
+    }
   } finally {
+    if (state.chatController === controller) {
+      state.chatController = null;
+    }
     state.chatBusy = false;
     button.disabled = false;
     input.focus();
+    loadChatSessions().catch(() => {});
   }
 }
 
 async function resetChat() {
+  if (!state.chatSessionId) {
+    toast('请先新建会话', 'error');
+    return;
+  }
   if (state.chatBusy) {
     toast('回答生成中，请稍候再重置', 'error');
     return;
   }
-  if (!confirm('清空对话并重置智能体上下文？')) return;
+  if (!confirm('清空当前会话的消息并重置智能体上下文？')) return;
   try {
-    await api('/api/chat/reset', { method: 'POST' });
+    await api(`/api/chat/sessions/${state.chatSessionId}/reset`, { method: 'POST' });
     $('#chat-messages').innerHTML = chatEmptyMarkup();
+    resetChatRender();
+    await loadChatSessions();
     toast('对话已重置', 'success');
   } catch (error) {
     showError(error);
@@ -1173,6 +1828,241 @@ function bindEvents() {
   $('#chat-messages').addEventListener('click', (event) => {
     const example = event.target.dataset.chatExample;
     if (example) sendChat(example);
+  });
+  $('#chat-new').addEventListener('click', () => createChatSession().catch(showError));
+  $('#chat-sessions').addEventListener('click', async (event) => {
+    const renameId = Number(event.target.dataset.renameSession || 0);
+    if (renameId) {
+      try {
+        await renameChatSession(renameId);
+      } catch (error) {
+        showError(error);
+      }
+      return;
+    }
+    const deleteId = Number(event.target.dataset.deleteSession || 0);
+    if (deleteId) {
+      try {
+        await deleteChatSession(deleteId);
+      } catch (error) {
+        showError(error);
+      }
+      return;
+    }
+    const item = event.target.closest('[data-session-id]');
+    if (item) {
+      try {
+        await selectChatSession(Number(item.dataset.sessionId));
+      } catch (error) {
+        showError(error);
+      }
+    }
+  });
+
+  $('#logout').addEventListener('click', logout);
+  $('#change-password').addEventListener('click', openPasswordDialog);
+  $('#password-cancel').addEventListener('click', () => $('#password-dialog').close());
+  $('#password-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    if (form.elements.new_password.value !== form.elements.confirm_password.value) {
+      toast('两次输入的新密码不一致', 'error');
+      return;
+    }
+    try {
+      await api('/api/auth/password', {
+        method: 'POST',
+        body: {
+          old_password: form.elements.old_password.value,
+          new_password: form.elements.new_password.value,
+        },
+      });
+      $('#password-dialog').close();
+      toast('密码已修改', 'success');
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  $('#user-new').addEventListener('click', () => showUserForm(null));
+  $('#user-cancel').addEventListener('click', () => {
+    $('#user-form').classList.add('hidden');
+  });
+  $('#user-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const id = form.dataset.userId ? Number(form.dataset.userId) : null;
+    const password = form.elements.password.value;
+    const departmentId = form.elements.department_id.value
+      ? Number(form.elements.department_id.value)
+      : null;
+    const payload = {
+      display_name: form.elements.display_name.value.trim(),
+      role_code: form.elements.role_code.value,
+      department_id: departmentId,
+    };
+    try {
+      if (id) {
+        payload.active = form.elements.active.checked;
+        await api(`/api/admin/users/${id}`, { method: 'PUT', body: payload });
+        if (password) {
+          await api(`/api/admin/users/${id}/password`, {
+            method: 'POST',
+            body: { password },
+          });
+        }
+        toast('用户已更新', 'success');
+      } else {
+        if (!password) {
+          toast('请输入初始密码', 'error');
+          return;
+        }
+        await api('/api/admin/users', {
+          method: 'POST',
+          body: {
+            username: form.elements.username.value.trim(),
+            password,
+            ...payload,
+          },
+        });
+        toast('用户已创建', 'success');
+      }
+      form.classList.add('hidden');
+      await loadUsers();
+    } catch (error) {
+      showError(error);
+    }
+  });
+  $('#user-rows').addEventListener('click', async (event) => {
+    const editId = Number(event.target.dataset.editUser || 0);
+    if (editId) {
+      const user = state.users.find((item) => item.id === editId);
+      if (user) showUserForm(user);
+      return;
+    }
+    const toggleId = Number(event.target.dataset.toggleUser || 0);
+    if (!toggleId) return;
+    const user = state.users.find((item) => item.id === toggleId);
+    if (!user) return;
+    if (!confirm(`${user.active ? '停用' : '启用'}用户 ${user.username}？`)) return;
+    try {
+      await api(`/api/admin/users/${user.id}`, {
+        method: 'PUT',
+        body: {
+          display_name: user.display_name,
+          role_code: user.role_code,
+          department_id: user.department_id,
+          active: !user.active,
+        },
+      });
+      toast(`用户已${user.active ? '停用' : '启用'}`, 'success');
+      await loadUsers();
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  $('#department-new').addEventListener('click', () => showDepartmentForm(null));
+  $('#department-cancel').addEventListener('click', () => {
+    $('#department-form').classList.add('hidden');
+  });
+  $('#department-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const id = form.dataset.departmentId ? Number(form.dataset.departmentId) : null;
+    const payload = {
+      name: form.elements.name.value.trim(),
+      description: form.elements.description.value.trim(),
+      active: form.elements.active.checked,
+    };
+    try {
+      if (id) {
+        await api(`/api/admin/departments/${id}`, { method: 'PUT', body: payload });
+        toast('部门已更新', 'success');
+      } else {
+        await api('/api/admin/departments', { method: 'POST', body: payload });
+        toast('部门已创建', 'success');
+      }
+      form.classList.add('hidden');
+      await loadDepartments(true);
+    } catch (error) {
+      showError(error);
+    }
+  });
+  $('#department-rows').addEventListener('click', async (event) => {
+    const editId = Number(event.target.dataset.editDepartment || 0);
+    if (editId) {
+      const department = state.departments.find((item) => item.id === editId);
+      if (department) showDepartmentForm(department);
+      return;
+    }
+    const deleteId = Number(event.target.dataset.deleteDepartment || 0);
+    if (!deleteId) return;
+    const department = state.departments.find((item) => item.id === deleteId);
+    if (!department) return;
+    if (!confirm(`删除部门「${department.name}」？`)) return;
+    try {
+      await api(`/api/admin/departments/${deleteId}`, { method: 'DELETE' });
+      toast('部门已删除', 'success');
+      await loadDepartments(true);
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  $('#role-new').addEventListener('click', showRoleForm);
+  $('#role-list').addEventListener('click', async (event) => {
+    const deleteCode = event.target.dataset.deleteRole;
+    if (deleteCode) {
+      if (!confirm(`删除角色 ${deleteCode}？`)) return;
+      try {
+        await api(`/api/admin/roles/${encodeURIComponent(deleteCode)}`, {
+          method: 'DELETE',
+        });
+        state.selectedRoleCode = null;
+        await loadRolesTab();
+        toast('角色已删除', 'success');
+      } catch (error) {
+        showError(error);
+      }
+      return;
+    }
+    const item = event.target.closest('li[data-role]');
+    if (item) selectRole(item.dataset.role);
+  });
+  $('#role-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    if (form.dataset.mode === 'edit') {
+      const role = state.roles.find((item) => item.code === form.dataset.code);
+      if (role && role.builtin) return;
+    }
+    const permissions = $$('#role-permissions input:checked').map((input) => input.value);
+    const payload = {
+      name: form.elements.name.value.trim(),
+      description: form.elements.description.value.trim(),
+      permissions,
+    };
+    try {
+      if (form.dataset.mode === 'new') {
+        const code = form.elements.code.value.trim().toUpperCase();
+        const role = await api('/api/admin/roles', {
+          method: 'POST',
+          body: { ...payload, code },
+        });
+        state.selectedRoleCode = role.code;
+        toast('角色已创建', 'success');
+      } else {
+        await api(`/api/admin/roles/${encodeURIComponent(form.dataset.code)}`, {
+          method: 'PUT',
+          body: payload,
+        });
+        toast('角色已更新', 'success');
+      }
+      await loadRolesTab();
+    } catch (error) {
+      showError(error);
+    }
   });
 
   $('#employee-new').addEventListener('click', () => showEmployeeForm(null));
@@ -1395,7 +2285,10 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', async () => {
   bindEvents();
   try {
+    await loadMe();
     await loadHealth();
+    if (can('department:read')) await loadDepartments(true);
+    if (can('role:read')) await loadRoles();
     await loadEmployees();
     fillScopeSelect();
   } catch (error) {

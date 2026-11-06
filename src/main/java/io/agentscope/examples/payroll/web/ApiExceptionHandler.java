@@ -22,6 +22,16 @@ public class ApiExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, e.getMessage());
     }
 
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<ApiResponse> handleUnauthorized(UnauthorizedException e) {
+        return error(HttpStatus.UNAUTHORIZED, e.getMessage());
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<ApiResponse> handleForbidden(ForbiddenException e) {
+        return error(HttpStatus.FORBIDDEN, e.getMessage());
+    }
+
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse> handleUnreadable(HttpMessageNotReadableException e) {
         return error(HttpStatus.BAD_REQUEST, "请求体格式错误，请检查 JSON 字段");

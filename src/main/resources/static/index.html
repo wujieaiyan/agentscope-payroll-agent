@@ -12,7 +12,12 @@
     <h1>薪酬管理台</h1>
     <span class="sub">Payroll Admin · 本地单机 · 金额由确定性引擎计算</span>
   </div>
-  <div id="health" class="badge">连接中…</div>
+  <div class="header-actions">
+    <span id="health" class="badge">连接中…</span>
+    <span id="current-user" class="badge user-badge">未登录</span>
+    <button id="change-password" class="ghost hidden">修改密码</button>
+    <button id="logout" class="ghost hidden">退出</button>
+  </div>
 </header>
 
 <nav id="tabs">
@@ -21,7 +26,10 @@
   <button data-tab="policies">城市政策</button>
   <button data-tab="attendance">考勤</button>
   <button data-tab="payroll">工资批次</button>
-  <button data-tab="chat">智能问答</button>
+  <button data-tab="chat" data-permission="chat:use" class="hidden">智能问答</button>
+  <button data-tab="users" data-permission="user:manage" class="hidden">用户</button>
+  <button data-tab="departments" data-permission="department:manage" class="hidden">部门</button>
+  <button data-tab="roles" data-permission="role:manage" class="hidden">角色</button>
 </nav>
 
 <main>
@@ -36,9 +44,9 @@
 
   <section id="tab-employees" class="tab active">
     <div class="toolbar">
-      <button id="employee-new" class="primary">新增员工</button>
-      <label class="button file-button">导入 Excel<input type="file" id="employee-import" accept=".xlsx,.xls" hidden></label>
-      <a class="button" href="/api/import/templates/employees">下载导入模板</a>
+      <button id="employee-new" class="primary hidden" data-permission="employee:write">新增员工</button>
+      <label class="button file-button hidden" data-permission="import:use">导入 Excel<input type="file" id="employee-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button hidden" data-permission="import:use" href="/api/import/templates/employees">下载导入模板</a>
       <label class="inline"><input type="checkbox" id="employee-include-inactive"> 显示停用员工</label>
       <span class="hint">停用员工不再参与核算与批量出账，历史批次不受影响。</span>
     </div>
@@ -47,7 +55,7 @@
       <div class="grid">
         <label>工号<input name="employee_id" required placeholder="EMP007"></label>
         <label>姓名<input name="name" required></label>
-        <label>部门<input name="department" required></label>
+        <label>部门<select name="department" id="employee-department" required></select></label>
         <label>岗位<input name="position"></label>
         <label>城市<input name="city" value="北京"></label>
         <label>邮箱<input name="email" type="email" placeholder="name@example.com"></label>
@@ -82,11 +90,11 @@
     <div class="toolbar">
       <label class="inline">期间 <input type="month" id="review-period"></label>
       <button id="review-refresh">刷新</button>
-      <label class="button file-button">导入 Excel<input type="file" id="review-import" accept=".xlsx,.xls" hidden></label>
-      <a class="button" href="/api/import/templates/reviews">下载导入模板</a>
+      <label class="button file-button hidden" data-permission="import:use">导入 Excel<input type="file" id="review-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button hidden" data-permission="import:use" href="/api/import/templates/reviews">下载导入模板</a>
       <span class="hint">绩效系数 0–2，乘当月绩效奖金后进入应发、个税与实发；未维护考核时按系数 1 处理。</span>
     </div>
-    <form id="review-form" class="card form">
+    <form id="review-form" class="card form hidden" data-permission="review:write">
       <h2>录入 / 更新考核</h2>
       <div class="grid">
         <label>员工<select name="employee_id" id="review-employee" required></select></label>
@@ -109,7 +117,7 @@
 
   <section id="tab-policies" class="tab">
     <div class="toolbar">
-      <button id="policy-add">新增城市</button>
+      <button id="policy-add" class="hidden" data-permission="policy:write">新增城市</button>
       <span class="hint">城市政策决定社保基数上下限与缴费比例；个税税率表沿用全国累计预扣口径。</span>
     </div>
     <div class="split">
@@ -126,7 +134,7 @@
           <tbody id="policy-tax-rows"></tbody>
         </table>
         <div class="actions">
-          <button type="submit" class="primary">保存政策</button>
+          <button type="submit" class="primary hidden" id="policy-save" data-permission="policy:write">保存政策</button>
           <span id="policy-updated" class="hint"></span>
         </div>
       </form>
@@ -137,8 +145,8 @@
     <div class="toolbar">
       <label class="inline">期间 <input type="month" id="attendance-period"></label>
       <button id="attendance-load">加载考勤</button>
-      <label class="button file-button">导入 Excel<input type="file" id="attendance-import" accept=".xlsx,.xls" hidden></label>
-      <a class="button" href="/api/import/templates/attendance">下载导入模板</a>
+      <label class="button file-button hidden" data-permission="import:use">导入 Excel<input type="file" id="attendance-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button hidden" data-permission="import:use" href="/api/import/templates/attendance">下载导入模板</a>
       <span class="hint">考勤由 HR 录入，系统不会按全勤推算；缺勤数据缺失的员工会在核算中失败并给出原因。</span>
     </div>
     <div class="card">
@@ -160,7 +168,7 @@
     <div class="toolbar">
       <label class="inline">期间 <input type="month" id="run-period"></label>
       <label class="inline">范围 <select id="run-scope"></select></label>
-      <button id="run-preview" class="primary">预览核算</button>
+      <button id="run-preview" class="primary hidden" data-permission="payroll:write">预览核算</button>
       <span class="hint">预览可微调绩效奖金与其他补贴；出账时系统会重新核算并落库。</span>
     </div>
 
@@ -222,29 +230,140 @@
   <section id="tab-chat" class="tab">
     <div class="toolbar">
       <span class="badge" id="chat-model">模型加载中…</span>
-      <button id="chat-reset">清空对话</button>
-      <span class="hint">对话只做查询、核算与解释，数据维护请使用员工/考核/考勤页签；金额始终来自确定性引擎。</span>
+      <span class="hint">每个会话拥有独立上下文，消息仅本人可见；对话只做查询、核算与解释，金额始终来自确定性引擎。</span>
     </div>
-    <div class="card chat-card">
-      <div id="chat-messages" class="chat-messages">
-        <div class="chat-empty">
-          <strong>可以这样问：</strong>
-          <div class="chat-examples">
-            <button type="button" data-chat-example="算一下张伟 2026-10 的工资">算一下张伟 2026-10 的工资</button>
-            <button type="button" data-chat-example="研发部 2026-10 工资表">研发部 2026-10 工资表</button>
-            <button type="button" data-chat-example="上海社保基数上下限是多少？">上海社保基数上下限是多少？</button>
-            <button type="button" data-chat-example="替我检查 EMP005 2026-10 工资能不能发">检查 EMP005 能否发薪</button>
+    <div class="chat-layout">
+      <aside class="card chat-sidebar">
+        <div class="chat-sidebar-head">
+          <strong>我的会话</strong>
+          <button id="chat-new" class="tiny primary">新建</button>
+        </div>
+        <div id="chat-sessions" class="chat-sessions"></div>
+      </aside>
+      <div class="card chat-card">
+        <div class="chat-main-head">
+          <strong id="chat-title">新会话</strong>
+          <button id="chat-reset" class="tiny">重置上下文</button>
+        </div>
+        <div id="chat-messages" class="chat-messages">
+          <div class="chat-empty">
+            <strong>可以这样问：</strong>
+            <div class="chat-examples">
+              <button type="button" data-chat-example="算一下张伟 2026-10 的工资">算一下张伟 2026-10 的工资</button>
+              <button type="button" data-chat-example="研发部 2026-10 工资表">研发部 2026-10 工资表</button>
+              <button type="button" data-chat-example="上海社保基数上下限是多少？">上海社保基数上下限是多少？</button>
+              <button type="button" data-chat-example="替我检查 EMP005 2026-10 工资能不能发">检查 EMP005 能否发薪</button>
+            </div>
           </div>
         </div>
+        <form id="chat-form" class="chat-form">
+          <textarea id="chat-input" rows="2" maxlength="2000"
+                    placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+          <button type="submit" id="chat-send" class="primary">发送</button>
+        </form>
       </div>
-      <form id="chat-form" class="chat-form">
-        <textarea id="chat-input" rows="2" maxlength="2000"
-                  placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
-        <button type="submit" id="chat-send" class="primary">发送</button>
+    </div>
+  </section>
+
+  <section id="tab-users" class="tab">
+    <div class="toolbar">
+      <button id="user-new" class="primary">新增用户</button>
+      <span class="hint">停用用户后无法登录；系统至少保留一名启用状态的管理员。</span>
+    </div>
+    <form id="user-form" class="card form hidden">
+      <h2 id="user-form-title">新增用户</h2>
+      <div class="grid">
+        <label>用户名<input name="username" required placeholder="zhangsan"></label>
+        <label>姓名<input name="display_name" required></label>
+        <label>角色<select name="role_code" id="user-role" required></select></label>
+        <label>部门<select name="department_id" id="user-department"></select></label>
+        <label id="user-password-label">密码<input name="password" type="password"
+                 autocomplete="new-password" placeholder="至少 6 位"></label>
+        <label class="inline" id="user-active-label"><input type="checkbox" name="active" checked> 启用账号</label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">保存用户</button>
+        <button type="button" id="user-cancel">取消</button>
+      </div>
+    </form>
+    <div class="card">
+      <table>
+        <thead>
+        <tr>
+          <th>用户名</th><th>姓名</th><th>角色</th><th>部门</th>
+          <th>状态</th><th>最近登录</th><th>操作</th>
+        </tr>
+        </thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-departments" class="tab">
+    <div class="toolbar">
+      <button id="department-new" class="primary">新增部门</button>
+      <span class="hint">部门用于员工档案与用户归属；被员工或用户占用时不能删除。</span>
+    </div>
+    <form id="department-form" class="card form hidden">
+      <h2 id="department-form-title">新增部门</h2>
+      <div class="grid">
+        <label>部门名称<input name="name" required maxlength="64"></label>
+        <label class="span-2">说明<input name="description" maxlength="200"></label>
+        <label class="inline" id="department-active-label"><input type="checkbox" name="active" checked> 启用部门</label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">保存部门</button>
+        <button type="button" id="department-cancel">取消</button>
+      </div>
+    </form>
+    <div class="card">
+      <table>
+        <thead>
+        <tr><th>部门</th><th>说明</th><th class="num">员工数</th><th class="num">用户数</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody id="department-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-roles" class="tab">
+    <div class="split">
+      <div class="card list-card">
+        <div class="panel-head"><h2>角色列表</h2><button id="role-new" class="tiny">新建</button></div>
+        <ul id="role-list" class="city-list"></ul>
+      </div>
+      <form id="role-form" class="card form">
+        <h2 id="role-form-title">角色</h2>
+        <div class="grid">
+          <label>角色编码<input name="code" required placeholder="FINANCE"></label>
+          <label>角色名称<input name="name" required></label>
+          <label class="span-2">说明<input name="description" maxlength="200"></label>
+        </div>
+        <h3>权限</h3>
+        <div id="role-permissions" class="permission-grid"></div>
+        <div class="actions">
+          <button type="submit" class="primary" id="role-save">保存角色</button>
+          <span id="role-hint" class="hint"></span>
+        </div>
       </form>
     </div>
   </section>
 </main>
+
+<dialog id="password-dialog" class="dialog">
+  <form id="password-form">
+    <h2>修改密码</h2>
+    <div class="grid">
+      <label>原密码<input name="old_password" type="password" autocomplete="current-password" required></label>
+      <label>新密码<input name="new_password" type="password" autocomplete="new-password" required></label>
+      <label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" required></label>
+    </div>
+    <div class="actions">
+      <button type="submit" class="primary">保存</button>
+      <button type="button" id="password-cancel">取消</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast" class="toast hidden"></div>
 <script src="app.js"></script>

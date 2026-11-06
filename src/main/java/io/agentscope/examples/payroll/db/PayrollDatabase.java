@@ -6,6 +6,7 @@ import io.agentscope.examples.payroll.domain.MonthlyVariablePay;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import io.agentscope.examples.payroll.support.Permissions;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,6 +36,67 @@ public final class PayrollDatabase {
     private static final String DEFAULT_PASSWORD = "";
 
     private static final List<String> SCHEMA = List.of(
+            """
+            CREATE TABLE IF NOT EXISTS departments (
+                department_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(64) NOT NULL UNIQUE,
+                description VARCHAR(200) NOT NULL DEFAULT '',
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                code VARCHAR(32) PRIMARY KEY,
+                name VARCHAR(64) NOT NULL,
+                description VARCHAR(200) NOT NULL DEFAULT '',
+                permissions_json CLOB NOT NULL,
+                builtin BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS app_users (
+                user_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(32) NOT NULL UNIQUE,
+                display_name VARCHAR(64) NOT NULL,
+                password_hash VARCHAR(100) NOT NULL,
+                role_code VARCHAR(32) NOT NULL,
+                department_id BIGINT,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                title VARCHAR(120) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                session_id BIGINT NOT NULL,
+                role VARCHAR(16) NOT NULL,
+                content CLOB NOT NULL,
+                tools_json CLOB,
+                model VARCHAR(128),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user
+                ON chat_sessions (user_id, updated_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+                ON chat_messages (session_id, message_id)
+            """,
             """
             CREATE TABLE IF NOT EXISTS employees (
                 employee_id VARCHAR(32) PRIMARY KEY,
@@ -205,6 +267,7 @@ public final class PayrollDatabase {
             }
             seedCityPolicies(connection);
             seedReferenceData(connection);
+            seedIdentityData(connection);
             connection.commit();
         } catch (SQLException e) {
             throw new IllegalStateException("初始化 H2 数据库失败：" + e.getMessage(), e);
@@ -371,6 +434,63 @@ public final class PayrollDatabase {
                 statement.setBigDecimal(3, entry.getValue().score());
                 statement.setString(4, entry.getValue().comment());
                 statement.setObject(5, LocalDateTime.now());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    /** 部门与内置角色只在缺失时补齐，不覆盖管理台已经调整过的数据。 */
+    private void seedIdentityData(Connection connection) throws SQLException {
+        String departmentSql =
+                """
+                INSERT INTO departments (name, description, active, created_at)
+                SELECT ?, ?, TRUE, ? WHERE NOT EXISTS
+                    (SELECT 1 FROM departments WHERE name = ?)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(departmentSql)) {
+            for (String name : List.of("研发部", "销售部", "财务部", "生产部", "人力资源部")) {
+                statement.setString(1, name);
+                statement.setString(2, "演示数据初始化");
+                statement.setObject(3, LocalDateTime.now());
+                statement.setString(4, name);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        """
+                        INSERT INTO departments (name, description, active, created_at)
+                        SELECT DISTINCT department, '由员工档案同步', TRUE, ?
+                        FROM employees e
+                        WHERE NOT EXISTS
+                            (SELECT 1 FROM departments d WHERE d.name = e.department)
+                        """)) {
+            statement.setObject(1, LocalDateTime.now());
+            statement.executeUpdate();
+        }
+
+        String roleSql =
+                """
+                INSERT INTO roles (code, name, description, permissions_json, builtin, created_at)
+                SELECT ?, ?, ?, ?, TRUE, ? WHERE NOT EXISTS
+                    (SELECT 1 FROM roles WHERE code = ?)
+                """;
+        Map<String, String> names =
+                Map.of(
+                        Permissions.ROLE_ADMIN, "系统管理员",
+                        Permissions.ROLE_HR, "人事专员",
+                        Permissions.ROLE_VIEWER, "只读访客");
+        try (PreparedStatement statement = connection.prepareStatement(roleSql)) {
+            for (Map.Entry<String, java.util.Set<String>> entry :
+                    Permissions.builtinRolePermissions().entrySet()) {
+                statement.setString(1, entry.getKey());
+                statement.setString(2, names.getOrDefault(entry.getKey(), entry.getKey()));
+                statement.setString(3, "内置角色");
+                statement.setString(4, JsonSupport.toJson(entry.getValue()));
+                statement.setObject(5, LocalDateTime.now());
+                statement.setString(6, entry.getKey());
                 statement.addBatch();
             }
             statement.executeBatch();

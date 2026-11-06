@@ -44,6 +44,8 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 发薪前校验 | 勾稽关系、社保基数上下限、实发是否为负等 6 项检查 |
 | 考勤核对 | 事假、病假、旷工、工作日/休息日/法定节假日加班 |
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
+| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 17 项权限码；用户、部门、角色均可在管理台维护 |
+| 多用户会话 | 每个登录用户拥有独立会话列表；同一用户可打开多个会话窗口，消息按会话持久化并按用户隔离 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
 | 导入模板 | 管理台一键下载标准表头与填写说明，避免列名不一致 |
 | 对话界面 | “智能问答”页签由三个智能体串行完成：计算 → 验证 → 核算，SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
@@ -78,6 +80,10 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --department 研发部 
 
 首次启动 `--web` 会创建 `data/payroll.mv.db` 并从 classpath 导入演示数据；
 之后所有修改都写入 H2，不再被演示数据覆盖。
+
+首次建库会创建默认管理员 `admin / admin123`（仅当 `app_users` 为空时执行），
+请登录后立即使用右上角“修改密码”。生产环境应通过 `PAYROLL_ADMIN_PASSWORD` 指定初始密码；
+`PAYROLL_AUTH_ENABLED=false` 会跳过登录并授予全部权限，仅用于本地测试与离线演示。
 
 `--web` 由 Spring Boot 3.5 启动：`PayrollWebApplication` 创建内嵌 Tomcat，
 `PayrollConfiguration` 装配与 CLI 相同的 `PayrollServices`，`PayrollWebController` 暴露 REST 接口；
@@ -140,7 +146,8 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 6. **出账**：服务端按微调快照重新核算，写入 `FINALIZED`，生成 `output/payroll-<期间>-run<id>.xlsx`。
 7. **发送**：必须显式确认；发送后展示逐人结果（成功/失败及原因），批次进入 `SENT`，重复发送被拒绝。
 8. **智能问答**：在管理台直接提问，回答只做查询、核算与解释；数据维护仍走对应页签，
-   金额始终来自确定性引擎。对话依赖 `PAYROLL_MODEL`；模型不可用时不影响其他管理功能。
+   金额始终来自确定性引擎。左侧“我的会话”可新建多个窗口，每个窗口独立上下文；
+   消息持久化并按登录用户隔离。对话依赖 `PAYROLL_MODEL`；模型不可用时不影响其他管理功能。
 
 批次状态机：
 
@@ -148,10 +155,35 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 ```
 
+## 登录、用户与权限
+
+- 页面入口：未登录访问 `/` 会跳转 `/login.html`；登录成功后写入 `HttpSession`，退出登录使会话立即失效。
+  密码使用 BCrypt 存储，接口不返回密码哈希。
+- 接口校验：所有 `/api/**` 由 `AuthInterceptor` 统一拦截；未登录返回 401，缺少权限返回 403。
+  控制器方法或类上的 `@RequirePermission` 声明所需权限码，`/api/auth/login` 与 `/api/health` 公开。
+- 页面控制：登录后 `/api/auth/me` 返回当前用户、角色与权限集合；前端用 `data-permission`
+  隐藏无权操作（新增/导入/出账/管理页签等），服务端仍是最终防线。
+- 内置角色：
+
+| 角色 | 说明 | 主要权限 |
+| --- | --- | --- |
+| `ADMIN` | 系统管理员 | 全部 17 项权限，含用户、部门、角色管理 |
+| `HR` | 人事专员 | 员工/考核/考勤/工资批次读写、Excel 导入、智能问答；政策只读 |
+| `VIEWER` | 只读访客 | 员工/考核/政策/考勤/工资批次/部门/角色只读 + 智能问答 |
+
+权限码按“查看/维护”成对划分：`employee:*`、`review:*`、`policy:*`、`attendance:*`、`payroll:*`，
+外加 `import:use`、`chat:use`、`department:read|manage`、`role:read|manage`、`user:manage`。
+自定义角色可自由组合权限码；内置角色不可修改或删除。
+
+安全规则：不能停用自己或修改自己的角色；系统始终保留至少一名启用状态的管理员；
+角色与部门必须存在（用户只能归属启用部门）；删除被员工或用户占用的部门会被拒绝；
+部门改名会在同一事务内同步 `employees.department`。
+
 ## 流式对话（SSE）
 
-管理台“智能问答”通过 `POST /api/chat/stream` 消费 SSE；浏览器 `EventSource` 不支持 POST，
-前端改用 `fetch` + `ReadableStream` 解析 `text/event-stream`。事件协议：
+管理台“智能问答”使用 `POST /api/chat/sessions/{sessionId}/stream` 消费 SSE；
+旧版 `POST /api/chat/stream` 保留兼容，两者共用同一套事件协议。
+浏览器 `EventSource` 不支持 POST，前端改用 `fetch` + `ReadableStream` 解析 `text/event-stream`。事件协议：
 
 | 事件 | data | 前端行为 |
 | --- | --- | --- |
@@ -189,6 +221,10 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 - **验证降级**：验证智能体异常时不中断整轮对话，核算智能体收到“验证失败：… 本轮未完成独立验证”，
   并被要求不得声称已通过校验。
 - **无计算对象时跳过验证**：纯政策 / 考勤咨询不触发 `validate_payroll`，验证区块显示“本轮无需校验”。
+- **每轮清空上下文**：每个阶段开始前清空该智能体的历史上下文，防止模型复用上一轮的员工清单或金额；
+  管理台新增/修改员工后，下一轮对话会重新调用工具读取最新数据。
+- **查询类问题快速返回**：计算记录中没有工资核算对象时（员工清单、档案、政策、考勤），直接返回计算记录，
+  不再交给核算智能体改写，避免小模型编造工资合计或“验证不通过”。
 
 ### 控制台日志
 
@@ -268,6 +304,8 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `PAYROLL_OLLAMA_NUM_CTX` | `8192` | Ollama 上下文窗口 |
 | `PAYROLL_OLLAMA_TEMPERATURE` | `0.1` | 采样温度，核算场景建议保持低温度 |
 | `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
+| `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
+| `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
 | `DASHSCOPE_API_KEY` | 无 | 仅 `dashscope:` 模型必填 |
 
 启动时会预检 Ollama 服务与模型是否就绪，未启动或未拉取模型会直接给出中文提示。
@@ -283,7 +321,11 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查、考勤就绪月份、数据库/邮件模式与当前对话模型 |
+| GET | `/api/health` | 健康检查、考勤就绪月份、数据库/邮件模式与当前对话模型（公开） |
+| POST | `/api/auth/login` | 登录，body `{"username","password"}`，成功后写入会话 Cookie（公开） |
+| POST | `/api/auth/logout` | 退出登录并使会话立即失效 |
+| GET | `/api/auth/me` | 当前用户、角色、部门与权限集合 |
+| POST | `/api/auth/password` | 修改本人密码，body `{"old_password","new_password"}` |
 | GET | `/api/employees?include_inactive=true` | 员工列表 |
 | POST | `/api/employees` | 新增或更新员工 |
 | POST | `/api/employees/{id}/deactivate` | 停用员工 |
@@ -304,14 +346,32 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | GET | `/api/runs/{id}/excel` | 下载批次 Excel |
 | POST | `/api/chat` | 管理台对话，body `{"message":"..."}`（≤2000 字符），返回回答与调用工具 |
 | POST | `/api/chat/stream` | SSE 流式对话：思考、工具、回答增量与完成事件（见“流式对话”一节） |
-| POST | `/api/chat/reset` | 清空当前对话上下文 |
+| POST | `/api/chat/reset` | 清空旧版单会话上下文 |
+| GET | `/api/chat/sessions` | 当前用户的会话列表（按更新时间倒序） |
+| POST | `/api/chat/sessions` | 新建会话，body 可选 `{"title":"..."}` |
+| PUT | `/api/chat/sessions/{id}` | 重命名会话 |
+| DELETE | `/api/chat/sessions/{id}` | 删除会话及其全部消息 |
+| GET | `/api/chat/sessions/{id}/messages` | 会话历史消息（含角色、内容、工具与模型） |
+| POST | `/api/chat/sessions/{id}/messages` | 非流式对话，body `{"message":"..."}` |
+| POST | `/api/chat/sessions/{id}/reset` | 清空会话消息并重置智能体上下文 |
+| POST | `/api/chat/sessions/{id}/stream` | 会话 SSE 流式对话（事件协议见上一节） |
+| GET | `/api/admin/permissions` | 权限码与中文名称（需 `role:read`） |
+| GET/POST | `/api/admin/users` | 用户列表 / 新建用户（需 `user:manage`） |
+| PUT | `/api/admin/users/{id}` | 更新姓名、角色、部门与启用状态 |
+| POST | `/api/admin/users/{id}/password` | 重置用户密码 |
+| GET/POST | `/api/admin/roles` | 角色列表 / 新建角色，GET 需 `role:read`，写需 `role:manage` |
+| PUT/DELETE | `/api/admin/roles/{code}` | 修改 / 删除自定义角色（内置角色拒绝） |
+| GET/POST | `/api/admin/departments` | 部门列表 / 新建部门 |
+| PUT/DELETE | `/api/admin/departments/{id}` | 修改 / 删除部门（被占用时拒绝删除） |
 
 导入接口直接读取请求体，不依赖 multipart/form-data；Excel 上传上限 10MB，对话消息上限 2000 字符。
 错误统一返回 `{"status":"ERROR","message":"..."}`：业务校验与请求体格式错误为 400，未知路径为 404，
 未预期异常为 500 并写入服务端日志。`/api/chat/stream` 的校验与运行错误以 SSE `event:error`
 返回（HTTP 200），便于前端统一处理。
 
-管理台只绑定 `127.0.0.1`，且**未实现登录鉴权**；如需多人访问，应放在反向代理与身份认证之后。
+管理台默认绑定 `127.0.0.1` 并启用登录鉴权：每个 `/api/**` 请求都会校验会话与权限码，
+会话数据按 `user_id` 过滤，会话与消息的读写都会校验归属。若需多人远程访问，
+仍建议放在 HTTPS 反向代理之后，并补充操作审计与行级数据权限。
 
 ## 工具清单
 
@@ -404,7 +464,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 mvn test
 ```
 
-共 43 个测试，覆盖：
+共 45 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -422,14 +482,19 @@ mvn test
 - Ollama 思考适配器：request 携带 think 与工具、thinking 增量转为思考块、工具调用参数解析
 - Spring Boot 管理台（随机端口真实 HTTP）：静态页、员工、预览、出账、dry-run 发送、Excel 下载、
   批次历史、统一错误结构与 404 处理
+- 登录与权限：未登录 401、首页跳转登录页、管理员建用户、只读角色可查看但写入返回 403
+- 多用户会话：不同用户的会话列表与消息互不可见、同一用户多窗口历史隔离、越权访问会话被拒绝
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
+
+既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；
+`PayrollAuthWebTest` 使用独立内存库与真实 BCrypt 登录验证认证、权限与会话隔离。
 
 ## 生产化清单
 
 - 用 HR 主数据、考勤、绩效服务替换 H2 仓库，并做行级数据权限
 - 政策参数（税率、基数、比例、生效日期）迁移到配置中心，按社保年度版本化
 - 以 `employee_id + period` 做幂等键，核算结果落库并保留计算快照（已具备雏形）
-- 管理台接入登录、角色与操作审计；限制停用、政策修改、出账与发送权限
+- 管理台已具备登录、角色与接口级权限；生产化还需补充操作审计、会话超时策略与行级数据权限
 - 接入真实 SMTP / 邮件服务商，增加重试、退信处理与发送配额
 - 接入审批流、发薪复核与审计日志，敏感字段加密
 - 批量核算分页与缓存，避免大部门一次拉全量
