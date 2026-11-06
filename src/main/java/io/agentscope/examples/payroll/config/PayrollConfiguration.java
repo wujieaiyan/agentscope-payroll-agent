@@ -80,8 +80,9 @@ public class PayrollConfiguration {
     }
 
     @Bean
-    public PayrollChatFactory payrollChatFactory(PayrollEngine engine) {
-        return () -> new PayrollChatService(engine);
+    public PayrollChatFactory payrollChatFactory(
+            PayrollEngine engine, H2ChatStore chatStore) {
+        return sessionId -> new PayrollChatService(engine, chatStore, sessionId);
     }
 
     @Bean

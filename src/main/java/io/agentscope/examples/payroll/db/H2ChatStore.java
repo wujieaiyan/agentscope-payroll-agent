@@ -1,8 +1,10 @@
 package io.agentscope.examples.payroll.db;
 
+import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.repository.ChatContextStore;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -16,7 +18,7 @@ import java.util.List;
 import java.util.Optional;
 
 /** 对话窗口与消息的 H2 持久化；所有查询都带 user_id，保证跨用户隔离。 */
-public final class H2ChatStore {
+public final class H2ChatStore implements ChatContextStore {
 
     public static final String ROLE_USER = "USER";
     public static final String ROLE_ASSISTANT = "ASSISTANT";
@@ -214,13 +216,63 @@ public final class H2ChatStore {
         return new ChatMessage(id, sessionId, role, content, tools, model, LocalDateTime.now());
     }
 
-    public void clear(long sessionId) {
+    @Override
+    public ChatContextSnapshot loadContext(long sessionId) {
+        String sql =
+                "SELECT context_summary, context_turns FROM chat_sessions WHERE session_id = ?";
         try (Connection connection = database.connection();
-                PreparedStatement statement =
-                        connection.prepareStatement(
-                                "DELETE FROM chat_messages WHERE session_id = ?")) {
+                PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, sessionId);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return ChatContextSnapshot.EMPTY;
+                }
+                String summary = rs.getString(1);
+                return new ChatContextSnapshot(summary == null ? "" : summary, rs.getInt(2));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取会话上下文失败：" + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void saveContext(long sessionId, ChatContextSnapshot snapshot) {
+        String sql =
+                """
+                UPDATE chat_sessions
+                SET context_summary = ?, context_turns = ?, updated_at = ?
+                WHERE session_id = ?
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, snapshot.summary());
+            statement.setInt(2, snapshot.summarizedTurns());
+            statement.setObject(3, LocalDateTime.now());
+            statement.setLong(4, sessionId);
             statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("保存会话上下文失败：" + e.getMessage(), e);
+        }
+    }
+
+    public void clear(long sessionId) {
+        try (Connection connection = database.connection()) {
+            try (PreparedStatement statement =
+                    connection.prepareStatement(
+                            "DELETE FROM chat_messages WHERE session_id = ?")) {
+                statement.setLong(1, sessionId);
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement =
+                    connection.prepareStatement(
+                            """
+                            UPDATE chat_sessions
+                            SET context_summary = NULL, context_turns = 0
+                            WHERE session_id = ?
+                            """)) {
+                statement.setLong(1, sessionId);
+                statement.executeUpdate();
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("清空会话消息失败：" + e.getMessage(), e);
         }

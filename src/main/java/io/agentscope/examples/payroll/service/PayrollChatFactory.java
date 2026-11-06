@@ -4,5 +4,5 @@ package io.agentscope.examples.payroll.service;
 @FunctionalInterface
 public interface PayrollChatFactory {
 
-    PayrollChat create();
+    PayrollChat create(long sessionId);
 }

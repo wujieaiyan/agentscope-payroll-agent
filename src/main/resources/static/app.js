@@ -1350,9 +1350,21 @@ function appendStreamingMessage() {
     if (activeAgent) activeAgent.textNode = null;
     scroll();
   };
+  const appendContext = (data) => {
+    if (!data || !data.compressed) return;
+    const notice = document.createElement('div');
+    notice.className = 'chat-notice';
+    const body = document.createElement('span');
+    body.textContent = `上下文已压缩：${data.compressed} 轮折叠为摘要，保留最近 ${data.kept} 轮`;
+    notice.append(body);
+    container.insertBefore(notice, wrapper);
+    chatRender.role = null;
+    scroll();
+  };
 
   return {
     appendPhase,
+    appendContext,
     startAgent(agent, label) {
       revealThinking();
       const block = document.createElement('div');
@@ -1731,6 +1743,9 @@ async function sendChat(override) {
           break;
         case 'phase':
           view.appendPhase(data.label);
+          break;
+        case 'context':
+          view.appendContext(data);
           break;
         case 'thinking':
           view.appendThinking(data.text);

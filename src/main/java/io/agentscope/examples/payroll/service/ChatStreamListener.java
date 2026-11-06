@@ -7,6 +7,9 @@ package io.agentscope.examples.payroll.service;
  */
 public interface ChatStreamListener {
 
+    ChatStreamListener NOOP = new ChatStreamListener() {
+    };
+
     /** 对话开始，返回当前模型标识。 */
     default void onStart(String model) {
     }
@@ -29,6 +32,10 @@ public interface ChatStreamListener {
 
     /** 阶段提示：模型思考中、达到最大轮次等。 */
     default void onPhase(String label) {
+    }
+
+    /** 较早轮次已压缩为摘要；compressed 为本次折叠轮数，kept 为保留的最近轮数。 */
+    default void onContextCompressed(int compressed, int kept, int summarizedTotal) {
     }
 
     /** 开始调用工具。 */

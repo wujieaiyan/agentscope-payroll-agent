@@ -125,7 +125,7 @@ public final class ChatSessionManager implements AutoCloseable {
     }
 
     public PayrollChat chatFor(long sessionId) {
-        return chats.computeIfAbsent(sessionId, key -> chatFactory.create());
+        return chats.computeIfAbsent(sessionId, key -> chatFactory.create(key));
     }
 
     private void closeChat(long sessionId) {

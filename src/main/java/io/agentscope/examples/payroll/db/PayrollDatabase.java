@@ -90,6 +90,14 @@ public final class PayrollDatabase {
             )
             """,
             """
+            ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS context_summary CLOB
+            """,
+            """
+            ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS context_turns INT NOT NULL DEFAULT 0
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_user
                 ON chat_sessions (user_id, updated_at)
             """,

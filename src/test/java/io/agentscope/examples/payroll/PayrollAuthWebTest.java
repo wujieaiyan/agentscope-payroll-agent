@@ -238,7 +238,7 @@ class PayrollAuthWebTest {
         @Bean
         @Primary
         PayrollChatFactory stubChatFactory() {
-            return StubChat::new;
+            return sessionId -> new StubChat();
         }
     }
 

@@ -75,8 +75,16 @@ SSE: agent_start / agent_text / agent_end / text / done
   - 验证输出为空 → 同样标记未完成独立验证。
   - 没有核算对象（政策/考勤/员工查询）→ 跳过验证阶段，并跳过核算智能体，直接返回计算记录。
   - 计算或核算阶段失败 → 整轮失败，转成可操作的模型服务提示。
-- **上下文隔离**：每个阶段开始前调用 `agent.clearContext(agent.getRuntimeContext())`，
-  清空该智能体上一轮的历史。否则模型会复用旧的员工清单/金额，管理台新增员工后仍回答“没有该员工”。
+- **上下文隔离与压缩**：每个阶段开始前仍调用 `agent.clearContext(agent.getRuntimeContext())`，
+  避免智能体内部历史复用旧金额。跨轮指代改由 `ConversationContext` 维护：
+  - 每轮成功后记录“用户问题 + 最终答复”，只把最近 4 轮**用户问题**和滚动摘要注入计算智能体；
+  - 超过 6 轮或渲染长度超过 3000 字时，调用 `PayrollContextAgent` 把较早轮次折叠进摘要；
+  - 摘要只保留员工/工号、部门、期间、追问链与未完成事项；金额、比例、银行卡号、身份证号
+    由 `ConversationContext.sanitize()` 在代码层按分句剔除，不依赖小模型遵守提示词；
+  - 注入块明确标注“仅用于理解指代，不是数据来源”，所有金额/考勤/政策必须重新调用工具；
+  - 摘要与已压缩轮数写入 `chat_sessions.context_summary/context_turns`，重启后从
+    `chat_messages` 恢复最近轮次，避免重复压缩；
+  - 压缩失败只丢弃最早轮次并记录省略说明，不阻断本轮回答。
 
 ## 6. 日志
 
@@ -93,6 +101,14 @@ SSE: agent_start / agent_text / agent_end / text / done
 `io.agentscope.core.tool.Toolkit` 已降到 WARN，避免每次初始化刷 16 行注册日志。
 Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 
+上下文压缩日志（前缀 `[上下文]`）：
+
+```
+[上下文] 压缩完成：折叠 3 轮，保留 4 轮，摘要 86 字，耗时=4932ms
+[上下文] 压缩失败，降级为丢弃最早 3 轮：Timeout on blocking read...
+[上下文] 保存摘要失败：sessionId=12，原因=...
+```
+
 ## 7. SSE 协议
 
 新增事件：
@@ -102,6 +118,7 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 | `agent_start` | `{"agent","label"}` | 新建智能体区块 |
 | `agent_text` | `{"agent","text"}` | 计算/验证阶段的流式文本 |
 | `agent_end` | `{"agent"}` | 区块完成 |
+| `context` | `{"compressed","kept","summarized"}` | 本轮较早轮次已压缩；前端在回答上方插入灰色系统提示 |
 
 原有 `start / phase / thinking / tool_start / tool_args / tool_result / text / done / error` 保持不变。
 `text` 只承载核算智能体的最终答复，避免中间记录混入回答气泡。
@@ -111,7 +128,8 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 - 默认模型：`ollama:qwen2.5:3b-instruct`，`OLLAMA_BASE_URL` 默认 `http://localhost:11434`。
 - `PAYROLL_MODEL`、`PAYROLL_OLLAMA_THINK`、`PAYROLL_OLLAMA_NUM_CTX`、
   `PAYROLL_OLLAMA_TEMPERATURE` 语义不变。
-- 阶段超时：150s；SSE 超时：600s。
+- 阶段超时：150s；上下文压缩超时：60s；SSE 超时：600s。
+- 上下文阈值：保留最近 4 轮、超过 6 轮或 3000 字触发压缩、单次最多折叠 12 轮。
 - 管理台：`java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web --port 18080`。
 - 默认登录：首次建库创建 `admin / admin123`，可用 `PAYROLL_ADMIN_PASSWORD` 指定初始密码；
   `PAYROLL_AUTH_ENABLED=false` 仅用于测试与离线演示。
@@ -119,10 +137,14 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
   同一会话的并发流由忙碌标记拒绝，不同会话由 `chatStreamExecutor`（4 线程）并行处理。
 - 消息隔离：`chat_sessions`/`chat_messages` 均带 `user_id` 查询条件；
   `/api/chat/sessions/{id}/**` 在读写前调用 `requireOwned`，越权返回 400「会话不存在或无权访问」。
+- 上下文持久化：`chat_sessions` 新增 `context_summary CLOB` 与 `context_turns INT`，
+  通过 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 兼容旧库；重置/删除会话时同步清空。
 
 ## 9. 测试与验证
 
-- `mvn test`：45 个测试全部通过。
+- `mvn test`：49 个测试全部通过。
+- 上下文压缩：`ConversationContextTest` 覆盖触发阈值、最近轮次保留、消息恢复、失败降级、
+  金额/比例剔除与空上下文直通。
 - 认证与权限：`PayrollAuthWebTest` 使用真实 BCrypt 登录，验证未登录 401、首页跳转、
   只读角色写入 403、管理员建用户，以及不同用户/不同窗口的会话与消息隔离。
 - 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录。

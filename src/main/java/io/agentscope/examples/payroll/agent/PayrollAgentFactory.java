@@ -155,6 +155,24 @@ public final class PayrollAgentFactory {
                     金额保留两位小数并带千分位；结尾固定注明“以系统核算结果为准，发薪前需 HR 复核”。
                     """;
 
+    private static final String SUMMARIZER_PROMPT =
+            """
+            你是薪酬会话的上下文压缩器。把【已有摘要】与【待压缩对话】合并成一段新的中文摘要，
+            供后续轮次理解“他”“上个月”“同一部门”这类指代。
+
+            ## 必须保留
+            - 用户关注的员工姓名或工号、部门范围、工资期间
+            - 追问链与指代关系（例如“他”指哪位员工，“上个月”是哪个月）
+            - 尚未完成的事项、用户明确要求的输出形式或限制
+
+            ## 禁止保留
+            - 任何具体金额、税额、社保公积金数额、考勤天数、政策比例或工具原始数据
+            - 这些数据会随管理台维护而变化，后续必须重新调用工具查询
+
+            不要推测、评价或寒暄。输出纯文本，不超过 400 字，不使用 Markdown；
+            没有可保留的信息时只输出“无”。
+            """;
+
     private static final String INTENT_PROMPT =
             """
             你是薪酬意图抽取器。把用户输入解析为结构化意图，只输出字段值，不要解释。
@@ -165,8 +183,12 @@ public final class PayrollAgentFactory {
     private PayrollAgentFactory() {
     }
 
-    /** 三个智能体共享模型实例，避免重复探测 Ollama 与重复加载配置。 */
-    public record Team(ReActAgent calculator, ReActAgent validator, ReActAgent accountant)
+    /** 三个业务智能体与上下文压缩器共享模型实例，避免重复探测 Ollama 与重复加载配置。 */
+    public record Team(
+            ReActAgent calculator,
+            ReActAgent validator,
+            ReActAgent accountant,
+            ReActAgent summarizer)
             implements AutoCloseable {
 
         @Override
@@ -174,12 +196,13 @@ public final class PayrollAgentFactory {
             calculator.close();
             validator.close();
             accountant.close();
+            summarizer.close();
         }
     }
 
     public static Team createTeam(PayrollTools tools) {
         Model model = buildModel(modelId());
-        log.info("[多智能体] 初始化完成：计算 / 验证 / 核算三个智能体，模型={}", modelId());
+        log.info("[多智能体] 初始化完成：计算 / 验证 / 核算三个智能体 + 上下文压缩器，模型={}", modelId());
         return new Team(
                 createAgent(
                         "PayrollCalculatorAgent",
@@ -201,7 +224,14 @@ public final class PayrollAgentFactory {
                         ACCOUNTANT_PROMPT,
                         model,
                         new Toolkit(),
-                        4));
+                        4),
+                createAgent(
+                        "PayrollContextAgent",
+                        "薪酬会话上下文压缩器：把较早轮次折叠成不含金额的中文摘要",
+                        SUMMARIZER_PROMPT,
+                        model,
+                        new Toolkit(),
+                        1));
     }
 
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */

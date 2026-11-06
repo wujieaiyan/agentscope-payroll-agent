@@ -52,6 +52,16 @@ final class ChatSse {
             }
 
             @Override
+            public void onContextCompressed(int compressed, int kept, int summarizedTotal) {
+                channel.send(
+                        "context",
+                        payload(
+                                "compressed", compressed,
+                                "kept", kept,
+                                "summarized", summarizedTotal));
+            }
+
+            @Override
             public void onToolStart(String toolCallId, String toolName) {
                 channel.send(
                         "tool_start", payload("tool_call_id", toolCallId, "name", toolName));
