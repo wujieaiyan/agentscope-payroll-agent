@@ -9,10 +9,10 @@
 ## 架构
 
 ```
-自然语言对话（CLI / 管理台“智能问答”）   本地 Web 管理台（127.0.0.1）
+自然语言对话（CLI / 管理台“智能问答”）   本地 Web 管理台（Spring Boot 3 / 127.0.0.1）
       │                                     │
       ▼                                     ▼
-ReActAgent                         PayrollWebServer（JDK HttpServer）
+ReActAgent                         PayrollWebController（REST）
   ├─ 意图识别 / 追问补参 / 工具编排        ├─ 员工 / 考核 / 城市政策 / 考勤维护
   │  / 结果解释                          │  （含 Excel 导入与模板下载）
   ▼ @Tool（8 个，返回结构化 JSON）         ├─ 工资批次预览、微调、出账
@@ -45,7 +45,7 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
 | 导入模板 | 管理台一键下载标准表头与填写说明，避免列名不一致 |
-| 对话界面 | “智能问答”页签复用同一 `ReActAgent`，展示调用过的工具与最终解释 |
+| 对话界面 | “智能问答”页签复用同一 `ReActAgent`，SSE 流式输出回答、工具时间线与模型思考过程 |
 | 城市政策 | 每个城市独立维护个税参数、社保公积金比例与基数上下限 |
 | 工资批次 | 预览 → 人工微调 → 出账（服务端重算）→ 确认发送 |
 | Excel 导出 | 工资明细、核算失败、出账说明三个工作表 |
@@ -61,7 +61,7 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 ```bash
 mvn clean package
 
-# 本地 Web 管理台（员工 / 考核 / 政策 / 考勤 / 工资批次 / 智能问答 / Excel 导入）
+# 本地 Web 管理台（Spring Boot 内嵌 Tomcat；员工 / 考核 / 政策 / 考勤 / 工资批次 / 智能问答 / Excel 导入）
 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
 # 默认 http://127.0.0.1:8080 ，可用 --port 18080 或 PAYROLL_WEB_PORT 覆盖
 
@@ -78,6 +78,12 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --department 研发部 
 首次启动 `--web` 会创建 `data/payroll.mv.db` 并从 classpath 导入演示数据；
 之后所有修改都写入 H2，不再被演示数据覆盖。
 
+`--web` 由 Spring Boot 3.5 启动：`PayrollWebApplication` 创建内嵌 Tomcat，
+`PayrollConfiguration` 装配与 CLI 相同的 `PayrollServices`，`PayrollWebController` 暴露 REST 接口；
+CLI 的 `--demo`、`--payroll` 等模式不会启动 Spring 容器。端口、Jackson、H2 与输出目录集中在
+`src/main/resources/application.yml`，环境变量仍优先于默认值；IDEA 中也可直接运行
+`PayrollWebApplication` 的 `main` 方法。
+
 本地模型对话（默认，无需 API Key）：
 
 ```bash
@@ -85,6 +91,19 @@ ollama serve
 ollama pull qwen2.5:3b-instruct
 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 ```
+
+管理台“智能问答”通过 `POST /api/chat/stream` 以 SSE 流式返回。若想看到类似 Qoder 的
+“思考过程”，可换用带 thinking 能力的模型（启动时自动检测，无需额外开关）：
+
+```bash
+ollama pull deepseek-r1:1.5b
+export PAYROLL_MODEL=ollama:deepseek-r1:1.5b  # Windows: set PAYROLL_MODEL=ollama:deepseek-r1:1.5b
+java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+```
+
+思考内容来自模型原生 reasoning 增量，不是前端模拟；工具调用、阶段提示与回答文本仍按事件分开推送。
+注意：1.5B 级思考模型的工具调用稳定性弱于 `qwen2.5:3b-instruct`，若发现它直接作答而不调用工具，
+请换用更大的思考模型，或关闭思考后继续用默认模型。`PAYROLL_OLLAMA_THINK=false` 可强制关闭思考。
 
 使用 DashScope 在线模型：
 
@@ -127,6 +146,27 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 ```
 DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 ```
+
+## 流式对话（SSE）
+
+管理台“智能问答”通过 `POST /api/chat/stream` 消费 SSE；浏览器 `EventSource` 不支持 POST，
+前端改用 `fetch` + `ReadableStream` 解析 `text/event-stream`。事件协议：
+
+| 事件 | data | 前端行为 |
+| --- | --- | --- |
+| `start` | `{"model":"..."}` | 记录实际模型 |
+| `phase` | `{"label":"模型思考中…"}` | 在思考面板追加阶段提示（相同阶段去重） |
+| `thinking` | `{"text":"增量"}` | 追加模型原生思考内容 |
+| `tool_start` | `{"tool_call_id","name"}` | 新增工具步骤 |
+| `tool_args` | `{"tool_call_id","text"}` | 追加工具参数 JSON |
+| `tool_result` | `{"tool_call_id","name","state"}` | 标记成功/失败等状态 |
+| `text` | `{"text":"增量"}` | 追加回答正文 |
+| `done` | `{"reply","tools","model"}` | 收尾：移除光标、显示工具汇总、折叠思考面板 |
+| `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
+
+思考面板默认展开、结束后自动折叠并显示耗时，可手动重新展开；工具调用以步骤形式混排在同一时间线中。
+流式接口的校验错误（空消息、超长）同样以 `event:error` 返回，避免 `Accept: text/event-stream`
+下无法序列化 JSON 错误体。
 
 ## Excel 导入
 
@@ -181,6 +221,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
 | `PAYROLL_OLLAMA_NUM_CTX` | `8192` | Ollama 上下文窗口 |
 | `PAYROLL_OLLAMA_TEMPERATURE` | `0.1` | 采样温度，核算场景建议保持低温度 |
+| `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
 | `DASHSCOPE_API_KEY` | 无 | 仅 `dashscope:` 模型必填 |
 
 启动时会预检 Ollama 服务与模型是否就绪，未启动或未拉取模型会直接给出中文提示。
@@ -216,9 +257,13 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | POST | `/api/runs/{id}/send` | 全员 dry-run 发送，需 `{"confirm":true}` |
 | GET | `/api/runs/{id}/excel` | 下载批次 Excel |
 | POST | `/api/chat` | 管理台对话，body `{"message":"..."}`（≤2000 字符），返回回答与调用工具 |
+| POST | `/api/chat/stream` | SSE 流式对话：思考、工具、回答增量与完成事件（见“流式对话”一节） |
 | POST | `/api/chat/reset` | 清空当前对话上下文 |
 
-导入接口直接读取请求体，不依赖 multipart/form-data；JSON 请求体上限 2MB，Excel 上传上限 10MB。
+导入接口直接读取请求体，不依赖 multipart/form-data；Excel 上传上限 10MB，对话消息上限 2000 字符。
+错误统一返回 `{"status":"ERROR","message":"..."}`：业务校验与请求体格式错误为 400，未知路径为 404，
+未预期异常为 500 并写入服务端日志。`/api/chat/stream` 的校验与运行错误以 SSE `event:error`
+返回（HTTP 200），便于前端统一处理。
 
 管理台只绑定 `127.0.0.1`，且**未实现登录鉴权**；如需多人访问，应放在反向代理与身份认证之后。
 
@@ -309,7 +354,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 mvn test
 ```
 
-共 38 个测试，覆盖：
+共 41 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -322,7 +367,10 @@ mvn test
 - Excel 导入：员工部分成功与失败行号、考核系数/非法员工、考勤覆盖与负数拒绝、
   缺必填列拒绝、模板表头与填写说明
 - 管理台对话与导入：回答与工具列表、空消息 400、重置、HTTP 上传 Excel、模板下载、未知类型 400
-- Web 管理台：静态页、员工、预览、出账、dry-run 发送、Excel 下载、批次历史
+- SSE 流式对话：思考/阶段/工具/文本/完成事件、SSE 错误事件、空消息与超长消息处理
+- Ollama 思考适配器：request 携带 think 与工具、thinking 增量转为思考块、工具调用参数解析
+- Spring Boot 管理台（随机端口真实 HTTP）：静态页、员工、预览、出账、dry-run 发送、Excel 下载、
+  批次历史、统一错误结构与 404 处理
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 ## 生产化清单
@@ -341,11 +389,16 @@ mvn test
 
 ```
 src/main/java/io/agentscope/examples/payroll
-├── PayrollApplication.java       # CLI 入口（演示/单人/批量/意图抽取/对话/Web）
+├── PayrollApplication.java       # CLI 入口（演示/单人/批量/意图抽取/对话/--web）
+├── PayrollWebApplication.java    # Spring Boot 管理台启动类
+├── config
+│   └── PayrollConfiguration.java # 管理台 Bean 装配与启动信息
 ├── agent
-│   ├── PayrollAgentFactory.java  # ReActAgent 装配与系统提示词
+│   ├── PayrollAgentFactory.java  # ReActAgent 装配、系统提示词与 Ollama 思考开关
 │   ├── PayrollTools.java         # 8 个 @Tool
 │   └── PayrollIntent.java        # 结构化意图
+├── model
+│   └── OllamaThinkingModel.java  # Ollama 流式适配：透传 thinking 与工具调用
 ├── domain                        # 员工、考勤、政策、批次、邮件、核算结果
 ├── db
 │   ├── PayrollDatabase.java      # H2 连接、建表与首次种子数据
@@ -358,14 +411,19 @@ src/main/java/io/agentscope/examples/payroll
 │   ├── ExcelExporter.java        # POI 导出
 │   ├── ExcelImportService.java   # 员工/考核/考勤导入与模板
 │   ├── PayrollChat.java          # 对话接口（便于测试替身）
+│   ├── ChatStreamListener.java   # 流式事件回调：思考/阶段/工具/文本/完成
 │   ├── PayrollChatService.java   # ReActAgent 会话封装与事件流收集
 │   ├── DryRunEmailGateway.java   # dry-run 邮件网关
 │   ├── PayrollServices.java      # 组装数据库、引擎、对话与批次服务
 │   └── PayslipFormatter.java     # 工资条渲染
-├── web/PayrollWebServer.java     # 本地管理台 HTTP 服务
-└── support/JsonSupport.java      # snake_case JSON
+├── web
+│   ├── PayrollWebController.java # REST API（契约与原管理台一致）
+│   ├── ApiExceptionHandler.java  # 统一 400/404/500 错误响应
+│   └── ApiResponse.java          # {status,data,message} 响应封装
+└── support/JsonSupport.java      # snake_case JSON（CLI 与测试）
 
 src/main/resources
-├── data/                         # 演示员工、考勤、变动工资
-└── web/                          # index.html / app.js / style.css
+├── application.yml               # 端口、Jackson、H2、输出目录
+├── static/                       # index.html / app.js / style.css
+└── data/                         # 演示员工、考勤、变动工资
 ```

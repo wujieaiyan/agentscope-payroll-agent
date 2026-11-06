@@ -7,14 +7,21 @@ import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.model.OllamaThinkingModel;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
+import io.agentscope.extensions.model.ollama.options.ThinkOption;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 组装薪酬智能体：模型只做理解与编排，工具承担全部计算与数据访问。 */
 public final class PayrollAgentFactory {
@@ -22,6 +29,7 @@ public final class PayrollAgentFactory {
     public static final String DEFAULT_MODEL = "ollama:qwen2.5:3b-instruct";
     public static final String DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 
+    private static final Logger log = LoggerFactory.getLogger(PayrollAgentFactory.class);
     private static final String OLLAMA_PREFIX = "ollama:";
     private static final int DEFAULT_OLLAMA_NUM_CTX = 8192;
     private static final double DEFAULT_OLLAMA_TEMPERATURE = 0.1;
@@ -112,21 +120,68 @@ public final class PayrollAgentFactory {
         }
         String baseUrl = ollamaBaseUrl();
         verifyOllamaModel(baseUrl, modelName);
+        Set<String> capabilities = ollamaCapabilities(baseUrl, modelName);
+        boolean supportsThinking = capabilities.contains("thinking");
 
-        OllamaOptions options =
+        OllamaOptions.Builder builder =
                 OllamaOptions.builder()
                         .numCtx(intEnv("PAYROLL_OLLAMA_NUM_CTX", DEFAULT_OLLAMA_NUM_CTX))
                         .temperature(
                                 doubleEnv(
                                         "PAYROLL_OLLAMA_TEMPERATURE",
-                                        DEFAULT_OLLAMA_TEMPERATURE))
-                        .build();
+                                        DEFAULT_OLLAMA_TEMPERATURE));
+        ThinkOption thinkOption = ollamaThinkOption(modelName, supportsThinking);
+        if (thinkOption != null) {
+            builder.thinkOption(thinkOption);
+        }
+        OllamaOptions options = builder.build();
 
+        if (thinkOption != null && !isDisabled(thinkOption)) {
+            return new OllamaThinkingModel(modelName, baseUrl, options);
+        }
         return OllamaChatModel.builder()
                 .modelName(modelName)
                 .baseUrl(baseUrl)
                 .defaultOptions(options)
                 .build();
+    }
+
+    private static boolean isDisabled(ThinkOption thinkOption) {
+        return thinkOption instanceof ThinkOption.ThinkBoolean thinkBoolean
+                && !thinkBoolean.enabled();
+    }
+
+    /**
+     * 思考开关：未设置时按模型能力自动决定，避免对 qwen2.5-instruct 等模型发送 think 参数。
+     *
+     * <p>PAYROLL_OLLAMA_THINK 可取 true/false/low/medium/high；显式开启时要求模型具备
+     * thinking 能力（如 deepseek-r1、qwen3）。
+     */
+    private static ThinkOption ollamaThinkOption(String modelName, boolean supportsThinking) {
+        String value = env("PAYROLL_OLLAMA_THINK", "");
+        if (value.isEmpty()) {
+            return supportsThinking ? ThinkOption.ThinkBoolean.ENABLED : null;
+        }
+        ThinkOption option =
+                switch (value.toLowerCase(Locale.ROOT)) {
+                    case "true", "1", "on", "yes" -> ThinkOption.ThinkBoolean.ENABLED;
+                    case "false", "0", "off", "no" -> ThinkOption.ThinkBoolean.DISABLED;
+                    case "low" -> ThinkOption.ThinkLevel.LOW;
+                    case "medium" -> ThinkOption.ThinkLevel.MEDIUM;
+                    case "high" -> ThinkOption.ThinkLevel.HIGH;
+                    default ->
+                            throw new PayrollException(
+                                    "PAYROLL_OLLAMA_THINK 只能是 true/false/low/medium/high，当前值："
+                                            + value);
+                };
+        if (!isDisabled(option) && !supportsThinking) {
+            throw new PayrollException(
+                    "模型 "
+                            + modelName
+                            + " 不支持思考输出，请改用 deepseek-r1、qwen3 等模型，"
+                            + "或设置 PAYROLL_OLLAMA_THINK=false。");
+        }
+        return option;
     }
 
     /** 尽早暴露“服务未启动 / 模型未拉取”，避免用户拿到难以理解的连接异常。 */
@@ -165,6 +220,44 @@ public final class PayrollAgentFactory {
         }
         throw new PayrollException(
                 "Ollama 未安装模型 " + modelName + "。请先执行：ollama pull " + modelName);
+    }
+
+    /**
+     * 读取模型能力；旧版 Ollama 不支持 /api/show 时返回空集合，退化为不启用思考。
+     */
+    private static Set<String> ollamaCapabilities(String baseUrl, String modelName) {
+        Set<String> capabilities = new HashSet<>();
+        URI uri = URI.create(baseUrl.replaceAll("/+$", "") + "/api/show");
+        HttpClient client =
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+        String body;
+        try {
+            body = JSON.writeValueAsString(java.util.Map.of("model", modelName));
+        } catch (IOException e) {
+            return capabilities;
+        }
+        HttpRequest request =
+                HttpRequest.newBuilder(uri)
+                        .timeout(Duration.ofSeconds(3))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+        try {
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("Ollama /api/show 返回 HTTP {}，不启用思考输出。", response.statusCode());
+                return capabilities;
+            }
+            for (JsonNode item : JSON.readTree(response.body()).path("capabilities")) {
+                capabilities.add(item.asText());
+            }
+        } catch (IOException e) {
+            log.warn("无法读取 Ollama 模型能力（{}），不启用思考输出。", modelName);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return capabilities;
     }
 
     private static String env(String key, String defaultValue) {

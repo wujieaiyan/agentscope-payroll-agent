@@ -19,13 +19,14 @@ import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.service.PayslipFormatter;
 import io.agentscope.examples.payroll.support.JsonSupport;
-import io.agentscope.examples.payroll.web.PayrollWebServer;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
-import java.util.concurrent.CountDownLatch;
+import java.util.ArrayList;
+import java.util.List;
+import org.springframework.boot.SpringApplication;
 
 /**
  * 薪酬智能体命令行入口。
@@ -51,12 +52,12 @@ public final class PayrollApplication {
                 printHelp();
                 return;
             }
-
-            PayrollServices services = PayrollServices.open();
             if (options.web) {
-                runWeb(services, options);
+                runWeb(options);
                 return;
             }
+
+            PayrollServices services = PayrollServices.open();
             PayrollEngine engine = services.engine();
             PayrollTools tools = new PayrollTools(engine);
             YearMonth period =
@@ -91,25 +92,14 @@ public final class PayrollApplication {
         }
     }
 
-    private static void runWeb(PayrollServices services, Options options) throws Exception {
-        int defaultPort = 8080;
-        String envPort = System.getenv("PAYROLL_WEB_PORT");
+    /** 以 Spring Boot 内嵌 Tomcat 启动管理台；CLI 其他模式不启动 Spring 容器。 */
+    private static void runWeb(Options options) {
+        List<String> args = new ArrayList<>();
+        args.add("--server.address=127.0.0.1");
         if (options.port != null) {
-            defaultPort = parsePort(options.port);
-        } else if (envPort != null && !envPort.isBlank()) {
-            defaultPort = parsePort(envPort);
+            args.add("--server.port=" + parsePort(options.port));
         }
-        PayrollWebServer server = new PayrollWebServer(services, defaultPort);
-        Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "payroll-web-shutdown"));
-        server.start();
-        System.out.println("=".repeat(72));
-        System.out.println("薪酬管理台  http://127.0.0.1:" + server.port());
-        System.out.println("数据库      " + services.database().url());
-        System.out.println("邮件模式    dry-run（只校验并记录，不会真实投递）");
-        System.out.println("输出目录    " + services.runService().outputDir().toAbsolutePath());
-        System.out.println("按 Ctrl+C 停止");
-        System.out.println("=".repeat(72));
-        new CountDownLatch(1).await();
+        SpringApplication.run(PayrollWebApplication.class, args.toArray(String[]::new));
     }
 
     private static int parsePort(String value) {
@@ -124,7 +114,8 @@ public final class PayrollApplication {
         }
     }
 
-    private static void runDemo(PayrollEngine engine, YearMonth period) {        System.out.println("=".repeat(72));
+    private static void runDemo(PayrollEngine engine, YearMonth period) {
+        System.out.println("=".repeat(72));
         System.out.println("薪酬核算离线演示  期间：" + period + "（不调用大模型）");
         System.out.println("=".repeat(72));
         BatchPayrollResult batch = engine.calculateDepartment(null, period);

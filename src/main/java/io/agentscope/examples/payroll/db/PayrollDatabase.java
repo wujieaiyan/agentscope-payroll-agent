@@ -161,7 +161,16 @@ public final class PayrollDatabase {
         String url = env("PAYROLL_DB_URL", DEFAULT_URL);
         String user = env("PAYROLL_DB_USER", DEFAULT_USER);
         String password = env("PAYROLL_DB_PASSWORD", DEFAULT_PASSWORD);
-        PayrollDatabase database = new PayrollDatabase(url, user, password);
+        return open(url, user, password);
+    }
+
+    /** 按显式连接参数初始化数据库，供 Spring 配置或嵌入式场景使用。 */
+    public static PayrollDatabase open(String url, String user, String password) {
+        PayrollDatabase database =
+                new PayrollDatabase(
+                        url == null || url.isBlank() ? DEFAULT_URL : url.trim(),
+                        user == null || user.isBlank() ? DEFAULT_USER : user,
+                        password == null ? DEFAULT_PASSWORD : password);
         database.initialize();
         return database;
     }

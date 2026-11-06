@@ -800,22 +800,218 @@ function appendChatMessage(role, text, tools, isError) {
   return wrapper;
 }
 
-function appendTyping() {
+const CHAT_TOOL_STATE = {
+  SUCCESS: { label: '成功', cls: 'ok' },
+  ERROR: { label: '失败', cls: 'bad' },
+  INTERRUPTED: { label: '中断', cls: 'bad' },
+  DENIED: { label: '拒绝', cls: 'bad' },
+  RUNNING: { label: '执行中', cls: '' },
+};
+
+function appendStreamingMessage() {
   const container = $('#chat-messages');
   const empty = container.querySelector('.chat-empty');
   if (empty) empty.remove();
+
   const wrapper = document.createElement('div');
   wrapper.className = 'chat-message assistant';
+
   const label = document.createElement('div');
   label.className = 'chat-role';
   label.textContent = '薪酬智能体';
+
+  const thinking = document.createElement('details');
+  thinking.className = 'chat-thinking empty';
+  thinking.open = true;
+  const summary = document.createElement('summary');
+  const summaryTitle = document.createElement('span');
+  summaryTitle.className = 'chat-thinking-title';
+  summaryTitle.textContent = '思考过程';
+  const summaryState = document.createElement('span');
+  summaryState.className = 'chat-thinking-state';
+  summaryState.textContent = '进行中…';
+  summary.append(summaryTitle, summaryState);
+  const thinkingBody = document.createElement('div');
+  thinkingBody.className = 'chat-thinking-body';
+  thinking.append(summary, thinkingBody);
+
   const bubble = document.createElement('div');
-  bubble.className = 'chat-bubble chat-typing';
-  bubble.textContent = '正在思考…';
-  wrapper.append(label, bubble);
+  bubble.className = 'chat-bubble chat-streaming';
+
+  const toolsLine = document.createElement('div');
+  toolsLine.className = 'chat-tools hidden';
+
+  wrapper.append(label, thinking, bubble, toolsLine);
   container.append(wrapper);
   container.scrollTop = container.scrollHeight;
-  return wrapper;
+
+  const startedAt = Date.now();
+  let reasoning = null;
+  let lastPhase = '';
+  let activeTool = null;
+  let fullText = '';
+  let finished = false;
+
+  const scroll = () => {
+    container.scrollTop = container.scrollHeight;
+  };
+  const revealThinking = () => {
+    thinking.classList.remove('empty');
+  };
+  const appendPhase = (text) => {
+    if (!text || text === lastPhase) return;
+    lastPhase = text;
+    revealThinking();
+    const line = document.createElement('div');
+    line.className = 'chat-thinking-phase';
+    line.textContent = text;
+    thinkingBody.append(line);
+    scroll();
+  };
+
+  return {
+    appendPhase,
+    appendThinking(delta) {
+      if (!delta) return;
+      revealThinking();
+      if (!reasoning) {
+        reasoning = document.createElement('div');
+        reasoning.className = 'chat-thinking-reasoning';
+        thinkingBody.append(reasoning);
+      }
+      reasoning.textContent += delta;
+      scroll();
+    },
+    startTool(toolCallId, name) {
+      revealThinking();
+      lastPhase = '';
+      const step = document.createElement('div');
+      step.className = 'chat-thinking-step';
+      step.dataset.toolCallId = toolCallId || '';
+      const nameEl = document.createElement('code');
+      nameEl.className = 'chat-tool-name';
+      nameEl.textContent = name || '工具';
+      const argsEl = document.createElement('span');
+      argsEl.className = 'chat-tool-args';
+      const stateEl = document.createElement('span');
+      stateEl.className = 'chat-tool-state';
+      stateEl.textContent = '调用中…';
+      step.append(nameEl, argsEl, stateEl);
+      thinkingBody.append(step);
+      activeTool = { toolCallId, step, argsEl, stateEl };
+      scroll();
+    },
+    appendToolArgs(toolCallId, delta) {
+      if (!activeTool || !delta) return;
+      if (toolCallId && activeTool.toolCallId && toolCallId !== activeTool.toolCallId) return;
+      activeTool.argsEl.textContent += delta;
+      scroll();
+    },
+    finishTool(toolCallId, state) {
+      if (!activeTool) return;
+      if (toolCallId && activeTool.toolCallId && toolCallId !== activeTool.toolCallId) return;
+      const meta = CHAT_TOOL_STATE[state] || { label: state || '完成', cls: '' };
+      activeTool.stateEl.textContent = meta.label;
+      activeTool.stateEl.className = 'chat-tool-state ' + meta.cls;
+      activeTool = null;
+    },
+    appendText(delta) {
+      if (!delta) return;
+      fullText += delta;
+      bubble.textContent = fullText;
+      scroll();
+    },
+    finish(reply) {
+      if (finished) return;
+      finished = true;
+      bubble.classList.remove('chat-streaming');
+      if (!fullText && reply && reply.reply) {
+        fullText = reply.reply;
+        bubble.textContent = fullText;
+      }
+      if (reply && reply.tools && reply.tools.length) {
+        toolsLine.textContent = '调用工具：' + reply.tools.join('、');
+        toolsLine.classList.remove('hidden');
+      }
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      summaryState.textContent = '已完成 · ' + seconds + 's';
+      if (!thinking.classList.contains('empty')) {
+        thinking.open = false;
+      }
+      scroll();
+    },
+    fail(message) {
+      if (finished) return;
+      finished = true;
+      wrapper.classList.add('error');
+      bubble.classList.remove('chat-streaming');
+      bubble.textContent = message || '对话失败';
+      summaryState.textContent = '失败';
+      if (!thinking.classList.contains('empty')) {
+        thinking.open = false;
+      }
+      scroll();
+    },
+  };
+}
+
+async function streamChat(message, onEvent) {
+  const response = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({ message }),
+  });
+  if (!response.ok) {
+    let payload = null;
+    try {
+      payload = JSON.parse(await response.text());
+    } catch (parseError) {
+      payload = null;
+    }
+    throw new Error((payload && payload.message) || `请求失败：HTTP ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error('当前浏览器不支持流式响应');
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  const dispatch = (raw) => {
+    let event = 'message';
+    const dataLines = [];
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (!dataLines.length) return;
+    let data;
+    try {
+      data = JSON.parse(dataLines.join('\n'));
+    } catch (parseError) {
+      return;
+    }
+    onEvent(event, data);
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
+      let index;
+      while ((index = buffer.indexOf('\n\n')) >= 0) {
+        const raw = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        if (raw.trim()) dispatch(raw);
+      }
+    }
+    buffer = (buffer + decoder.decode()).replace(/\r\n/g, '\n').trim();
+    if (buffer) dispatch(buffer);
+  } finally {
+    reader.cancel().catch(() => {});
+  }
 }
 
 async function sendChat(override) {
@@ -831,14 +1027,42 @@ async function sendChat(override) {
   state.chatBusy = true;
   const button = $('#chat-send');
   button.disabled = true;
-  const typing = appendTyping();
+  const view = appendStreamingMessage();
+  let done = false;
   try {
-    const reply = await api('/api/chat', { method: 'POST', body: { message } });
-    typing.remove();
-    appendChatMessage('assistant', reply.reply, reply.tools || []);
+    await streamChat(message, (event, data) => {
+      switch (event) {
+        case 'phase':
+          view.appendPhase(data.label);
+          break;
+        case 'thinking':
+          view.appendThinking(data.text);
+          break;
+        case 'tool_start':
+          view.startTool(data.tool_call_id, data.name);
+          break;
+        case 'tool_args':
+          view.appendToolArgs(data.tool_call_id, data.text);
+          break;
+        case 'tool_result':
+          view.finishTool(data.tool_call_id, data.state);
+          break;
+        case 'text':
+          view.appendText(data.text);
+          break;
+        case 'done':
+          done = true;
+          view.finish(data);
+          break;
+        case 'error':
+          throw new Error(data.message || '对话失败');
+        default:
+          break;
+      }
+    });
+    if (!done) view.finish(null);
   } catch (error) {
-    typing.remove();
-    appendChatMessage('assistant', error.message, [], true);
+    view.fail(error.message);
   } finally {
     state.chatBusy = false;
     button.disabled = false;
@@ -847,6 +1071,10 @@ async function sendChat(override) {
 }
 
 async function resetChat() {
+  if (state.chatBusy) {
+    toast('回答生成中，请稍候再重置', 'error');
+    return;
+  }
   if (!confirm('清空对话并重置智能体上下文？')) return;
   try {
     await api('/api/chat/reset', { method: 'POST' });

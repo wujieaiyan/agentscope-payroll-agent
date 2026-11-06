@@ -60,13 +60,25 @@ public final class PayrollServices {
                         new DryRunEmailGateway(),
                         outputDir);
         PayrollChat resolvedChat = chat == null ? new PayrollChatService(engine) : chat;
-        return new PayrollServices(
+        return of(
                 database,
                 repository,
                 engine,
                 runService,
                 resolvedChat,
                 new ExcelImportService(repository));
+    }
+
+    /** 由已装配的组件构建聚合对象，供 Spring 容器复用同一套实例。 */
+    public static PayrollServices of(
+            PayrollDatabase database,
+            H2PayrollRepository repository,
+            PayrollEngine engine,
+            PayrollRunService runService,
+            PayrollChat chat,
+            ExcelImportService excelImportService) {
+        return new PayrollServices(
+                database, repository, engine, runService, chat, excelImportService);
     }
 
     public PayrollDatabase database() {

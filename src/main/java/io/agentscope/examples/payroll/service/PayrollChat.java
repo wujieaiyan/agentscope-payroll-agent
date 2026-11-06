@@ -8,6 +8,16 @@ public interface PayrollChat extends AutoCloseable {
 
     Reply chat(String message);
 
+    /**
+     * 流式对话。默认实现退化为一次性回答，便于测试替身只实现 {@link #chat(String)}。
+     */
+    default void stream(String message, ChatStreamListener listener) {
+        listener.onStart(modelId());
+        Reply reply = chat(message);
+        listener.onText(reply.reply());
+        listener.onDone(reply);
+    }
+
     default String modelId() {
         return PayrollAgentFactory.modelId();
     }
