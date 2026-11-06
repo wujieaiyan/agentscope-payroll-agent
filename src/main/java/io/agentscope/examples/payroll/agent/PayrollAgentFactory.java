@@ -39,6 +39,8 @@ public final class PayrollAgentFactory {
             5. 不得虚构员工、考勤、绩效或政策参数；政策口径以 get_payroll_policy 为准。
             6. 银行卡号只展示脱敏值，禁止展开、补全或推断完整卡号。
             7. 给出任何发薪结论时注明“以系统核算结果为准，发薪前需 HR 复核”。
+            8. 字段语义：gross_pay 为应发合计；total_deductions 为全部扣款合计（考勤扣款 + 个人社保 + 个人公积金 + 个税）；net_pay 为实发；overtime_pay 属于应发项目，禁止列为扣款。
+            9. 明细中的“扣款项目”合计必须等于 total_deductions；社保公积金只能引用 social_insurance_employee 与 housing_fund_employee，禁止把 total_deductions 当作社保公积金金额。
 
             ## 工具选择
             - 单人核算 → calculate_payroll

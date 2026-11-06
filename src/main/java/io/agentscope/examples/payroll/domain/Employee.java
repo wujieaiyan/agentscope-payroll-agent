@@ -22,7 +22,9 @@ public record Employee(
         @JsonProperty("social_insurance_base") BigDecimal socialInsuranceBase,
         @JsonProperty("special_additional_deduction") BigDecimal specialAdditionalDeduction,
         @JsonProperty("hire_date") LocalDate hireDate,
-        @JsonProperty("bank_account_masked") String bankAccountMasked) {
+        @JsonProperty("bank_account_masked") String bankAccountMasked,
+        String email,
+        String city) {
 
     public Employee {
         Objects.requireNonNull(employeeId, "employeeId");
@@ -32,6 +34,9 @@ public record Employee(
         if (employeeId.isBlank() || name.isBlank()) {
             throw new IllegalArgumentException("employeeId/name must not be blank");
         }
+        employeeId = employeeId.trim().toUpperCase();
+        email = email == null ? "" : email.trim();
+        city = city == null || city.isBlank() ? "默认" : city.trim();
         baseSalary = Money.round(baseSalary);
         positionAllowance = Money.round(positionAllowance);
         specialAdditionalDeduction = Money.round(specialAdditionalDeduction);

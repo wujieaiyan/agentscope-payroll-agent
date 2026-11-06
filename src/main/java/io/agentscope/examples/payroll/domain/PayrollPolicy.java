@@ -70,6 +70,27 @@ public record PayrollPolicy(
                         new TaxBracket(null, new BigDecimal("0.45"), new BigDecimal("181920.00"))));
     }
 
+    /** 生成仅调整社保基数上下限的城市政策副本，其余比例与税率表沿用演示口径。 */
+    public PayrollPolicy withSocialBounds(BigDecimal lower, BigDecimal upper) {
+        return new PayrollPolicy(
+                monthlyThreshold,
+                standardWorkDays,
+                standardDailyHours,
+                sickLeavePayRate,
+                lower,
+                upper,
+                pensionEmployeeRate,
+                medicalEmployeeRate,
+                medicalFixedAmount,
+                unemploymentEmployeeRate,
+                pensionEmployerRate,
+                medicalEmployerRate,
+                unemploymentEmployerRate,
+                injuryEmployerRate,
+                maternityEmployerRate,
+                taxBrackets);
+    }
+
     /** 按累计预扣法计算累计应纳税额，结果保留两位小数。 */
     public TaxComputation taxFor(BigDecimal cumulativeTaxableIncome) {
         BigDecimal taxable = Money.maxZero(cumulativeTaxableIncome);

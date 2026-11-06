@@ -106,6 +106,7 @@ public final class PayrollTools {
                             employee.specialAdditionalDeduction());
                     payload.put("hire_date", employee.hireDate());
                     payload.put("bank_account_masked", employee.bankAccountMasked());
+                    payload.put("city", employee.city());
                     return payload;
                 });
     }
@@ -248,16 +249,23 @@ public final class PayrollTools {
     @Tool(
             name = "get_payroll_policy",
             description =
-                    "查询当前生效的薪酬政策参数：个税累计预扣率表、社保公积金比例、缴费基数上下限、"
-                            + "月减除费用、标准工时与病假计薪比例，以及考勤数据就绪月份。"
+                    "查询指定城市当前生效的薪酬政策参数：个税累计预扣率表、社保公积金比例、"
+                            + "缴费基数上下限、月减除费用、标准工时与病假计薪比例，以及考勤数据就绪月份。"
                             + "回答制度、税率、比例类问题前必须先调用本工具。",
             readOnly = true)
-    public String getPayrollPolicy() {
+    public String getPayrollPolicy(
+            @ToolParam(
+                            name = "city",
+                            description = "可选，城市名称，如 北京、上海；不传则返回默认政策",
+                            required = false)
+                    String city) {
         return execute(
                 () -> {
+                    String requested = city == null || city.isBlank() ? "默认" : city.trim();
                     Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("city", requested);
                     payload.put("data_through_period", engine.dataThroughPeriod());
-                    payload.put("policy", engine.policy());
+                    payload.put("policy", engine.policyFor(requested));
                     payload.put(
                             "notes",
                             List.of(

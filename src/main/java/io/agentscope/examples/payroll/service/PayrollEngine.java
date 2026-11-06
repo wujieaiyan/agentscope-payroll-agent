@@ -5,6 +5,7 @@ import io.agentscope.examples.payroll.domain.BatchPayrollResult;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.Money;
 import io.agentscope.examples.payroll.domain.MonthlyVariablePay;
+import io.agentscope.examples.payroll.domain.PayrollAdjustment;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.domain.PayrollResult;
@@ -29,14 +30,29 @@ import java.util.stream.Collectors;
 public final class PayrollEngine {
 
     private final PayrollRepository repository;
-    private final PayrollPolicy policy;
+    private final PayrollPolicyProvider policyProvider;
+    private final PayrollPolicy defaultPolicy;
 
     public PayrollEngine(PayrollRepository repository, PayrollPolicy policy) {
+        this(repository, city -> policy, policy);
+    }
+
+    public PayrollEngine(
+            PayrollRepository repository,
+            PayrollPolicyProvider policyProvider,
+            PayrollPolicy defaultPolicy) {
         this.repository = repository;
-        this.policy = policy;
+        this.policyProvider = policyProvider;
+        this.defaultPolicy = defaultPolicy;
     }
 
     public PayrollResult calculate(String employeeId, YearMonth period) {
+        return calculate(employeeId, period, null);
+    }
+
+    /** 核算指定月份，并允许对目标月份的绩效奖金/其他补贴做一次性微调。 */
+    public PayrollResult calculate(
+            String employeeId, YearMonth period, PayrollAdjustment adjustment) {
         Employee employee = requireEmployee(employeeId);
         validatePeriod(employee, period);
         YearMonth start = YearMonth.from(employee.hireDate());
@@ -50,7 +66,15 @@ public final class PayrollEngine {
         for (YearMonth month = start; !month.isAfter(period); month = month.plusMonths(1)) {
             AttendanceSummary attendance = resolveAttendance(employee, month);
             MonthlyVariablePay variablePay = repository.findVariablePay(employee.employeeId(), month);
-            MonthComputation computation = computeMonth(employee, month, attendance, variablePay, state);
+            PayrollAdjustment monthAdjustment = month.equals(period) ? adjustment : null;
+            MonthComputation computation =
+                    computeMonth(
+                            employee,
+                            month,
+                            attendance,
+                            variablePay,
+                            state,
+                            monthAdjustment);
             state = computation.state();
             current = computation.result();
         }
@@ -115,6 +139,7 @@ public final class PayrollEngine {
 
     public PayrollValidation validate(String employeeId, YearMonth period) {
         PayrollResult result = calculate(employeeId, period);
+        PayrollPolicy cityPolicy = resolvePolicy(requireEmployee(employeeId));
         List<PayrollValidation.CheckResult> checks = new ArrayList<>();
 
         BigDecimal componentSum =
@@ -145,8 +170,8 @@ public final class PayrollEngine {
 
         checks.add(check(
                 "社保基数在政策上下限内",
-                result.socialInsuranceBase().compareTo(policy.socialBaseLower()) >= 0
-                        && result.socialInsuranceBase().compareTo(policy.socialBaseUpper()) <= 0,
+                result.socialInsuranceBase().compareTo(cityPolicy.socialBaseLower()) >= 0
+                        && result.socialInsuranceBase().compareTo(cityPolicy.socialBaseUpper()) <= 0,
                 "缴费基数 " + result.socialInsuranceBase()));
 
         checks.add(check(
@@ -179,6 +204,15 @@ public final class PayrollEngine {
     }
 
     public PayrollPolicy policy() {
+        return defaultPolicy;
+    }
+
+    public PayrollPolicy policyFor(String city) {
+        String requested = city == null || city.isBlank() ? "默认" : city.trim();
+        PayrollPolicy policy = policyProvider.policyFor(requested);
+        if (policy == null) {
+            throw new PayrollException("城市「" + requested + "」未维护薪酬政策，请先在管理台维护");
+        }
         return policy;
     }
 
@@ -191,8 +225,10 @@ public final class PayrollEngine {
             YearMonth period,
             AttendanceSummary attendance,
             MonthlyVariablePay variablePay,
-            TaxState previousState) {
+            TaxState previousState,
+            PayrollAdjustment adjustment) {
         List<String> warnings = new ArrayList<>();
+        PayrollPolicy policy = resolvePolicy(employee);
 
         BigDecimal baseSalary = employee.baseSalary();
         BigDecimal positionAllowance = employee.positionAllowance();
@@ -273,6 +309,27 @@ public final class PayrollEngine {
 
         BigDecimal performanceBonus = variablePay.performanceBonus();
         BigDecimal otherAllowance = variablePay.otherAllowance();
+        BigDecimal coefficient = repository.performanceCoefficient(employee.employeeId(), period);
+        if (coefficient.compareTo(BigDecimal.ONE) != 0) {
+            performanceBonus = Money.round(performanceBonus.multiply(coefficient));
+            warnings.add(
+                    "绩效系数 "
+                            + trim(coefficient)
+                            + " 已应用，绩效奖金调整为 "
+                            + Money.format(performanceBonus)
+                            + " 元");
+        }
+        if (adjustment != null) {
+            if (adjustment.performanceBonus() != null) {
+                performanceBonus = adjustment.performanceBonus();
+                warnings.add(
+                        "绩效奖金已手工微调为 " + Money.format(performanceBonus) + " 元");
+            }
+            if (adjustment.otherAllowance() != null) {
+                otherAllowance = adjustment.otherAllowance();
+                warnings.add("其他补贴已手工微调为 " + Money.format(otherAllowance) + " 元");
+            }
+        }
         BigDecimal grossPay =
                 Money.round(
                         baseSalary
@@ -407,6 +464,10 @@ public final class PayrollEngine {
                                                 + " 在 "
                                                 + month
                                                 + " 的考勤数据缺失，拒绝按全勤推算，请先补录考勤"));
+    }
+
+    private PayrollPolicy resolvePolicy(Employee employee) {
+        return policyFor(employee.city());
     }
 
     private Employee requireEmployee(String employeeId) {

@@ -72,10 +72,18 @@ class PayrollToolsTest {
     @Test
     @DisplayName("政策工具返回考勤就绪月份与税率表")
     void returnsPolicy() {
-        String json = tools.getPayrollPolicy();
+        String json = tools.getPayrollPolicy(null);
 
         assertTrue(json.contains("\"data_through_period\":\"2026-10\""));
         assertTrue(json.contains("\"tax_brackets\""));
         assertTrue(json.contains("累计预扣"));
+    }
+
+    @Test
+    @DisplayName("政策工具可按城市查询")
+    void returnsPolicyByCity() {
+        String beijing = tools.getPayrollPolicy("北京");
+        assertTrue(beijing.contains("\"city\":\"北京\""));
+        assertTrue(beijing.contains("\"status\":\"OK\""));
     }
 }

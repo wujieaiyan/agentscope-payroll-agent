@@ -10,7 +10,9 @@
     "social_insurance_base": null,
     "special_additional_deduction": 3000.00,
     "hire_date": "2023-03-01",
-    "bank_account_masked": "6222 **** **** 1234"
+    "bank_account_masked": "6222 **** **** 1234",
+    "email": "zhangwei@example.com",
+    "city": "北京"
   },
   {
     "employee_id": "EMP002",
@@ -23,7 +25,9 @@
     "social_insurance_base": null,
     "special_additional_deduction": 2000.00,
     "hire_date": "2022-06-15",
-    "bank_account_masked": "6217 **** **** 5678"
+    "bank_account_masked": "6217 **** **** 5678",
+    "email": "lina@example.com",
+    "city": "上海"
   },
   {
     "employee_id": "EMP003",
@@ -36,7 +40,9 @@
     "social_insurance_base": null,
     "special_additional_deduction": 0.00,
     "hire_date": "2021-09-10",
-    "bank_account_masked": "6228 **** **** 9012"
+    "bank_account_masked": "6228 **** **** 9012",
+    "email": "wangqiang@example.com",
+    "city": "深圳"
   },
   {
     "employee_id": "EMP004",
@@ -49,7 +55,9 @@
     "social_insurance_base": null,
     "special_additional_deduction": 1000.00,
     "hire_date": "2020-01-06",
-    "bank_account_masked": "6214 **** **** 3456"
+    "bank_account_masked": "6214 **** **** 3456",
+    "email": "zhaomin@example.com",
+    "city": "杭州"
   },
   {
     "employee_id": "EMP005",
@@ -62,7 +70,9 @@
     "social_insurance_base": 37500.00,
     "special_additional_deduction": 2000.00,
     "hire_date": "2026-07-15",
-    "bank_account_masked": "6225 **** **** 7890"
+    "bank_account_masked": "6225 **** **** 7890",
+    "email": "chenchen@example.com",
+    "city": "北京"
   },
   {
     "employee_id": "EMP006",
@@ -75,6 +85,8 @@
     "social_insurance_base": null,
     "special_additional_deduction": 2000.00,
     "hire_date": "2024-05-20",
-    "bank_account_masked": "6216 **** **** 2345"
+    "bank_account_masked": "6216 **** **** 2345",
+    "email": "",
+    "city": "上海"
   }
 ]

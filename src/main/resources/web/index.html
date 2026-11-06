@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>薪酬管理台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>薪酬管理台</h1>
+    <span class="sub">Payroll Admin · 本地单机 · 金额由确定性引擎计算</span>
+  </div>
+  <div id="health" class="badge">连接中…</div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="employees" class="active">员工</button>
+  <button data-tab="reviews">考核</button>
+  <button data-tab="policies">城市政策</button>
+  <button data-tab="attendance">考勤</button>
+  <button data-tab="payroll">工资批次</button>
+  <button data-tab="chat">智能问答</button>
+</nav>
+
+<main>
+  <div id="import-report" class="card import-report hidden">
+    <div class="panel-head">
+      <h2 id="import-report-title">导入结果</h2>
+      <button id="import-report-close">关闭</button>
+    </div>
+    <div id="import-report-summary" class="cards small"></div>
+    <div id="import-report-errors" class="table-wrap"></div>
+  </div>
+
+  <section id="tab-employees" class="tab active">
+    <div class="toolbar">
+      <button id="employee-new" class="primary">新增员工</button>
+      <label class="button file-button">导入 Excel<input type="file" id="employee-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button" href="/api/import/templates/employees">下载导入模板</a>
+      <label class="inline"><input type="checkbox" id="employee-include-inactive"> 显示停用员工</label>
+      <span class="hint">停用员工不再参与核算与批量出账，历史批次不受影响。</span>
+    </div>
+    <form id="employee-form" class="card form hidden">
+      <h2 id="employee-form-title">新增员工</h2>
+      <div class="grid">
+        <label>工号<input name="employee_id" required placeholder="EMP007"></label>
+        <label>姓名<input name="name" required></label>
+        <label>部门<input name="department" required></label>
+        <label>岗位<input name="position"></label>
+        <label>城市<input name="city" value="北京"></label>
+        <label>邮箱<input name="email" type="email" placeholder="name@example.com"></label>
+        <label>基本工资<input name="base_salary" type="number" step="0.01" min="0" required></label>
+        <label>岗位津贴<input name="position_allowance" type="number" step="0.01" min="0" value="0"></label>
+        <label>公积金比例<input name="housing_fund_rate" type="number" step="0.0001" min="0" max="1" value="0.12"></label>
+        <label>社保基数（可空）<input name="social_insurance_base" type="number" step="0.01" min="0"></label>
+        <label>专项附加扣除<input name="special_additional_deduction" type="number" step="0.01" min="0" value="0"></label>
+        <label>入职日期<input name="hire_date" type="date" required></label>
+        <label>脱敏银行卡<input name="bank_account_masked" placeholder="6222 **** **** 1234"></label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">保存</button>
+        <button type="button" id="employee-cancel">取消</button>
+      </div>
+    </form>
+    <div class="card">
+      <table>
+        <thead>
+        <tr>
+          <th>工号</th><th>姓名</th><th>部门</th><th>岗位</th><th>城市</th>
+          <th class="num">基本工资</th><th class="num">岗位津贴</th><th>公积金</th>
+          <th>邮箱</th><th>状态</th><th>操作</th>
+        </tr>
+        </thead>
+        <tbody id="employee-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-reviews" class="tab">
+    <div class="toolbar">
+      <label class="inline">期间 <input type="month" id="review-period"></label>
+      <button id="review-refresh">刷新</button>
+      <label class="button file-button">导入 Excel<input type="file" id="review-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button" href="/api/import/templates/reviews">下载导入模板</a>
+      <span class="hint">绩效系数 0–2，乘当月绩效奖金后进入应发、个税与实发；未维护考核时按系数 1 处理。</span>
+    </div>
+    <form id="review-form" class="card form">
+      <h2>录入 / 更新考核</h2>
+      <div class="grid">
+        <label>员工<select name="employee_id" id="review-employee" required></select></label>
+        <label>期间<input name="period" type="month" required></label>
+        <label>考核分数（0–100）<input name="score" type="number" step="0.01" min="0" max="100" required></label>
+        <label>绩效系数（0–2）<input name="coefficient" type="number" step="0.0001" min="0" max="2" value="1.0000" required></label>
+        <label class="span-2">评语<input name="comment" maxlength="500"></label>
+      </div>
+      <div class="actions"><button type="submit" class="primary">保存考核</button></div>
+    </form>
+    <div class="card">
+      <table>
+        <thead>
+        <tr><th>期间</th><th>工号</th><th>姓名</th><th class="num">分数</th><th class="num">系数</th><th>评语</th><th>操作</th></tr>
+        </thead>
+        <tbody id="review-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-policies" class="tab">
+    <div class="toolbar">
+      <button id="policy-add">新增城市</button>
+      <span class="hint">城市政策决定社保基数上下限与缴费比例；个税税率表沿用全国累计预扣口径。</span>
+    </div>
+    <div class="split">
+      <div class="card list-card">
+        <h2>已维护城市</h2>
+        <ul id="policy-cities" class="city-list"></ul>
+      </div>
+      <form id="policy-form" class="card form">
+        <h2 id="policy-title">城市政策</h2>
+        <div id="policy-fields" class="grid"></div>
+        <h3>个税累计预扣税率表（只读）</h3>
+        <table class="mini">
+          <thead><tr><th class="num">累计应纳税所得额上限</th><th class="num">预扣率</th><th class="num">速算扣除数</th></tr></thead>
+          <tbody id="policy-tax-rows"></tbody>
+        </table>
+        <div class="actions">
+          <button type="submit" class="primary">保存政策</button>
+          <span id="policy-updated" class="hint"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section id="tab-attendance" class="tab">
+    <div class="toolbar">
+      <label class="inline">期间 <input type="month" id="attendance-period"></label>
+      <button id="attendance-load">加载考勤</button>
+      <label class="button file-button">导入 Excel<input type="file" id="attendance-import" accept=".xlsx,.xls" hidden></label>
+      <a class="button" href="/api/import/templates/attendance">下载导入模板</a>
+      <span class="hint">考勤由 HR 录入，系统不会按全勤推算；缺勤数据缺失的员工会在核算中失败并给出原因。</span>
+    </div>
+    <div class="card">
+      <table>
+        <thead>
+        <tr>
+          <th>工号</th><th>姓名</th><th>部门</th>
+          <th class="num">事假(天)</th><th class="num">病假(天)</th><th class="num">旷工(天)</th>
+          <th class="num">工作日加班(h)</th><th class="num">休息日加班(h)</th><th class="num">节假日加班(h)</th>
+          <th>状态</th><th>操作</th>
+        </tr>
+        </thead>
+        <tbody id="attendance-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-payroll" class="tab">
+    <div class="toolbar">
+      <label class="inline">期间 <input type="month" id="run-period"></label>
+      <label class="inline">范围 <select id="run-scope"></select></label>
+      <button id="run-preview" class="primary">预览核算</button>
+      <span class="hint">预览可微调绩效奖金与其他补贴；出账时系统会重新核算并落库。</span>
+    </div>
+
+    <div id="run-summary" class="cards hidden"></div>
+
+    <div id="run-panel" class="card hidden">
+      <div class="panel-head">
+        <h2 id="run-title">批次明细</h2>
+        <span id="run-status" class="badge"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+          <tr>
+            <th>工号</th><th>姓名</th><th>部门</th><th>城市</th><th>邮箱</th>
+            <th class="num">基本工资</th><th class="num">绩效奖金</th><th class="num">其他补贴</th>
+            <th class="num">应发</th><th class="num">扣款</th><th class="num">实发</th>
+            <th>邮件状态</th><th>提示</th>
+          </tr>
+          </thead>
+          <tbody id="run-rows"></tbody>
+        </table>
+      </div>
+      <div id="run-failures" class="failures hidden"></div>
+      <div class="actions">
+        <button id="run-apply-adjust" class="hidden">应用微调并重新预览</button>
+        <button id="run-finalize" class="primary hidden">出账并生成 Excel</button>
+        <a id="run-excel" class="button hidden" href="#" target="_blank" rel="noopener">下载 Excel</a>
+        <button id="run-send" class="danger hidden">确认无误，发送全员邮件</button>
+      </div>
+      <p id="run-hint" class="hint"></p>
+    </div>
+
+    <div id="email-report" class="card hidden">
+      <h2>邮件发送报告</h2>
+      <div id="email-report-summary" class="cards small"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>工号</th><th>姓名</th><th>邮箱</th><th>结果</th><th>原因</th></tr></thead>
+          <tbody id="email-report-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="panel-head">
+        <h2>历史批次</h2>
+        <button id="runs-refresh">刷新</button>
+      </div>
+      <table>
+        <thead>
+        <tr><th>批次</th><th>期间</th><th>范围</th><th>状态</th><th class="num">人数</th><th class="num">实发合计</th><th>创建时间</th><th>操作</th></tr>
+        </thead>
+        <tbody id="run-history-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-chat" class="tab">
+    <div class="toolbar">
+      <span class="badge" id="chat-model">模型加载中…</span>
+      <button id="chat-reset">清空对话</button>
+      <span class="hint">对话只做查询、核算与解释，数据维护请使用员工/考核/考勤页签；金额始终来自确定性引擎。</span>
+    </div>
+    <div class="card chat-card">
+      <div id="chat-messages" class="chat-messages">
+        <div class="chat-empty">
+          <strong>可以这样问：</strong>
+          <div class="chat-examples">
+            <button type="button" data-chat-example="算一下张伟 2026-10 的工资">算一下张伟 2026-10 的工资</button>
+            <button type="button" data-chat-example="研发部 2026-10 工资表">研发部 2026-10 工资表</button>
+            <button type="button" data-chat-example="上海社保基数上下限是多少？">上海社保基数上下限是多少？</button>
+            <button type="button" data-chat-example="替我检查 EMP005 2026-10 工资能不能发">检查 EMP005 能否发薪</button>
+          </div>
+        </div>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <textarea id="chat-input" rows="2" maxlength="2000"
+                  placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button type="submit" id="chat-send" class="primary">发送</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

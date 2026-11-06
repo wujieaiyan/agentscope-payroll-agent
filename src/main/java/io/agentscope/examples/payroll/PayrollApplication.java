@@ -13,23 +13,25 @@ import io.agentscope.examples.payroll.agent.PayrollTools;
 import io.agentscope.examples.payroll.domain.BatchPayrollResult;
 import io.agentscope.examples.payroll.domain.Money;
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.domain.PayrollResult;
 import io.agentscope.examples.payroll.domain.PayrollValidation;
-import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
 import io.agentscope.examples.payroll.service.PayrollEngine;
+import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.service.PayslipFormatter;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import io.agentscope.examples.payroll.web.PayrollWebServer;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * 薪酬智能体命令行入口。
  *
  * <pre>
+ *   --web                           启动本地 Web 管理台（员工/考核/政策/工资批次）
  *   --demo                         离线演示：批量核算 + 工资条 + 校验（无需模型）
  *   --payroll EMP001 --period 2026-10   单人核算并打印工资条
  *   --department 研发部 --period 2026-10 部门批量核算
@@ -50,9 +52,12 @@ public final class PayrollApplication {
                 return;
             }
 
-            PayrollEngine engine =
-                    new PayrollEngine(
-                            JsonPayrollRepository.demo(), PayrollPolicy.demoPolicy());
+            PayrollServices services = PayrollServices.open();
+            if (options.web) {
+                runWeb(services, options);
+                return;
+            }
+            PayrollEngine engine = services.engine();
             PayrollTools tools = new PayrollTools(engine);
             YearMonth period =
                     parsePeriod(
@@ -86,8 +91,40 @@ public final class PayrollApplication {
         }
     }
 
-    private static void runDemo(PayrollEngine engine, YearMonth period) {
+    private static void runWeb(PayrollServices services, Options options) throws Exception {
+        int defaultPort = 8080;
+        String envPort = System.getenv("PAYROLL_WEB_PORT");
+        if (options.port != null) {
+            defaultPort = parsePort(options.port);
+        } else if (envPort != null && !envPort.isBlank()) {
+            defaultPort = parsePort(envPort);
+        }
+        PayrollWebServer server = new PayrollWebServer(services, defaultPort);
+        Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "payroll-web-shutdown"));
+        server.start();
         System.out.println("=".repeat(72));
+        System.out.println("薪酬管理台  http://127.0.0.1:" + server.port());
+        System.out.println("数据库      " + services.database().url());
+        System.out.println("邮件模式    dry-run（只校验并记录，不会真实投递）");
+        System.out.println("输出目录    " + services.runService().outputDir().toAbsolutePath());
+        System.out.println("按 Ctrl+C 停止");
+        System.out.println("=".repeat(72));
+        new CountDownLatch(1).await();
+    }
+
+    private static int parsePort(String value) {
+        try {
+            int port = Integer.parseInt(value.trim());
+            if (port < 0 || port > 65535) {
+                throw new NumberFormatException("out of range");
+            }
+            return port;
+        } catch (NumberFormatException e) {
+            throw new PayrollException("端口不合法：" + value);
+        }
+    }
+
+    private static void runDemo(PayrollEngine engine, YearMonth period) {        System.out.println("=".repeat(72));
         System.out.println("薪酬核算离线演示  期间：" + period + "（不调用大模型）");
         System.out.println("=".repeat(72));
         BatchPayrollResult batch = engine.calculateDepartment(null, period);
@@ -239,11 +276,25 @@ public final class PayrollApplication {
                 薪酬核算智能体
 
                 用法：
+                  --web [--port 8080]                 启动本地 Web 管理台
                   --demo                              离线演示（无需模型）
                   --payroll EMP001 --period 2026-10   单人核算并打印工资条
                   --department 研发部 --period 2026-10 部门批量核算
                   --extract "帮我算下张伟10月的工资"    结构化意图抽取（建议使用 DashScope 模型）
                   无参数                               交互式对话
+
+                管理台：
+                  http://127.0.0.1:8080  维护员工/考核/城市政策/考勤，
+                  预览并微调工资批次，出账生成 Excel 并入库，确认后 dry-run 发送全员邮件。
+
+                数据与输出：
+                  data/payroll.mv.db     H2 文件库（首次启动自动导入演示数据）
+                  output/*.xlsx          工资批次 Excel
+                  PAYROLL_DB_URL         自定义 JDBC URL
+                  PAYROLL_DB_USER        数据库用户，默认 sa
+                  PAYROLL_DB_PASSWORD    数据库密码，默认空
+                  PAYROLL_OUTPUT_DIR     Excel 输出目录，默认 output
+                  PAYROLL_WEB_PORT       管理台端口，默认 8080
 
                 本地模型（默认）：
                   1. ollama serve
@@ -262,17 +313,21 @@ public final class PayrollApplication {
 
     private static final class Options {
         private boolean demo;
+        private boolean web;
         private boolean help;
         private String period;
         private String payrollId;
         private String department;
         private String extractText;
+        private String port;
 
         private static Options parse(String[] args) {
             Options options = new Options();
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--demo" -> options.demo = true;
+                    case "--web" -> options.web = true;
+                    case "--port" -> options.port = requireValue(args, ++i, "--port");
                     case "--help", "-h" -> options.help = true;
                     case "--period" -> options.period = requireValue(args, ++i, "--period");
                     case "--payroll" -> options.payrollId = requireValue(args, ++i, "--payroll");
