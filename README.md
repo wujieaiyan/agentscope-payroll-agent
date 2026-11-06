@@ -12,13 +12,14 @@
 自然语言对话（CLI / 管理台“智能问答”）   本地 Web 管理台（Spring Boot 3 / 127.0.0.1）
       │                                     │
       ▼                                     ▼
-ReActAgent                         PayrollWebController（REST）
-  ├─ 意图识别 / 追问补参 / 工具编排        ├─ 员工 / 考核 / 城市政策 / 考勤维护
-  │  / 结果解释                          │  （含 Excel 导入与模板下载）
-  ▼ @Tool（8 个，返回结构化 JSON）         ├─ 工资批次预览、微调、出账
-PayrollTools                             ├─ 对话式问答（复用同一 ReActAgent）
-      │                                  └─ 确认后 dry-run 全员发信
-      │                                       │
+PayrollChatService（固定三阶段编排）   PayrollWebController（REST）
+  ├─ ① 计算智能体：理解诉求 / 调用工具        ├─ 员工 / 考核 / 城市政策 / 考勤维护
+  ├─ ② 验证智能体：对核算对象独立校验        │  （含 Excel 导入与模板下载）
+  └─ ③ 核算智能体：汇总记录生成最终答复      ├─ 工资批次预览、微调、出账
+      │                                     ├─ 对话式问答（SSE 流式）
+      ▼ @Tool（8 个，返回结构化 JSON）        └─ 确认后 dry-run 全员发信
+PayrollTools
+      │
       └──────────────┬───────────────────────┘
                      ▼
 PayrollEngine（BigDecimal 全链路）
@@ -45,7 +46,7 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
 | 导入模板 | 管理台一键下载标准表头与填写说明，避免列名不一致 |
-| 对话界面 | “智能问答”页签复用同一 `ReActAgent`，SSE 流式输出回答、工具时间线与模型思考过程 |
+| 对话界面 | “智能问答”页签由三个智能体串行完成：计算 → 验证 → 核算，SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
 | 城市政策 | 每个城市独立维护个税参数、社保公积金比例与基数上下限 |
 | 工资批次 | 预览 → 人工微调 → 出账（服务端重算）→ 确认发送 |
 | Excel 导出 | 工资明细、核算失败、出账说明三个工作表 |
@@ -155,18 +156,63 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | 事件 | data | 前端行为 |
 | --- | --- | --- |
 | `start` | `{"model":"..."}` | 记录实际模型 |
-| `phase` | `{"label":"模型思考中…"}` | 在思考面板追加阶段提示（相同阶段去重） |
+| `agent_start` | `{"agent":"calculator","label":"① 计算智能体：…"}` | 新建一个智能体区块 |
+| `phase` | `{"label":"模型思考中…"}` | 在当前智能体区块追加阶段提示（相同阶段去重） |
 | `thinking` | `{"text":"增量"}` | 追加模型原生思考内容 |
 | `tool_start` | `{"tool_call_id","name"}` | 新增工具步骤 |
 | `tool_args` | `{"tool_call_id","text"}` | 追加工具参数 JSON |
 | `tool_result` | `{"tool_call_id","name","state"}` | 标记成功/失败等状态 |
-| `text` | `{"text":"增量"}` | 追加回答正文 |
+| `agent_text` | `{"agent":"validator","text":"增量"}` | 追加中间智能体的阶段输出（计算记录 / 验证记录） |
+| `agent_end` | `{"agent":"calculator"}` | 标记智能体区块完成 |
+| `text` | `{"text":"增量"}` | 追加回答正文（仅核算智能体） |
 | `done` | `{"reply","tools","model"}` | 收尾：移除光标、显示工具汇总、折叠思考面板 |
 | `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
 
 思考面板默认展开、结束后自动折叠并显示耗时，可手动重新展开；工具调用以步骤形式混排在同一时间线中。
+前端按 `agent_start/agent_end` 将阶段提示、思考与工具调用归入对应智能体区块，最终答复只取 `text` 事件。
 流式接口的校验错误（空消息、超长）同样以 `event:error` 返回，避免 `Accept: text/event-stream`
 下无法序列化 JSON 错误体。
+
+## 多智能体编排
+
+对话不是单 Agent ReAct 循环，而是由 `PayrollChatService` 固定编排的三段流水线：
+
+| 阶段 | 智能体 | 可用工具 | 职责与产出 |
+| --- | --- | --- | --- |
+| ① 计算 | `PayrollCalculatorAgent` | `list_employees`、`get_employee_profile`、`get_attendance_summary`、`calculate_payroll`、`calculate_department_payroll`、`generate_payslip`、`get_payroll_policy` | 理解诉求、解析员工与期间、调用核算工具，输出“核算对象 / 计算结果 / 风险提示 / 待验证点”的计算记录 |
+| ② 验证 | `PayrollValidatorAgent` | `validate_payroll`、`get_payroll_policy`、`get_employee_profile`、`list_employees`、`get_attendance_summary` | 对计算记录中的每个核算对象调用 `validate_payroll`，复核勾稽关系，输出“结论 / 校验明细 / 发现问题 / 复核建议” |
+| ③ 核算 | `PayrollAccountantAgent` | 无（只读前两阶段记录） | 汇总计算与验证记录，生成最终 HR 答复；验证不通过时明确“暂不可发薪” |
+
+- **核算对象提取**：编排层从 `calculate_payroll` / `generate_payslip` 的工具参数中提取 `employee_id + period`；
+  部门批量核算则按部门展开最多 3 名员工作为抽检对象，保证验证阶段有明确输入。
+- **固定顺序 + 超时**：每个阶段 150 秒超时，顺序与降级行为不依赖模型判断。
+- **验证降级**：验证智能体异常时不中断整轮对话，核算智能体收到“验证失败：… 本轮未完成独立验证”，
+  并被要求不得声称已通过校验。
+- **无计算对象时跳过验证**：纯政策 / 考勤咨询不触发 `validate_payroll`，验证区块显示“本轮无需校验”。
+
+### 控制台日志
+
+开发排查以 `[多智能体]` 为前缀，输出到 stderr（`logback.xml` 配置），与 CLI 结果分开：
+
+```
+[多智能体] 初始化完成：计算 / 验证 / 核算三个智能体，模型=ollama:qwen2.5:3b-instruct
+[多智能体] 计算智能体工具集：[...]
+[多智能体][calculator] 阶段开始：① 计算智能体：理解诉求并调用核算工具
+[多智能体][calculator] 调用工具：calculate_payroll
+[多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，参数={"employee_id":"张伟","period":"2026-10"}
+[多智能体][calculator] 阶段结束：耗时=20631ms，工具=[calculate_payroll]
+[多智能体] ① 计算完成：耗时=20631ms，核算对象=1，输出=...
+[多智能体][validator] 阶段开始：② 验证智能体：独立复核勾稽关系
+[多智能体] ② 验证完成：输出=...
+[多智能体][accountant] 阶段开始：③ 核算智能体：汇总计算与验证结论
+[多智能体] 完成：总耗时=36771ms，工具=[calculate_payroll, validate_payroll]，答复长度=242
+```
+
+- 阶段输入 / 输出全文为 DEBUG；INFO 只打印截断预览，避免日志过长。
+- `io.agentscope.core.tool.Toolkit` 的注册日志已降到 WARN，工具集改为每角色一行 INFO。
+- Web 侧另有 `[SSE] 对话开始 / 完成 / 失败` 与耗时日志。
+
+完整交接说明（契约、排障、限制）见 [`docs/multi-agent-handoff.md`](docs/multi-agent-handoff.md)。
 
 ## Excel 导入
 
@@ -347,6 +393,10 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 7. **校验独立于计算**：`validate_payroll` 检查勾稽关系，计算正确不等于可以发薪。
 8. **发送需显式确认 + 幂等**：`confirm=true` 才能发送，`SENT` 后再次发送被拒绝。
 9. **敏感数据最小暴露**：工具只返回脱敏银行卡；生产环境应叠加数据权限与审计。
+10. **多智能体确定性编排**：三个阶段由 `PayrollChatService` 固定顺序执行，不做 LLM 路由，
+    保证“先算、再验、后答复”的顺序、超时与可审计性；验证失败时降级并明确告知未完成独立验证。
+11. **按角色裁剪工具集**：计算智能体不能调用 `validate_payroll`，验证智能体不能调用核算工具，
+    从工具层面约束职责，降低越权与自证风险。
 
 ## 测试
 
@@ -354,7 +404,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 mvn test
 ```
 
-共 41 个测试，覆盖：
+共 43 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -367,7 +417,8 @@ mvn test
 - Excel 导入：员工部分成功与失败行号、考核系数/非法员工、考勤覆盖与负数拒绝、
   缺必填列拒绝、模板表头与填写说明
 - 管理台对话与导入：回答与工具列表、空消息 400、重置、HTTP 上传 Excel、模板下载、未知类型 400
-- SSE 流式对话：思考/阶段/工具/文本/完成事件、SSE 错误事件、空消息与超长消息处理
+- SSE 流式对话：多智能体 `agent_start/agent_text/agent_end`、思考/阶段/工具/文本/完成事件、
+  阶段顺序、SSE 错误事件、空消息与超长消息处理
 - Ollama 思考适配器：request 携带 think 与工具、thinking 增量转为思考块、工具调用参数解析
 - Spring Boot 管理台（随机端口真实 HTTP）：静态页、员工、预览、出账、dry-run 发送、Excel 下载、
   批次历史、统一错误结构与 404 处理
@@ -394,7 +445,7 @@ src/main/java/io/agentscope/examples/payroll
 ├── config
 │   └── PayrollConfiguration.java # 管理台 Bean 装配与启动信息
 ├── agent
-│   ├── PayrollAgentFactory.java  # ReActAgent 装配、系统提示词与 Ollama 思考开关
+│   ├── PayrollAgentFactory.java  # 计算/验证/核算三个 ReActAgent、角色提示词与 Ollama 思考开关
 │   ├── PayrollTools.java         # 8 个 @Tool
 │   └── PayrollIntent.java        # 结构化意图
 ├── model
@@ -411,8 +462,8 @@ src/main/java/io/agentscope/examples/payroll
 │   ├── ExcelExporter.java        # POI 导出
 │   ├── ExcelImportService.java   # 员工/考核/考勤导入与模板
 │   ├── PayrollChat.java          # 对话接口（便于测试替身）
-│   ├── ChatStreamListener.java   # 流式事件回调：思考/阶段/工具/文本/完成
-│   ├── PayrollChatService.java   # ReActAgent 会话封装与事件流收集
+│   ├── ChatStreamListener.java   # 流式事件回调：智能体/思考/阶段/工具/文本/完成
+│   ├── PayrollChatService.java   # 三阶段编排、核算对象提取、超时降级与阶段日志
 │   ├── DryRunEmailGateway.java   # dry-run 邮件网关
 │   ├── PayrollServices.java      # 组装数据库、引擎、对话与批次服务
 │   └── PayslipFormatter.java     # 工资条渲染

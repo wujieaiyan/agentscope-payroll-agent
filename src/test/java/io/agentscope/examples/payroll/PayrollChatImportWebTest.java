@@ -133,6 +133,9 @@ class PayrollChatImportWebTest {
 
         String body = response.body();
         assertTrue(body.contains("event:start"), body);
+        assertTrue(body.contains("event:agent_start"), body);
+        assertTrue(body.contains("event:agent_text"), body);
+        assertTrue(body.contains("event:agent_end"), body);
         assertTrue(body.contains("event:thinking"), body);
         assertTrue(body.contains("event:phase"), body);
         assertTrue(body.contains("event:tool_start"), body);
@@ -140,6 +143,9 @@ class PayrollChatImportWebTest {
         assertTrue(body.contains("event:tool_result"), body);
         assertTrue(body.contains("event:text"), body);
         assertTrue(body.contains("event:done"), body);
+        assertTrue(body.contains("\"agent\":\"calculator\""), body);
+        assertTrue(body.contains("\"agent\":\"validator\""), body);
+        assertTrue(body.contains("\"agent\":\"accountant\""), body);
         assertTrue(body.contains("\"reply\":\"回答：张伟的工资\""), body);
         assertTrue(body.contains("\"tools\":[\"calculate_payroll\"]"), body);
 
@@ -264,13 +270,21 @@ class PayrollChatImportWebTest {
                 throw new PayrollException("模型暂不可用");
             }
             listener.onStart("stub:test");
+            listener.onAgentStart("calculator", "① 计算智能体：解析诉求");
             listener.onPhase("模型思考中…");
             listener.onThinking("先确认员工与期间。");
             listener.onToolStart("call-1", "calculate_payroll");
             listener.onToolArgs("call-1", "{\"employee_id\":\"EMP001\"}");
             listener.onToolResult("call-1", "calculate_payroll", "SUCCESS");
+            listener.onAgentOutput("calculator", "计算记录：EMP001 2026-10");
+            listener.onAgentEnd("calculator");
+            listener.onAgentStart("validator", "② 验证智能体：独立复核");
+            listener.onAgentOutput("validator", "验证结论：通过");
+            listener.onAgentEnd("validator");
+            listener.onAgentStart("accountant", "③ 核算智能体：汇总");
             listener.onText("回答：");
             listener.onText(message);
+            listener.onAgentEnd("accountant");
             listener.onDone(
                     new Reply("回答：" + message, List.of("calculate_payroll"), "stub:test"));
         }

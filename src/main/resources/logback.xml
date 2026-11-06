@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <!-- 日志写 stderr，避免与 CLI 的核算结果输出混在一起。 -->
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
         <encoder>
             <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
-    <root level="WARN">
-        <appender-ref ref="STDOUT"/>
+    <logger name="io.agentscope.core.tool.Toolkit" level="WARN"/>
+    <logger name="reactor" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+    <root level="INFO">
+        <appender-ref ref="STDERR"/>
     </root>
 </configuration>

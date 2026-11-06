@@ -396,8 +396,36 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 5px;
   padding: 8px 10px;
   border-top: 1px dashed var(--border);
-  max-height: 220px;
+  max-height: 320px;
   overflow-y: auto;
+}
+.chat-agent-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #ffffff;
+}
+.chat-agent-block.done { border-color: #cbd5e1; }
+.chat-agent-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+.chat-agent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.chat-agent-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  color: #475569;
 }
 .chat-thinking-reasoning {
   white-space: pre-wrap;

@@ -1,10 +1,6 @@
 package io.agentscope.examples.payroll;
 
 import io.agentscope.core.ReActAgent;
-import io.agentscope.core.event.AgentEvent;
-import io.agentscope.core.event.ExceedMaxItersEvent;
-import io.agentscope.core.event.TextBlockDeltaEvent;
-import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
@@ -15,6 +11,9 @@ import io.agentscope.examples.payroll.domain.Money;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollResult;
 import io.agentscope.examples.payroll.domain.PayrollValidation;
+import io.agentscope.examples.payroll.service.ChatStreamListener;
+import io.agentscope.examples.payroll.service.PayrollChat;
+import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.service.PayslipFormatter;
@@ -79,11 +78,13 @@ public final class PayrollApplication {
                 return;
             }
 
-            try (ReActAgent agent = PayrollAgentFactory.create(tools)) {
-                if (options.extractText != null) {
+            if (options.extractText != null) {
+                try (ReActAgent agent = PayrollAgentFactory.createIntentAgent(tools)) {
                     runExtraction(agent, options.extractText);
-                } else {
-                    runInteractive(agent);
+                }
+            } else {
+                try (PayrollChatService chat = new PayrollChatService(engine)) {
+                    runInteractive(chat);
                 }
             }
         } catch (PayrollException e) {
@@ -158,11 +159,11 @@ public final class PayrollApplication {
         System.out.println(JsonSupport.toJson(intent));
     }
 
-    private static void runInteractive(ReActAgent agent) throws Exception {
+    private static void runInteractive(PayrollChat chat) throws Exception {
         String modelId = PayrollAgentFactory.modelId();
         System.out.println("=".repeat(72));
         System.out.println(
-                "薪酬核算智能体  模型："
+                "薪酬多智能体  计算 → 验证 → 核算  模型："
                         + modelId
                         + (modelId.startsWith("ollama:")
                                 ? "  Ollama：" + PayrollAgentFactory.ollamaBaseUrl()
@@ -184,22 +185,48 @@ public final class PayrollApplication {
                 continue;
             }
             System.out.print("\n薪酬智能体：");
-            agent.streamEvents(new UserMessage(input.trim()))
-                    .doOnNext(PayrollApplication::renderEvent)
-                    .blockLast();
+            try {
+                chat.stream(input.trim(), new ConsoleChatListener());
+            } catch (PayrollException e) {
+                System.out.println("\n错误：" + e.getMessage());
+            }
             System.out.println();
         }
     }
 
-    private static void renderEvent(AgentEvent event) {
-        if (event instanceof TextBlockDeltaEvent delta) {
-            System.out.print(delta.getDelta());
+    /** CLI 复用与管理台相同的三段流水线，只把事件渲染成终端文本。 */
+    private static final class ConsoleChatListener implements ChatStreamListener {
+
+        @Override
+        public void onAgentStart(String agent, String label) {
+            System.out.println("\n\n[" + label + "]");
+        }
+
+        @Override
+        public void onAgentOutput(String agent, String delta) {
+            System.out.print(delta);
             System.out.flush();
-        } else if (event instanceof ToolCallStartEvent tool) {
-            System.out.println("\n  [调用工具] " + tool.getToolCallName());
-            System.out.print("  ");
-        } else if (event instanceof ExceedMaxItersEvent) {
-            System.out.println("\n  [提示] 已达到最大工具调用轮次，请缩小问题范围后重试。");
+        }
+
+        @Override
+        public void onToolStart(String toolCallId, String toolName) {
+            System.out.println("\n  [工具] " + toolName);
+        }
+
+        @Override
+        public void onToolResult(String toolCallId, String toolName, String state) {
+            System.out.println("  [状态] " + toolName + " → " + state);
+        }
+
+        @Override
+        public void onPhase(String label) {
+            System.out.println("\n  [阶段] " + label);
+        }
+
+        @Override
+        public void onText(String delta) {
+            System.out.print(delta);
+            System.out.flush();
         }
     }
 
@@ -277,6 +304,16 @@ public final class PayrollApplication {
                 管理台：
                   http://127.0.0.1:8080  维护员工/考核/城市政策/考勤，
                   预览并微调工资批次，出账生成 Excel 并入库，确认后 dry-run 发送全员邮件。
+
+                对话流程（多智能体）：
+                  ① 计算智能体  理解诉求，调用 calculate_payroll 等工具完成核算
+                  ② 验证智能体  对核算对象调用 validate_payroll，复核勾稽关系与风险
+                  ③ 核算智能体  汇总计算与验证记录，生成最终答复
+                  三阶段按固定顺序执行；验证失败时降级为“本轮未完成独立验证”。
+
+                日志：
+                  控制台输出每个阶段的开始/结束、耗时、工具调用参数与结果；
+                  日志写入 stderr，与 CLI 核算结果分开，便于开发排查。
 
                 数据与输出：
                   data/payroll.mv.db     H2 文件库（首次启动自动导入演示数据）

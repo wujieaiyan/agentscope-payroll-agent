@@ -62,7 +62,7 @@ public class PayrollWebController {
             MediaType.parseMediaType(
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     private static final int MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-    private static final long SSE_TIMEOUT_MS = 300_000L;
+    private static final long SSE_TIMEOUT_MS = 600_000L;
 
     private final PayrollServices services;
     private final Executor chatStreamExecutor;
@@ -211,6 +211,8 @@ public class PayrollWebController {
 
     private void streamChat(String message, SseEmitter emitter) {
         SseChannel channel = new SseChannel(emitter);
+        long startedAt = System.currentTimeMillis();
+        log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
         try {
             services.chat()
                     .stream(
@@ -219,6 +221,25 @@ public class PayrollWebController {
                                 @Override
                                 public void onStart(String model) {
                                     channel.send("start", payload("model", model));
+                                }
+
+                                @Override
+                                public void onAgentStart(String agent, String label) {
+                                    channel.send(
+                                            "agent_start",
+                                            payload("agent", agent, "label", label));
+                                }
+
+                                @Override
+                                public void onAgentOutput(String agent, String delta) {
+                                    channel.send(
+                                            "agent_text",
+                                            payload("agent", agent, "text", delta));
+                                }
+
+                                @Override
+                                public void onAgentEnd(String agent) {
+                                    channel.send("agent_end", payload("agent", agent));
                                 }
 
                                 @Override
@@ -282,11 +303,16 @@ public class PayrollWebController {
                                 }
                             });
             emitter.complete();
+            log.info("[SSE] 对话完成：耗时={}ms", System.currentTimeMillis() - startedAt);
         } catch (PayrollException e) {
+            log.warn(
+                    "[SSE] 对话失败：耗时={}ms，原因={}",
+                    System.currentTimeMillis() - startedAt,
+                    e.getMessage());
             channel.send("error", payload("message", e.getMessage()));
             emitter.complete();
         } catch (RuntimeException e) {
-            log.error("流式对话失败", e);
+            log.error("[SSE] 流式对话异常", e);
             channel.send("error", payload("message", "对话失败，请查看服务端日志"));
             emitter.complete();
         }
@@ -426,6 +452,11 @@ public class PayrollWebController {
             }
         }
         return payload;
+    }
+
+    private static String abbreviate(String text, int limit) {
+        String flattened = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+        return flattened.length() <= limit ? flattened : flattened.substring(0, limit) + "…";
     }
 
     /** 客户端断开后停止写入，避免异常打断 Agent 事件流。 */

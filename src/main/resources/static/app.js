@@ -849,6 +849,7 @@ function appendStreamingMessage() {
   let reasoning = null;
   let lastPhase = '';
   let activeTool = null;
+  let activeAgent = null;
   let fullText = '';
   let finished = false;
 
@@ -858,6 +859,7 @@ function appendStreamingMessage() {
   const revealThinking = () => {
     thinking.classList.remove('empty');
   };
+  const currentBody = () => (activeAgent ? activeAgent.body : thinkingBody);
   const appendPhase = (text) => {
     if (!text || text === lastPhase) return;
     lastPhase = text;
@@ -865,19 +867,62 @@ function appendStreamingMessage() {
     const line = document.createElement('div');
     line.className = 'chat-thinking-phase';
     line.textContent = text;
-    thinkingBody.append(line);
+    currentBody().append(line);
+    if (activeAgent) activeAgent.textNode = null;
     scroll();
   };
 
   return {
     appendPhase,
+    startAgent(agent, label) {
+      revealThinking();
+      const block = document.createElement('div');
+      block.className = 'chat-agent-block';
+      const header = document.createElement('div');
+      header.className = 'chat-agent-name';
+      header.textContent = label || agent || '智能体';
+      const body = document.createElement('div');
+      body.className = 'chat-agent-body';
+      block.append(header, body);
+      thinkingBody.append(block);
+      activeAgent = { agent, block, body, textNode: null };
+      reasoning = null;
+      lastPhase = '';
+      scroll();
+    },
+    appendAgentText(agent, delta) {
+      if (!delta) return;
+      revealThinking();
+      if (!activeAgent || (agent && activeAgent.agent !== agent)) {
+        const span = document.createElement('div');
+        span.className = 'chat-agent-text';
+        span.textContent = delta;
+        currentBody().append(span);
+        scroll();
+        return;
+      }
+      if (!activeAgent.textNode) {
+        activeAgent.textNode = document.createElement('div');
+        activeAgent.textNode.className = 'chat-agent-text';
+        activeAgent.body.append(activeAgent.textNode);
+      }
+      activeAgent.textNode.textContent += delta;
+      scroll();
+    },
+    finishAgent(agent) {
+      if (!activeAgent || (agent && activeAgent.agent !== agent)) return;
+      activeAgent.block.classList.add('done');
+      activeAgent = null;
+      reasoning = null;
+    },
     appendThinking(delta) {
       if (!delta) return;
       revealThinking();
-      if (!reasoning) {
+      if (!reasoning || (activeAgent && reasoning.parentElement !== activeAgent.body)) {
         reasoning = document.createElement('div');
         reasoning.className = 'chat-thinking-reasoning';
-        thinkingBody.append(reasoning);
+        currentBody().append(reasoning);
+        if (activeAgent) activeAgent.textNode = null;
       }
       reasoning.textContent += delta;
       scroll();
@@ -897,7 +942,8 @@ function appendStreamingMessage() {
       stateEl.className = 'chat-tool-state';
       stateEl.textContent = '调用中…';
       step.append(nameEl, argsEl, stateEl);
-      thinkingBody.append(step);
+      currentBody().append(step);
+      if (activeAgent) activeAgent.textNode = null;
       activeTool = { toolCallId, step, argsEl, stateEl };
       scroll();
     },
@@ -924,6 +970,7 @@ function appendStreamingMessage() {
     finish(reply) {
       if (finished) return;
       finished = true;
+      activeAgent = null;
       bubble.classList.remove('chat-streaming');
       if (!fullText && reply && reply.reply) {
         fullText = reply.reply;
@@ -1032,6 +1079,15 @@ async function sendChat(override) {
   try {
     await streamChat(message, (event, data) => {
       switch (event) {
+        case 'agent_start':
+          view.startAgent(data.agent, data.label);
+          break;
+        case 'agent_text':
+          view.appendAgentText(data.agent, data.text);
+          break;
+        case 'agent_end':
+          view.finishAgent(data.agent);
+          break;
         case 'phase':
           view.appendPhase(data.label);
           break;
