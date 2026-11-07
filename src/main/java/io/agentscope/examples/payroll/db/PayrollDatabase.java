@@ -106,6 +106,34 @@ public final class PayrollDatabase {
                 ON chat_messages (session_id, message_id)
             """,
             """
+            CREATE TABLE IF NOT EXISTS chat_tool_traces (
+                trace_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                message_id BIGINT NOT NULL,
+                session_id BIGINT NOT NULL,
+                tool_call_id VARCHAR(128),
+                tool_name VARCHAR(64) NOT NULL,
+                agent VARCHAR(32),
+                args_json CLOB,
+                result_json CLOB,
+                truncated BOOLEAN NOT NULL DEFAULT FALSE,
+                result_state VARCHAR(16),
+                duration_ms BIGINT NOT NULL DEFAULT 0,
+                employees_json CLOB,
+                period VARCHAR(16),
+                department VARCHAR(64),
+                amounts_json CLOB,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_message
+                ON chat_tool_traces (message_id, trace_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_session
+                ON chat_tool_traces (session_id)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS employees (
                 employee_id VARCHAR(32) PRIMARY KEY,
                 name VARCHAR(64) NOT NULL,

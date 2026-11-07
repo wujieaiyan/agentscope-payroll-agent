@@ -417,3 +417,101 @@ DRAFT / REJECTED --submit--> PENDING_APPROVAL --approve--> APPROVED --finalize--
 
 - 任务 #50：对话金额工具调用级追溯（把智能体工具结果与会话消息关联）。
 - 任务 #51：回归测试与交接文档整合；任务 #50 完成后再统一跑一次全量回归。
+
+## 17. 对话金额工具调用级追溯（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #50 已完成：每条助手消息都能展开查看“计算依据”，包含工具、参数、结果、
+金额、员工、期间与部门。追溯只随会话保存，不写审计日志。
+
+### 采集方式
+
+- AgentScope 2.0.1 的 `ToolResultEndEvent` 只有 `toolCallId/toolCallName/state`，
+  **没有结果内容**，因此结果必须在工具方法内部采集。
+- `PayrollTools` 的所有内置工具统一走 `execute(toolName, args, supplier)`：
+  记录参数、完整结果与耗时写入 `ToolTraceRecorder`（FIFO，按工具名配对）。
+- 编排层收到 `ToolResultEndEvent` 时调用 `traceRecorder.take(toolName)` 认领最早一条记录，
+  补上 `tool_call_id` 与当前阶段（`calculator/validator/accountant`），形成 `ChatToolTrace`。
+- MCP 等外部工具没有采集记录，退化为“事件参数 + `ToolTraceExtractor`”，结果为空、耗时 0。
+- 每个阶段结束（`finally`）清空 recorder，避免失败/中断调用串到下一阶段。
+- 同名工具并发风险：AgentScope 工具调用按顺序串行执行，FIFO 足以配对；
+  若未来改为并行工具调用，需要在事件里补充结果或改用 tool_call_id 直接关联。
+
+### 金额与证据提取
+
+`ToolTraceExtractor` 从参数与 `result.data` 中提取：
+
+- 金额白名单：`base_salary`、`gross_pay`、`attendance_deduction`、`taxable_gross`、
+  个人/单位社保与公积金、`total_deductions`、`net_pay`、`employer_cost`、
+  `total_gross`、`total_net`、`total_employer_cost`、`cumulative_tax`、`tax_this_month`、`tax`。
+- 员工：对象里的 `employee_id`、数组里的字符串或对象的 `employee_id`，最多 50 个。
+- 期间/部门：优先取参数，其次取结果。
+- 批量结果只取 `totals` 顶层合计；`records` 逐人明细不展开金额，避免重复且无法归属。
+- 结果超过 8KB 时截断并追加“（已截断）”，`truncated=true`；
+  **金额提取始终基于截断前的完整结果**。
+
+### 持久化
+
+- 新表 `chat_tool_traces`：`trace_id`、`message_id`、`session_id`、`tool_call_id`、
+  `tool_name`、`agent`、`args_json`、`result_json`、`truncated`、`result_state`、
+  `duration_ms`、`employees_json`、`period`、`department`、`amounts_json`、`created_at`。
+  索引：`(message_id, trace_id)`、`(session_id)`。
+- `H2ChatStore.appendAssistant(...)` 在同一事务里插入助手消息与全部追溯，
+  避免“有消息无依据”；失败整体回滚并返回 `null`，SSE 仍正常结束。
+- `clear(sessionId)` 与 `delete(sessionId)` 都会删除对应追溯，防止孤立数据。
+- `ChatSessionManager.complete(...)` 返回保存后的 `message_id`，供 `done` 事件携带。
+
+### SSE 与接口
+
+- `tool_result` 新增：`duration_ms`、`amounts`、`employees`、`period`、`department`、`truncated`
+  （空值不下发）。
+- `done` 新增：`message_id`、`trace_count`。
+- 新增 `GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces`
+  （`chat:use`），先用 `requireOwned` 校验会话归属，再按 `session_id + message_id` 查询；
+  跨用户或会话已删除返回 400。
+
+### 前端
+
+- 助手回答下方新增 `<details class="chat-traces">`“计算依据 · N 次工具调用”。
+- 实时回答：`done.message_id` 到达后按需拉取追溯，避免把大段 JSON 挤进 SSE。
+- 历史消息：`appendStoredMessage` 渲染后异步拉取，失败只打 `console.warn`，不影响正文。
+- 每个工具卡片显示：状态、耗时、金额项数、智能体阶段、期间/部门、员工 chips、
+  金额卡片（中文标签 + `¥` 千分位）、参数与结果的格式化 JSON。
+- 样式与“思考过程”面板保持一致的微信风格，金额网格自适应列宽。
+
+### 调试日志
+
+- `[多智能体][stage] 工具结束：tool，state，耗时，参数，金额，员工，期间`：逐次调用证据。
+- `[多智能体] 工具追溯汇总：N 次调用，金额类 M 次`：每轮结束汇总。
+- `[会话] 回答已保存：sessionId，messageId，工具追溯 N 条`：确认持久化成功。
+- 前端 `[计算依据] 加载失败：...`：历史追溯接口失败时保留正文。
+
+### 关键文件
+
+- `support/ToolTraceExtractor.java`、`agent/ToolTraceRecorder.java`、`agent/PayrollTools.java`
+- `domain/ChatToolTrace.java`、`service/PayrollChatService.java`
+- `db/H2ChatStore.java`、`db/PayrollDatabase.java`、`service/ChatSessionManager.java`
+- `web/ChatSse.java`、`web/ChatSessionController.java`
+- `static/app.js`、`static/style.css`
+
+### 测试
+
+- 新增 `ToolTraceExtractorTest`（4）、`ToolTraceRecorderTest`（4）、
+  `H2ChatTraceStoreTest`（3）、`ChatTraceWebTest`（1）。
+- 覆盖：金额/员工/期间提取、批量只取合计、FIFO 配对、未知工具、8KB 截断与金额完整性、
+  消息+追溯同事务、跨会话隔离、清空/删除级联、SSE 字段、依据接口与跨用户 400。
+- 全量 `mvn test` 124 个测试通过。
+
+### 已知限制
+
+1. 追溯依赖工具内部埋点；第三方 MCP 工具只有参数，没有结果内容。
+2. 金额提取基于字段白名单，工具返回结构改名后需要同步维护。
+3. 单条结果最多保存 8KB，超长明细仍需回到工资批次/工资条查看。
+4. 未提供按金额、员工反查追溯的检索接口；当前只能按消息读取。
+5. 管理台未做追溯导出，也未把追溯接入审计日志（按任务决策）。
+
+### 下一步
+
+- 任务 #51：回归测试与交接文档整合。
+- 可选增强：追溯反查（按员工/期间/金额筛选）、Excel/PDF 依据导出、
+  MCP 工具结果采集（若 AgentScope 后续事件暴露结果内容）。
+

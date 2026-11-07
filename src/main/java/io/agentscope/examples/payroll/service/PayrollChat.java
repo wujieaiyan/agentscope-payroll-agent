@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import java.util.List;
 
 /** 管理台对话入口，便于在测试中替换为固定实现。 */
@@ -29,7 +30,17 @@ public interface PayrollChat extends AutoCloseable {
     default void close() {
     }
 
-    /** 一次对话结果；tools 为本次回答调用过的工具名，便于界面展示。 */
-    record Reply(String reply, List<String> tools, String model) {
+    /** 一次对话结果；tools 为本次回答调用过的工具名，traces 为逐次调用的依据快照。 */
+    record Reply(
+            String reply, List<String> tools, String model, List<ChatToolTrace> traces) {
+
+        public Reply {
+            tools = tools == null ? List.of() : List.copyOf(tools);
+            traces = traces == null ? List.of() : List.copyOf(traces);
+        }
+
+        public Reply(String reply, List<String> tools, String model) {
+            this(reply, tools, model, List.of());
+        }
     }
 }

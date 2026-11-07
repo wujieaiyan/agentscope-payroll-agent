@@ -206,17 +206,35 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 | `thinking` | `{"text":"增量"}` | 追加模型原生思考内容 |
 | `tool_start` | `{"tool_call_id","name"}` | 新增工具步骤 |
 | `tool_args` | `{"tool_call_id","text"}` | 追加工具参数 JSON |
-| `tool_result` | `{"tool_call_id","name","state"}` | 标记成功/失败等状态 |
+| `tool_result` | `{"tool_call_id","name","state","duration_ms","amounts","employees","period","department","truncated"}` | 标记工具状态；`amounts` 为从结果中提取的关键金额 |
 | `agent_text` | `{"agent":"validator","text":"增量"}` | 追加中间智能体的阶段输出（计算记录 / 验证记录） |
 | `agent_end` | `{"agent":"calculator"}` | 标记智能体区块完成 |
 | `text` | `{"text":"增量"}` | 追加回答正文（仅核算智能体） |
-| `done` | `{"reply","tools","model"}` | 收尾：移除光标、显示工具汇总、折叠思考面板 |
+| `done` | `{"reply","tools","model","message_id","trace_count"}` | 收尾：移除光标、显示工具汇总、加载“计算依据”面板 |
 | `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
 
 思考面板默认展开、结束后自动折叠并显示耗时，可手动重新展开；工具调用以步骤形式混排在同一时间线中。
 前端按 `agent_start/agent_end` 将阶段提示、思考与工具调用归入对应智能体区块，最终答复只取 `text` 事件。
 流式接口的校验错误（空消息、超长）同样以 `event:error` 返回，避免 `Accept: text/event-stream`
 下无法序列化 JSON 错误体。
+
+### 计算依据（工具调用级追溯）
+
+每次工具调用都会在工具方法内部记录参数、完整结果（超过 8KB 截断并标记）、耗时，
+并由编排层配对 `tool_call_id` 与所在智能体阶段，写入 `chat_tool_traces`。
+助手消息保存成功后，管理台在答复下方显示可折叠的“计算依据”面板：
+
+- 工具名、结果状态、耗时，以及从结果中提取的金额项数；
+- 金额卡片（应发、实发、社保、公积金、税额、合计等）、关联员工、期间与部门；
+- 参数与结果的格式化 JSON；结果为批量核算时只提取顶层合计，避免逐人明细刷屏。
+
+面板数据实时来自 `done.message_id`，历史消息则在加载时按需查询；接口如下：
+
+```text
+GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
+```
+
+追溯数据只随会话保存，不写入审计日志；查询前校验会话归属，跨用户返回 400。
 
 ## 多智能体编排
 
@@ -424,6 +442,7 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 | PUT | `/api/chat/sessions/{id}` | 重命名会话 |
 | DELETE | `/api/chat/sessions/{id}` | 删除会话及其全部消息 |
 | GET | `/api/chat/sessions/{id}/messages` | 会话历史消息（含角色、内容、工具与模型） |
+| GET | `/api/chat/sessions/{id}/messages/{messageId}/traces` | 单条助手消息的工具调用依据（参数、结果、金额、员工） |
 | POST | `/api/chat/sessions/{id}/messages` | 非流式对话，body `{"message":"..."}` |
 | POST | `/api/chat/sessions/{id}/reset` | 清空会话消息并重置智能体上下文 |
 | POST | `/api/chat/sessions/{id}/stream` | 会话 SSE 流式对话（事件协议见上一节） |
@@ -553,7 +572,7 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 mvn test
 ```
 
-共 116 个测试，覆盖：
+共 124 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -578,6 +597,9 @@ mvn test
   批次历史、统一错误结构与 404 处理
 - 登录与权限：未登录 401、首页跳转登录页、管理员建用户、只读角色可查看但写入返回 403
 - 多用户会话：不同用户的会话列表与消息互不可见、同一用户多窗口历史隔离、越权访问会话被拒绝
+- 工具追溯：金额/员工/期间提取、批量只取顶层合计、同名工具按调用顺序配对、
+  超 8KB 结果截断但金额仍从完整结果提取、消息与追溯同事务落库、跨会话与跨用户隔离、
+  SSE `tool_result`/`done` 字段与依据查询接口
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；

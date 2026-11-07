@@ -1489,6 +1489,188 @@ const CHAT_TOOL_STATE = {
   RUNNING: { label: '执行中', cls: '' },
 };
 
+const CHAT_AGENT_LABELS = {
+  calculator: '① 计算智能体',
+  validator: '② 验证智能体',
+  accountant: '③ 核算智能体',
+};
+
+const CHAT_AMOUNT_LABELS = {
+  base_salary: '基本工资',
+  gross_pay: '应发工资',
+  attendance_deduction: '考勤扣款',
+  taxable_gross: '计税应发',
+  social_insurance_employee: '个人社保',
+  housing_fund_employee: '个人公积金',
+  social_insurance_employer: '单位社保',
+  housing_fund_employer: '单位公积金',
+  total_deductions: '扣款合计',
+  net_pay: '实发工资',
+  employer_cost: '单位成本',
+  total_gross: '应发合计',
+  total_net: '实发合计',
+  total_employer_cost: '成本合计',
+  cumulative_tax: '累计税额',
+  tax_this_month: '本月税额',
+  tax: '税额',
+};
+
+const chatAmountFormatter = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function formatTraceAmount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `¥${chatAmountFormatter.format(number)}` : String(value);
+}
+
+function prettyTraceJson(text) {
+  if (!text) return '（空）';
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch (error) {
+    return String(text);
+  }
+}
+
+function buildTraceBlock(label, json, truncated) {
+  const block = document.createElement('div');
+  block.className = 'chat-trace-block';
+  const title = document.createElement('div');
+  title.className = 'chat-trace-block-title';
+  title.textContent = truncated ? `${label}（已截断）` : label;
+  const pre = document.createElement('pre');
+  pre.className = 'chat-trace-code';
+  pre.textContent = prettyTraceJson(json);
+  block.append(title, pre);
+  return block;
+}
+
+function buildTraceChip(text) {
+  const chip = document.createElement('span');
+  chip.className = 'chat-trace-chip';
+  chip.textContent = text;
+  return chip;
+}
+
+function buildTraceItem(trace) {
+  const item = document.createElement('details');
+  item.className = 'chat-trace';
+
+  const amounts = trace.amounts || {};
+  const amountKeys = Object.keys(amounts);
+  const state = CHAT_TOOL_STATE[trace.result_state] || {
+    label: trace.result_state || '完成',
+    cls: '',
+  };
+
+  const summary = document.createElement('summary');
+  summary.className = 'chat-trace-summary';
+  const name = document.createElement('code');
+  name.className = 'chat-trace-name';
+  name.textContent = trace.tool_name || '工具';
+  const stateEl = document.createElement('span');
+  stateEl.className = 'chat-trace-state ' + state.cls;
+  stateEl.textContent = state.label;
+  summary.append(name, stateEl);
+  if (trace.duration_ms > 0) {
+    const duration = document.createElement('span');
+    duration.className = 'chat-trace-duration';
+    duration.textContent = `${trace.duration_ms}ms`;
+    summary.append(duration);
+  }
+  if (amountKeys.length) {
+    const count = document.createElement('span');
+    count.className = 'chat-trace-count';
+    count.textContent = `${amountKeys.length} 项金额`;
+    summary.append(count);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'chat-trace-body';
+
+  const meta = document.createElement('div');
+  meta.className = 'chat-trace-meta';
+  [CHAT_AGENT_LABELS[trace.agent] || trace.agent, trace.period, trace.department]
+    .filter(Boolean)
+    .forEach((text) => meta.append(buildTraceChip(text)));
+  if (meta.childElementCount) body.append(meta);
+
+  if (amountKeys.length) {
+    const grid = document.createElement('div');
+    grid.className = 'chat-trace-amounts';
+    amountKeys.forEach((key) => {
+      const cell = document.createElement('div');
+      cell.className = 'chat-trace-amount';
+      const label = document.createElement('span');
+      label.textContent = CHAT_AMOUNT_LABELS[key] || key;
+      const amount = document.createElement('strong');
+      amount.textContent = formatTraceAmount(amounts[key]);
+      cell.append(label, amount);
+      grid.append(cell);
+    });
+    body.append(grid);
+  }
+
+  if (trace.employees && trace.employees.length) {
+    const employees = document.createElement('div');
+    employees.className = 'chat-trace-employees';
+    trace.employees.slice(0, 12).forEach((employee) => employees.append(buildTraceChip(employee)));
+    if (trace.employees.length > 12) {
+      const more = buildTraceChip(`等 ${trace.employees.length} 人`);
+      more.classList.add('muted');
+      employees.append(more);
+    }
+    body.append(employees);
+  }
+
+  body.append(
+    buildTraceBlock('参数', trace.args_json, false),
+    buildTraceBlock('结果', trace.result_json, Boolean(trace.truncated))
+  );
+
+  item.append(summary, body);
+  return item;
+}
+
+function buildTracePanel(traces) {
+  const panel = document.createElement('details');
+  panel.className = 'chat-traces';
+  panel.dataset.traceCount = String(traces.length);
+
+  const summary = document.createElement('summary');
+  summary.className = 'chat-traces-summary';
+  const title = document.createElement('span');
+  title.className = 'chat-traces-title';
+  title.textContent = `计算依据 · ${traces.length} 次工具调用`;
+  const hint = document.createElement('span');
+  hint.className = 'chat-traces-hint';
+  hint.textContent = '工具 / 参数 / 结果';
+  summary.append(title, hint);
+
+  const body = document.createElement('div');
+  body.className = 'chat-traces-body';
+  traces.forEach((trace) => body.append(buildTraceItem(trace)));
+
+  panel.append(summary, body);
+  return panel;
+}
+
+async function loadMessageTraces(sessionId, messageId, main) {
+  if (!sessionId || !messageId || !main) return;
+  if (main.querySelector('.chat-traces')) return;
+  try {
+    const traces = await api(`/api/chat/sessions/${sessionId}/messages/${messageId}/traces`);
+    if (!traces || !traces.length) return;
+    if (state.chatSessionId !== sessionId || !main.isConnected) return;
+    if (main.querySelector('.chat-traces')) return;
+    main.append(buildTracePanel(traces));
+  } catch (error) {
+    console.warn('[计算依据] 加载失败：', error.message);
+  }
+}
+
 function appendStreamingMessage() {
   const container = $('#chat-messages');
   const empty = container.querySelector('.chat-empty');
@@ -1714,6 +1896,9 @@ function appendStreamingMessage() {
         toolsLine.textContent = '调用工具：' + reply.tools.join('、');
         toolsLine.classList.remove('hidden');
       }
+      if (reply && reply.message_id) {
+        loadMessageTraces(state.chatSessionId, reply.message_id, main);
+      }
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       summaryState.textContent = '已完成 · ' + seconds + 's';
       if (!thinking.classList.contains('empty')) {
@@ -1910,13 +2095,20 @@ async function loadChatMessages(sessionId) {
 
 function appendStoredMessage(message) {
   const isUser = message.role === 'USER';
-  appendChatMessage(
+  const row = appendChatMessage(
     isUser ? 'user' : 'assistant',
     message.content,
     message.tools,
     message.role === 'ERROR',
     { createdAt: message.created_at, animate: false }
   );
+  if (message.role === 'ASSISTANT' && row) {
+    loadMessageTraces(
+      message.session_id || state.chatSessionId,
+      message.id,
+      row.querySelector('.chat-main')
+    );
+  }
 }
 
 async function renameChatSession(sessionId) {

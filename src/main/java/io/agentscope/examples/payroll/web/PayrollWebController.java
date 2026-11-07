@@ -281,7 +281,7 @@ public class PayrollWebController {
         log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
         try {
             services.chat()
-                    .stream(message, ChatSse.bridge(channel, reply -> { }));
+                    .stream(message, ChatSse.bridge(channel, reply -> null));
             emitter.complete();
             log.info("[SSE] 对话完成：耗时={}ms", System.currentTimeMillis() - startedAt);
         } catch (PayrollException e) {

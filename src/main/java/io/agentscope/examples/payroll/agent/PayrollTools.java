@@ -36,9 +36,15 @@ public final class PayrollTools {
     private static final Logger log = LoggerFactory.getLogger(PayrollTools.class);
 
     private final PayrollEngine engine;
+    private final ToolTraceRecorder recorder;
 
     public PayrollTools(PayrollEngine engine) {
+        this(engine, null);
+    }
+
+    public PayrollTools(PayrollEngine engine, ToolTraceRecorder recorder) {
         this.engine = engine;
+        this.recorder = recorder;
     }
 
     @Tool(
@@ -54,6 +60,8 @@ public final class PayrollTools {
                             required = false)
                     String department) {
         return execute(
+                "list_employees",
+                args("department", department),
                 () -> {
                     String requested = department == null ? "" : department.trim();
                     List<Employee> employees = engine.employees();
@@ -90,6 +98,8 @@ public final class PayrollTools {
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
                     String employeeId) {
         return execute(
+                "get_employee_profile",
+                args("employee_id", employeeId),
                 () -> {
                     Employee employee = engine.employee(resolveEmployeeId(employeeId));
                     Map<String, Object> payload = new LinkedHashMap<>();
@@ -123,6 +133,8 @@ public final class PayrollTools {
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
+                "get_attendance_summary",
+                args("employee_id", employeeId, "period", period),
                 () -> {
                     AttendanceSummary attendance =
                             engine.attendance(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -152,6 +164,8 @@ public final class PayrollTools {
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
+                "calculate_payroll",
+                args("employee_id", employeeId, "period", period),
                 () -> engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period)));
     }
 
@@ -175,6 +189,11 @@ public final class PayrollTools {
                             required = false)
                     Boolean includeDetails) {
         return execute(
+                "calculate_department_payroll",
+                args(
+                        "department", department,
+                        "period", period,
+                        "include_details", includeDetails),
                 () -> {
                     BatchPayrollResult batch =
                             engine.calculateDepartment(department, parsePeriod(period));
@@ -210,6 +229,8 @@ public final class PayrollTools {
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
+                "validate_payroll",
+                args("employee_id", employeeId, "period", period),
                 () -> {
                     PayrollValidation validation =
                             engine.validate(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -235,6 +256,8 @@ public final class PayrollTools {
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
+                "generate_payslip",
+                args("employee_id", employeeId, "period", period),
                 () -> {
                     PayrollResult payroll =
                             engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -260,6 +283,8 @@ public final class PayrollTools {
                             required = false)
                     String city) {
         return execute(
+                "get_payroll_policy",
+                args("city", city),
                 () -> {
                     String requested = city == null || city.isBlank() ? "默认" : city.trim();
                     Map<String, Object> payload = new LinkedHashMap<>();
@@ -341,19 +366,43 @@ public final class PayrollTools {
         }
     }
 
-    private static String execute(Supplier<Object> action) {
+    private String execute(String toolName, Map<String, Object> arguments, Supplier<Object> action) {
+        long startedAt = System.nanoTime();
+        String result;
         try {
             Object data = action.get();
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", "OK");
             response.put("data", data);
-            return JsonSupport.toJson(response);
+            result = JsonSupport.toJson(response);
         } catch (PayrollException e) {
-            return error(e.getMessage());
+            result = error(e.getMessage());
         } catch (RuntimeException e) {
             log.warn("payroll tool failed", e);
-            return error("核算执行失败：" + e.getMessage());
+            result = error("核算执行失败：" + e.getMessage());
         }
+        if (recorder != null) {
+            try {
+                recorder.record(
+                        toolName,
+                        JsonSupport.toJson(arguments),
+                        result,
+                        (System.nanoTime() - startedAt) / 1_000_000);
+            } catch (RuntimeException e) {
+                log.warn("记录工具追溯失败：tool={}，原因={}", toolName, e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, Object> args(Object... pairs) {
+        Map<String, Object> arguments = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            if (pairs[i + 1] != null) {
+                arguments.put((String) pairs[i], pairs[i + 1]);
+            }
+        }
+        return arguments;
     }
 
     private static String error(String message) {

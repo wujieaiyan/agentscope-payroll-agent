@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.support;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -36,6 +37,14 @@ public final class JsonSupport {
     }
 
     public static <T> T fromJson(String json, Class<T> type) {
+        try {
+            return MAPPER.readValue(json, type);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("JSON 解析失败：" + e.getOriginalMessage(), e);
+        }
+    }
+
+    public static <T> T fromJson(String json, TypeReference<T> type) {
         try {
             return MAPPER.readValue(json, type);
         } catch (JsonProcessingException e) {
