@@ -50,18 +50,28 @@ public final class PayrollChatService implements PayrollChat {
     private final PayrollEngine engine;
     private final ChatContextStore contextStore;
     private final long sessionId;
+    private final boolean graphOrchestration;
     private final Object lock = new Object();
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
     public PayrollChatService(PayrollEngine engine) {
-        this(engine, ChatContextStore.noop(), 0L);
+        this(engine, ChatContextStore.noop(), 0L, false);
     }
 
     public PayrollChatService(PayrollEngine engine, ChatContextStore contextStore, long sessionId) {
+        this(engine, contextStore, sessionId, false);
+    }
+
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            boolean graphOrchestration) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
+        this.graphOrchestration = graphOrchestration;
         this.context = loadContext(contextStore, sessionId);
     }
 
@@ -98,69 +108,11 @@ public final class PayrollChatService implements PayrollChat {
             prepareContext(context, events, current.summarizer());
             String calculatorInput = context.augment(question);
 
-            StageResult calculation;
-            try {
-                calculation =
-                        runStage(
-                                "calculator",
-                                "① 计算智能体：理解诉求并调用核算工具",
-                                current.calculator(),
-                                calculatorInput,
-                                events,
-                                false,
-                                tools);
-            } catch (RuntimeException e) {
-                throw chatFailure(e);
-            }
-            if (calculation.text().isBlank()) {
-                throw new PayrollException("计算智能体未返回内容，请重试或检查模型服务状态。");
-            }
-            log.info(
-                    "[多智能体] ① 计算完成：耗时={}ms，核算对象={}，输出={}",
-                    calculation.elapsedMs(),
-                    calculation.targets().size(),
-                    preview(calculation.text(), LOG_PREVIEW_LIMIT));
-
-            String validation;
-            if (calculation.targets().isEmpty()) {
-                validation = "本轮未执行工资计算，无需独立校验。";
-                events.onAgentStart("validator", "② 验证智能体：本轮无需校验");
-                events.onAgentOutput("validator", validation);
-                events.onAgentEnd("validator");
-                log.info("[多智能体] ② 跳过验证：本轮没有工资计算对象");
-            } else {
-                validation =
-                        validate(current.validator(), question, calculation, events, tools);
-                log.info(
-                        "[多智能体] ② 验证完成：输出={}",
-                        preview(validation, LOG_PREVIEW_LIMIT));
-            }
-
             String reply;
-            if (calculation.targets().isEmpty()) {
-                // 查询类问题（员工清单/档案/政策/考勤）直接返回计算记录，避免小模型改写出错误的工资结论。
-                reply = calculation.text().trim();
-                events.onText(reply);
-                log.info("[多智能体] ③ 跳过核算汇总：查询类问题直接返回计算记录");
+            if (graphOrchestration) {
+                reply = graphReply(question, calculatorInput, current, events, tools);
             } else {
-                StageResult accounting;
-                try {
-                    accounting =
-                            runStage(
-                                    "accountant",
-                                    "③ 核算智能体：汇总计算与验证结论",
-                                    current.accountant(),
-                                    accountingInput(question, calculation.text(), validation),
-                                    events,
-                                    true,
-                                    tools);
-                } catch (RuntimeException e) {
-                    throw chatFailure(e);
-                }
-                reply = accounting.text().trim();
-                if (reply.isBlank()) {
-                    throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
-                }
+                reply = legacyReply(question, calculatorInput, current, events, tools);
             }
             context.append(question, reply);
             log.info(
@@ -171,6 +123,99 @@ public final class PayrollChatService implements PayrollChat {
                     context.summarizedTurns(),
                     context.recentTurnCount());
             return new Reply(reply, List.copyOf(tools), modelId());
+        }
+    }
+
+    /** 原有确定性流水线：计算 → 验证 → 核算，阶段顺序写死在代码里。 */
+    private String legacyReply(
+            String question,
+            String calculatorInput,
+            PayrollAgentFactory.Team current,
+            ChatStreamListener events,
+            Set<String> tools) {
+        StageResult calculation;
+        try {
+            calculation =
+                    runStage(
+                            "calculator",
+                            "① 计算智能体：理解诉求并调用核算工具",
+                            current.calculator(),
+                            calculatorInput,
+                            events,
+                            false,
+                            tools);
+        } catch (RuntimeException e) {
+            throw chatFailure(e);
+        }
+        if (calculation.text().isBlank()) {
+            throw new PayrollException("计算智能体未返回内容，请重试或检查模型服务状态。");
+        }
+        log.info(
+                "[多智能体] ① 计算完成：耗时={}ms，核算对象={}，输出={}",
+                calculation.elapsedMs(),
+                calculation.targets().size(),
+                preview(calculation.text(), LOG_PREVIEW_LIMIT));
+
+        String validation;
+        if (calculation.targets().isEmpty()) {
+            validation = "本轮未执行工资计算，无需独立校验。";
+            events.onAgentStart("validator", "② 验证智能体：本轮无需校验");
+            events.onAgentOutput("validator", validation);
+            events.onAgentEnd("validator");
+            log.info("[多智能体] ② 跳过验证：本轮没有工资计算对象");
+        } else {
+            validation = validate(current.validator(), question, calculation, events, tools);
+            log.info("[多智能体] ② 验证完成：输出={}", preview(validation, LOG_PREVIEW_LIMIT));
+        }
+
+        if (calculation.targets().isEmpty()) {
+            // 查询类问题（员工清单/档案/政策/考勤）直接返回计算记录，避免小模型改写出错误的工资结论。
+            String reply = calculation.text().trim();
+            events.onText(reply);
+            log.info("[多智能体] ③ 跳过核算汇总：查询类问题直接返回计算记录");
+            return reply;
+        }
+
+        StageResult accounting;
+        try {
+            accounting =
+                    runStage(
+                            "accountant",
+                            "③ 核算智能体：汇总计算与验证结论",
+                            current.accountant(),
+                            accountingInput(question, calculation.text(), validation),
+                            events,
+                            true,
+                            tools);
+        } catch (RuntimeException e) {
+            throw chatFailure(e);
+        }
+        String reply = accounting.text().trim();
+        if (reply.isBlank()) {
+            throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
+        }
+        return reply;
+    }
+
+    /** POC：由 langgraph4j 决定阶段流转，节点内部仍复用 AgentScope 的 ReActAgent 与工具。 */
+    private String graphReply(
+            String question,
+            String calculatorInput,
+            PayrollAgentFactory.Team current,
+            ChatStreamListener events,
+            Set<String> tools) {
+        try {
+            return GraphPayrollOrchestrator.execute(
+                            this::runStage,
+                            this::validate,
+                            current,
+                            question,
+                            calculatorInput,
+                            events,
+                            tools)
+                    .reply();
+        } catch (RuntimeException e) {
+            throw chatFailure(e);
         }
     }
 
@@ -423,7 +468,7 @@ public final class PayrollChatService implements PayrollChat {
                 .formatted(question, calculation, objects);
     }
 
-    private static String accountingInput(String question, String calculation, String validation) {
+    static String accountingInput(String question, String calculation, String validation) {
         return """
                 【用户问题】
                 %s
@@ -575,9 +620,14 @@ public final class PayrollChatService implements PayrollChat {
         return flattened.length() <= limit ? flattened : flattened.substring(0, limit) + "…";
     }
 
-    private record CalcTarget(String employeeId, String period) {
+    /**
+     * 图编排的节点状态默认按 Java 序列化克隆，阶段结果必须可序列化；
+     * 手写编排下这两个 record 仅作为进程内值对象使用，不受影响。
+     */
+    record CalcTarget(String employeeId, String period) implements java.io.Serializable {
     }
 
-    private record StageResult(String text, List<CalcTarget> targets, long elapsedMs) {
+    record StageResult(String text, List<CalcTarget> targets, long elapsedMs)
+            implements java.io.Serializable {
     }
 }

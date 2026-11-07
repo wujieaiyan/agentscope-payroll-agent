@@ -81,8 +81,19 @@ public class PayrollConfiguration {
 
     @Bean
     public PayrollChatFactory payrollChatFactory(
-            PayrollEngine engine, H2ChatStore chatStore) {
-        return sessionId -> new PayrollChatService(engine, chatStore, sessionId);
+            PayrollEngine engine,
+            H2ChatStore chatStore,
+            @Value("${payroll.orchestrator:legacy}") String orchestrator) {
+        boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
+        if (graph) {
+            log.info("[多智能体] 编排模式：langgraph4j 图编排（POC）");
+        } else {
+            if (orchestrator != null && !"legacy".equalsIgnoreCase(orchestrator.trim())) {
+                log.warn("[多智能体] 未知编排模式 {}，回退为 legacy", orchestrator);
+            }
+            log.info("[多智能体] 编排模式：手写状态机");
+        }
+        return sessionId -> new PayrollChatService(engine, chatStore, sessionId, graph);
     }
 
     @Bean

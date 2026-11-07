@@ -24,6 +24,8 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <agentscope.version>2.0.1</agentscope.version>
+        <!-- POC：仅在 payroll.orchestrator=graph 时使用，与 AgentScope 的 agent/tool 层并存。 -->
+        <langgraph4j.version>1.9.8</langgraph4j.version>
         <!-- AgentScope 2.0.1 依赖 Jackson 2.21，覆盖 Spring Boot 默认版本以保持二进制兼容。 -->
         <jackson-bom.version>2.21.1</jackson-bom.version>
     </properties>
@@ -48,6 +50,12 @@
             <groupId>io.agentscope</groupId>
             <artifactId>agentscope-extensions-model-ollama</artifactId>
             <version>${agentscope.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.bsc.langgraph4j</groupId>
+            <artifactId>langgraph4j-core</artifactId>
+            <version>${langgraph4j.version}</version>
         </dependency>
 
         <dependency>

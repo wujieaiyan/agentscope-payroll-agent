@@ -19,6 +19,8 @@ spring:
     timeout-per-shutdown-phase: 10s
 
 payroll:
+  # legacy=手写三阶段状态机；graph=langgraph4j 图编排（POC，仅切换路由层）
+  orchestrator: "${PAYROLL_ORCHESTRATOR:legacy}"
   db:
     url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
     user: "${PAYROLL_DB_USER:sa}"
