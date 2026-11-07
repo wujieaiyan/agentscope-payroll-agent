@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
+
 /**
  * 对话流式回调：把 ReActAgent 的思考、工具调用与回答增量转成前端可渲染的事件。
  *
@@ -48,6 +50,12 @@ public interface ChatStreamListener {
 
     /** 工具执行结束，state 为 SUCCESS/ERROR/INTERRUPTED/DENIED 等。 */
     default void onToolResult(String toolCallId, String toolName, String state) {
+    }
+
+    /** 工具执行结束并带追溯快照；默认退化为只通知状态。 */
+    default void onToolResult(
+            String toolCallId, String toolName, String state, ChatToolTrace trace) {
+        onToolResult(toolCallId, toolName, state);
     }
 
     /** 回答正文增量。 */

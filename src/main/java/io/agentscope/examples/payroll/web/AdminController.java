@@ -1,9 +1,11 @@
 package io.agentscope.examples.payroll.web;
 
 import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.Department;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.Role;
+import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.support.Permissions;
@@ -32,16 +34,19 @@ public class AdminController {
     private final AuthService authService;
     private final PasswordEncoder passwordEncoder;
     private final ChatSessionManager chatManager;
+    private final AuditService auditService;
 
     public AdminController(
             H2AdminRepository repository,
             AuthService authService,
             PasswordEncoder passwordEncoder,
-            ChatSessionManager chatManager) {
+            ChatSessionManager chatManager,
+            AuditService auditService) {
         this.repository = repository;
         this.authService = authService;
         this.passwordEncoder = passwordEncoder;
         this.chatManager = chatManager;
+        this.auditService = auditService;
     }
 
     @GetMapping("/permissions")
@@ -59,7 +64,9 @@ public class AdminController {
     public ApiResponse rebuildVectors() {
         boolean enabled = chatManager.vectorMemoryReady();
         int indexed = enabled ? chatManager.rebuildVectorMemory() : 0;
-        return ApiResponse.ok(Map.of("enabled", enabled, "indexed", indexed));
+        Map<String, Object> result = Map.of("enabled", enabled, "indexed", indexed);
+        auditService.record("vector.rebuild", "vector_index", "payroll-chat-memory", null, result);
+        return ApiResponse.ok(result);
     }
 
     // ---------------------------------------------------------------- 用户
@@ -77,13 +84,15 @@ public class AdminController {
             throw new PayrollException("请填写用户信息");
         }
         H2AdminRepository.validatePassword(request.password());
-        return ApiResponse.ok(
+        AppUser created =
                 repository.createUser(
                         request.username(),
                         request.displayName(),
                         passwordEncoder.encode(request.password()),
                         request.roleCode(),
-                        request.departmentId()));
+                        request.departmentId());
+        auditService.record("user.create", "user", String.valueOf(created.id()), null, created);
+        return ApiResponse.ok(created);
     }
 
     @PutMapping("/users/{id}")
@@ -96,14 +105,17 @@ public class AdminController {
             throw new PayrollException("请填写用户信息");
         }
         long actingUserId = authService.currentUser(http).id();
-        return ApiResponse.ok(
+        AppUser before = repository.findUser(id).orElse(null);
+        AppUser updated =
                 repository.updateUser(
                         actingUserId,
                         id,
                         request.displayName(),
                         request.roleCode(),
                         request.departmentId(),
-                        request.active()));
+                        request.active());
+        auditService.record("user.update", "user", String.valueOf(id), before, updated);
+        return ApiResponse.ok(updated);
     }
 
     @PostMapping("/users/{id}/password")
@@ -115,7 +127,10 @@ public class AdminController {
         }
         H2AdminRepository.validatePassword(request.password());
         repository.findAccount(id).orElseThrow(() -> new PayrollException("用户不存在：" + id));
+        AppUser target = repository.findUser(id).orElse(null);
         repository.updatePassword(id, passwordEncoder.encode(request.password()));
+        auditService.record(
+                "user.reset_password", "user", String.valueOf(id), target, Map.of("changed", true));
         return ApiResponse.ok(Map.of("changed", true));
     }
 
@@ -133,12 +148,14 @@ public class AdminController {
         if (request == null) {
             throw new PayrollException("请填写角色信息");
         }
-        return ApiResponse.ok(
+        Role created =
                 repository.createRole(
                         request.code(),
                         request.name(),
                         request.description(),
-                        validPermissions(request.permissions())));
+                        validPermissions(request.permissions()));
+        auditService.record("role.create", "role", created.code(), null, created);
+        return ApiResponse.ok(created);
     }
 
     @PutMapping("/roles/{code}")
@@ -152,18 +169,22 @@ public class AdminController {
                 repository
                         .findRole(code)
                         .orElseThrow(() -> new PayrollException("角色不存在：" + code));
-        return ApiResponse.ok(
+        Role updated =
                 repository.updateRole(
                         role.code(),
                         request.name(),
                         request.description(),
-                        validPermissions(request.permissions())));
+                        validPermissions(request.permissions()));
+        auditService.record("role.update", "role", updated.code(), role, updated);
+        return ApiResponse.ok(updated);
     }
 
     @DeleteMapping("/roles/{code}")
     @RequirePermission(Permissions.ROLE_MANAGE)
     public ApiResponse deleteRole(@PathVariable String code) {
+        Role before = repository.findRole(code).orElse(null);
         repository.deleteRole(code);
+        auditService.record("role.delete", "role", code, before, Map.of("deleted", true));
         return ApiResponse.ok(Map.of("deleted", true));
     }
 
@@ -186,6 +207,12 @@ public class AdminController {
         }
         Department department =
                 repository.createDepartment(request.name(), request.description());
+        auditService.record(
+                "department.create",
+                "department",
+                String.valueOf(department.id()),
+                null,
+                department);
         return ApiResponse.ok(department);
     }
 
@@ -196,15 +223,23 @@ public class AdminController {
         if (request == null) {
             throw new PayrollException("请填写部门信息");
         }
-        return ApiResponse.ok(
+        Department before = repository.findDepartment(id).orElse(null);
+        Department updated =
                 repository.updateDepartment(
-                        id, request.name(), request.description(), request.active()));
+                        id, request.name(), request.description(), request.active());
+        auditService.record(
+                "department.update", "department", String.valueOf(id), before, updated);
+        return ApiResponse.ok(updated);
     }
 
     @DeleteMapping("/departments/{id}")
     @RequirePermission(Permissions.DEPARTMENT_MANAGE)
     public ApiResponse deleteDepartment(@PathVariable long id) {
+        Department before = repository.findDepartment(id).orElse(null);
         repository.deleteDepartment(id);
+        auditService.record(
+                "department.delete", "department", String.valueOf(id), before,
+                Map.of("deleted", true));
         return ApiResponse.ok(Map.of("deleted", true));
     }
 

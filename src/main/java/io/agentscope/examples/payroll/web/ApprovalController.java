@@ -1,0 +1,110 @@
+package io.agentscope.examples.payroll.web;
+
+import io.agentscope.examples.payroll.db.H2ApprovalStore;
+import io.agentscope.examples.payroll.db.H2ApprovalStore.FlowDraft;
+import io.agentscope.examples.payroll.domain.ApprovalFlow;
+import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.support.Permissions;
+import java.math.BigDecimal;
+import java.util.Map;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/** 审批链配置接口：同一范围最多一条生效流程，部门专属优先于全局。 */
+@RestController
+@RequestMapping("/api/approval")
+public class ApprovalController {
+
+    private final H2ApprovalStore store;
+    private final AuditService auditService;
+
+    public ApprovalController(H2ApprovalStore store, AuditService auditService) {
+        this.store = store;
+        this.auditService = auditService;
+    }
+
+    @GetMapping("/flows")
+    @RequirePermission(Permissions.APPROVAL_MANAGE)
+    public ApiResponse flows() {
+        return ApiResponse.ok(store.flows());
+    }
+
+    @PostMapping("/flows")
+    @RequirePermission(Permissions.APPROVAL_MANAGE)
+    public ApiResponse createFlow(@RequestBody(required = false) FlowRequest request) {
+        if (request == null) {
+            throw new PayrollException("请填写审批链信息");
+        }
+        ApprovalFlow created = store.createFlow(request.toDraft());
+        auditService.record(
+                "approval_flow.create",
+                "approval_flow",
+                String.valueOf(created.flowId()),
+                null,
+                created);
+        return ApiResponse.ok(created);
+    }
+
+    @PutMapping("/flows/{flowId}")
+    @RequirePermission(Permissions.APPROVAL_MANAGE)
+    public ApiResponse updateFlow(
+            @PathVariable long flowId, @RequestBody(required = false) FlowRequest request) {
+        if (request == null) {
+            throw new PayrollException("请填写审批链信息");
+        }
+        ApprovalFlow before = store.findFlow(flowId).orElse(null);
+        ApprovalFlow updated = store.updateFlow(flowId, request.toDraft());
+        auditService.record(
+                "approval_flow.update",
+                "approval_flow",
+                String.valueOf(flowId),
+                before,
+                updated);
+        return ApiResponse.ok(updated);
+    }
+
+    @DeleteMapping("/flows/{flowId}")
+    @RequirePermission(Permissions.APPROVAL_MANAGE)
+    public ApiResponse deleteFlow(@PathVariable long flowId) {
+        ApprovalFlow before = store.findFlow(flowId).orElse(null);
+        store.deleteFlow(flowId);
+        auditService.record(
+                "approval_flow.delete",
+                "approval_flow",
+                String.valueOf(flowId),
+                before,
+                Map.of("deleted", true));
+        return ApiResponse.ok(Map.of("deleted", true));
+    }
+
+    /** 审批链表单；启用状态与优先级缺省时按启用、100 处理。 */
+    public record FlowRequest(
+            String name,
+            String scopeType,
+            String scopeValue,
+            BigDecimal minAmount,
+            BigDecimal maxAmount,
+            Integer priority,
+            Boolean enabled,
+            String description) {
+
+        FlowDraft toDraft() {
+            return new FlowDraft(
+                    name,
+                    scopeType,
+                    scopeValue,
+                    minAmount,
+                    maxAmount,
+                    priority == null ? 100 : priority,
+                    enabled == null || enabled,
+                    description);
+        }
+    }
+}

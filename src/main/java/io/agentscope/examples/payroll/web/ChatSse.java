@@ -1,12 +1,13 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.service.ChatStreamListener;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.function.Consumer;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -19,7 +20,7 @@ final class ChatSse {
     private ChatSse() {
     }
 
-    static ChatStreamListener bridge(Channel channel, Consumer<PayrollChat.Reply> onDone) {
+    static ChatStreamListener bridge(Channel channel, Function<PayrollChat.Reply, Long> onDone) {
         return new ChatStreamListener() {
             @Override
             public void onStart(String model) {
@@ -83,19 +84,42 @@ final class ChatSse {
             }
 
             @Override
+            public void onToolResult(
+                    String toolCallId, String toolName, String state, ChatToolTrace trace) {
+                channel.send(
+                        "tool_result",
+                        payload(
+                                "tool_call_id", toolCallId,
+                                "name", toolName,
+                                "state", state,
+                                "duration_ms", trace.durationMs(),
+                                "amounts", trace.amounts().isEmpty() ? null : trace.amounts(),
+                                "employees",
+                                        trace.employees().isEmpty() ? null : trace.employees(),
+                                "period", trace.period(),
+                                "department", trace.department(),
+                                "truncated", trace.truncated() ? Boolean.TRUE : null));
+            }
+
+            @Override
             public void onText(String delta) {
                 channel.send("text", payload("text", delta));
             }
 
             @Override
             public void onDone(PayrollChat.Reply reply) {
-                onDone.accept(reply);
+                Long messageId = onDone.apply(reply);
                 channel.send(
                         "done",
                         payload(
                                 "reply", reply.reply(),
                                 "tools", reply.tools(),
-                                "model", reply.model()));
+                                "model", reply.model(),
+                                "message_id", messageId,
+                                "trace_count",
+                                        reply.traces().isEmpty()
+                                                ? null
+                                                : reply.traces().size()));
             }
         };
     }

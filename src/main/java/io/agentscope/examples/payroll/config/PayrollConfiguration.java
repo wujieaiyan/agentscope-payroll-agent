@@ -1,6 +1,8 @@
 package io.agentscope.examples.payroll.config;
 
 import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.db.H2ApprovalStore;
+import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
@@ -8,6 +10,8 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.memory.VectorMemorySettings;
+import io.agentscope.examples.payroll.service.ApprovalService;
+import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
@@ -19,6 +23,7 @@ import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -28,8 +33,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.core.env.Environment;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -63,18 +70,34 @@ public class PayrollConfiguration {
     }
 
     @Bean
+    public H2PayrollRunStore payrollRunStore(PayrollDatabase database) {
+        return new H2PayrollRunStore(database);
+    }
+
+    @Bean
     public PayrollRunService payrollRunService(
             PayrollEngine engine,
             H2PayrollRepository repository,
-            PayrollDatabase database,
+            H2PayrollRunStore runStore,
             @Value("${payroll.output-dir}") String outputDir) {
         return new PayrollRunService(
                 engine,
                 repository,
-                new H2PayrollRunStore(database),
+                runStore,
                 new ExcelExporter(),
                 new DryRunEmailGateway(),
                 Path.of(outputDir));
+    }
+
+    @Bean
+    public H2ApprovalStore approvalStore(PayrollDatabase database) {
+        return new H2ApprovalStore(database);
+    }
+
+    @Bean
+    public ApprovalService approvalService(
+            H2ApprovalStore store, H2PayrollRunStore runStore) {
+        return new ApprovalService(store, runStore);
     }
 
     @Bean
@@ -179,6 +202,46 @@ public class PayrollConfiguration {
     @Bean
     public AuthInterceptor authInterceptor(AuthService authService) {
         return new AuthInterceptor(authService);
+    }
+
+    @Bean
+    public H2AuditStore auditStore(PayrollDatabase database) {
+        return new H2AuditStore(database);
+    }
+
+    @Bean
+    public AuditService auditService(
+            H2AuditStore auditStore,
+            @Value("${payroll.audit.retention-days:180}") int retentionDays) {
+        return new AuditService(auditStore, retentionDays);
+    }
+
+    @Bean
+    public FilterRegistrationBean<AuditFilter> auditFilter(
+            AuditService auditService, AuthService authService) {
+        FilterRegistrationBean<AuditFilter> registration =
+                new FilterRegistrationBean<>(new AuditFilter(auditService, authService));
+        registration.addUrlPatterns("/api/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
+        return registration;
+    }
+
+    /** 启动时清理超过保留期的审计日志，避免 H2 文件无限增长。 */
+    @Bean
+    public ApplicationRunner auditRetentionRunner(AuditService auditService) {
+        return args -> {
+            try {
+                int removed = auditService.purgeExpired();
+                if (removed > 0) {
+                    log.info(
+                            "[审计] 清理过期日志 {} 条（保留 {} 天）",
+                            removed,
+                            auditService.retentionDays());
+                }
+            } catch (RuntimeException e) {
+                log.warn("[审计] 清理过期日志失败：{}", e.getMessage());
+            }
+        };
     }
 
     @Bean
