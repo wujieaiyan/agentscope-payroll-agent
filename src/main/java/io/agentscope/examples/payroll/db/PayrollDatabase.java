@@ -215,6 +215,103 @@ public final class PayrollDatabase {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS approval_flows (
+                flow_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(64) NOT NULL,
+                scope_type VARCHAR(16) NOT NULL,
+                scope_value VARCHAR(64) NOT NULL,
+                min_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+                max_amount DECIMAL(16,2),
+                priority INT NOT NULL DEFAULT 100,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                description VARCHAR(200) NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approval_flow_id BIGINT
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approval_flow_name VARCHAR(64)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS submitted_by_id BIGINT
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS submitted_by_name VARCHAR(64)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMP
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS submit_comment VARCHAR(500)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approved_by_id BIGINT
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approved_by_name VARCHAR(64)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS approval_comment VARCHAR(500)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS rejected_by_id BIGINT
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS rejected_by_name VARCHAR(64)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(500)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS snapshot_hash VARCHAR(64)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS payroll_approval_events (
+                event_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                run_id BIGINT NOT NULL,
+                action VARCHAR(16) NOT NULL,
+                actor_id BIGINT,
+                actor_name VARCHAR(64),
+                flow_id BIGINT,
+                flow_name VARCHAR(64),
+                comment VARCHAR(500),
+                snapshot_hash VARCHAR(64),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_approval_events_run
+                ON payroll_approval_events (run_id, event_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_approval_flows_scope
+                ON approval_flows (scope_type, scope_value, enabled)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS audit_log (
                 audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -308,6 +405,7 @@ public final class PayrollDatabase {
             seedCityPolicies(connection);
             seedReferenceData(connection);
             seedIdentityData(connection);
+            seedApprovalFlows(connection);
             connection.commit();
         } catch (SQLException e) {
             throw new IllegalStateException("初始化 H2 数据库失败：" + e.getMessage(), e);
@@ -546,6 +644,26 @@ public final class PayrollDatabase {
                 statement.addBatch();
             }
             statement.executeBatch();
+        }
+    }
+
+    /** 首次启动写入一条全局默认审批链，保证工资批次开箱即可提交审批。 */
+    private void seedApprovalFlows(Connection connection) throws SQLException {
+        String sql =
+                """
+                INSERT INTO approval_flows
+                    (name, scope_type, scope_value, min_amount, max_amount, priority, enabled,
+                     description, created_at, updated_at)
+                SELECT ?, 'GLOBAL', '*', 0, NULL, 100, TRUE, ?, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM approval_flows)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            LocalDateTime now = LocalDateTime.now();
+            statement.setString(1, "默认审批链");
+            statement.setString(2, "系统初始化：适用于未单独配置审批链的工资批次");
+            statement.setObject(3, now);
+            statement.setObject(4, now);
+            statement.executeUpdate();
         }
     }
 

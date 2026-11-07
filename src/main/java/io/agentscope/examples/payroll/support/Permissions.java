@@ -19,6 +19,8 @@ public final class Permissions {
     public static final String ATTENDANCE_WRITE = "attendance:write";
     public static final String PAYROLL_READ = "payroll:read";
     public static final String PAYROLL_WRITE = "payroll:write";
+    public static final String PAYROLL_APPROVE = "payroll:approve";
+    public static final String APPROVAL_MANAGE = "approval:manage";
     public static final String IMPORT_USE = "import:use";
     public static final String CHAT_USE = "chat:use";
     public static final String DEPARTMENT_READ = "department:read";
@@ -46,6 +48,7 @@ public final class Permissions {
                     ATTENDANCE_WRITE,
                     PAYROLL_READ,
                     PAYROLL_WRITE,
+                    PAYROLL_APPROVE,
                     IMPORT_USE,
                     CHAT_USE,
                     DEPARTMENT_READ,
@@ -81,6 +84,8 @@ public final class Permissions {
         labels.put(ATTENDANCE_WRITE, "维护考勤");
         labels.put(PAYROLL_READ, "查看工资批次");
         labels.put(PAYROLL_WRITE, "核算/出账/发送");
+        labels.put(PAYROLL_APPROVE, "审批工资批次");
+        labels.put(APPROVAL_MANAGE, "管理审批链");
         labels.put(IMPORT_USE, "Excel 导入");
         labels.put(CHAT_USE, "使用智能问答");
         labels.put(DEPARTMENT_READ, "查看部门");

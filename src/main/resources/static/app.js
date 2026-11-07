@@ -12,6 +12,9 @@ const state = {
   lastEmailReport: null,
   previewDirty: false,
   runs: [],
+  currentApprovals: [],
+  approvalFlows: [],
+  selectedFlowId: null,
   dataThrough: null,
   me: null,
   permissions: new Set(),
@@ -86,7 +89,18 @@ function formatDateTime(value) {
 }
 
 function runStatusLabel(status) {
-  return { DRAFT: '草稿', FINALIZED: '已出账', SENT: '已发送' }[status] || status || '—';
+  return {
+    DRAFT: '草稿',
+    PENDING_APPROVAL: '待审批',
+    APPROVED: '已审批',
+    REJECTED: '已驳回',
+    FINALIZED: '已出账',
+    SENT: '已发送',
+  }[status] || status || '—';
+}
+
+function approvalActionLabel(action) {
+  return { SUBMIT: '提交审批', APPROVE: '审批通过', REJECT: '驳回' }[action] || action || '—';
 }
 
 function emailStatusLabel(status) {
@@ -206,6 +220,7 @@ function showTab(name) {
   if (name === 'policies') loadPolicies().catch(showError);
   if (name === 'attendance') loadAttendance().catch(showError);
   if (name === 'payroll') loadRuns().catch(showError);
+  if (name === 'approval') loadApprovalTab().catch(showError);
   if (name === 'chat') {
     initChat().catch(showError);
     setTimeout(() => $('#chat-input').focus(), 50);
@@ -484,6 +499,7 @@ function renderRunSummary(run) {
 function showRunDetail(detail) {
   state.currentRun = detail;
   state.previewDirty = false;
+  state.currentApprovals = [];
   if (
     state.lastEmailReport &&
     state.lastEmailReport.run_id !== detail.run.run_id
@@ -502,6 +518,10 @@ function renderRunDetail() {
   }
   const run = detail.run;
   const editable = run.status === 'DRAFT' && can('payroll:write');
+  const approval = run.approval || {};
+  const isSubmitter = Boolean(
+    state.authEnabled && state.me && approval.submitted_by_id === state.me.id
+  );
   renderRunSummary(run);
   $('#run-panel').classList.remove('hidden');
   $('#run-title').textContent = `批次 #${run.run_id} · ${run.period} · ${run.scope}`;
@@ -552,10 +572,25 @@ function renderRunDetail() {
   }
 
   $('#run-apply-adjust').classList.toggle('hidden', !editable);
-  $('#run-finalize').classList.toggle('hidden', !editable);
-  $('#run-finalize').disabled = state.previewDirty || failures.length > 0;
+  const canSubmit =
+    (run.status === 'DRAFT' || run.status === 'REJECTED') &&
+    can('payroll:write') &&
+    !state.previewDirty &&
+    failures.length === 0;
+  const canApprove =
+    run.status === 'PENDING_APPROVAL' && can('payroll:approve') && !isSubmitter;
+  $('#run-submit').classList.toggle('hidden', !canSubmit);
+  $('#run-approve').classList.toggle('hidden', !canApprove);
+  $('#run-reject').classList.toggle('hidden', !canApprove);
+  $('#run-finalize').classList.toggle(
+    'hidden',
+    run.status !== 'APPROVED' || !can('payroll:write')
+  );
+  $('#run-finalize').disabled = state.previewDirty;
   $('#run-send').classList.toggle('hidden', run.status !== 'FINALIZED' || !can('payroll:write'));
   $('#run-send').disabled = state.previewDirty;
+  renderRunApproval(run);
+  loadRunApprovals(run.run_id);
   const excel = $('#run-excel');
   const hasExcel = Boolean(run.excel_path);
   excel.classList.toggle('hidden', !hasExcel);
@@ -563,11 +598,19 @@ function renderRunDetail() {
 
   const hint = $('#run-hint');
   if (state.previewDirty) {
-    hint.textContent = '微调金额已修改，请先“应用微调并重新预览”，再出账。';
+    hint.textContent = '微调金额已修改，请先“应用微调并重新预览”，再提交审批。';
   } else if (failures.length) {
     hint.textContent = '存在核算失败员工，请先补齐考勤/政策/邮箱等数据后重新预览。';
   } else if (run.status === 'DRAFT') {
-    hint.textContent = '草稿不会发送邮件。确认明细后可出账；出账会生成 Excel 并落库。';
+    hint.textContent = '草稿不会发送邮件。确认明细后提交审批，审批通过才能出账。';
+  } else if (run.status === 'PENDING_APPROVAL') {
+    hint.textContent = isSubmitter
+      ? '已提交审批，等待其他有审批权限的同事处理。'
+      : '批次待审批；审批通过后才能出账。';
+  } else if (run.status === 'APPROVED') {
+    hint.textContent = '审批已通过。确认无误后可出账并生成 Excel。';
+  } else if (run.status === 'REJECTED') {
+    hint.textContent = '批次已被驳回，请修正数据后重新预览并提交审批。';
   } else if (run.status === 'FINALIZED') {
     hint.textContent = '已出账。确认无误后发送全员邮件；当前邮件为 dry-run，不会真实投递。';
   } else {
@@ -724,6 +767,122 @@ async function previewRun() {
   }
 }
 
+function renderRunApproval(run) {
+  const box = $('#run-approval');
+  const approval = run.approval || {};
+  if (!approval.flow_name && !approval.submitted_at) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const lines = [`<div><strong>审批链：</strong>${esc(approval.flow_name || '—')}</div>`];
+  if (approval.submitted_by_name) {
+    lines.push(
+      `<div>提交：${esc(approval.submitted_by_name)} · ${formatDateTime(approval.submitted_at)}` +
+        `${approval.submit_comment ? ' · ' + esc(approval.submit_comment) : ''}</div>`
+    );
+  }
+  if (approval.approved_by_name) {
+    lines.push(
+      `<div>通过：${esc(approval.approved_by_name)} · ${formatDateTime(approval.approved_at)}` +
+        `${approval.approval_comment ? ' · ' + esc(approval.approval_comment) : ''}</div>`
+    );
+  }
+  if (approval.rejection_reason) {
+    lines.push(
+      `<div class="danger-text">驳回：${esc(approval.rejected_by_name || '—')} · ` +
+        `${formatDateTime(approval.rejected_at)} · ${esc(approval.rejection_reason)}</div>`
+    );
+  }
+  lines.push('<div id="run-approval-history" class="hint">审批轨迹加载中…</div>');
+  box.innerHTML = lines.join('');
+  box.classList.remove('hidden');
+}
+
+function renderApprovalHistory() {
+  const target = $('#run-approval-history');
+  if (!target) return;
+  if (!state.currentApprovals.length) {
+    target.textContent = '暂无审批轨迹';
+    return;
+  }
+  target.innerHTML =
+    '审批轨迹：' +
+    state.currentApprovals
+      .map(
+        (event) =>
+          `${approvalActionLabel(event.action)} · ${esc(event.actor_name || '系统')} · ` +
+          `${formatDateTime(event.created_at)}${event.comment ? ' · ' + esc(event.comment) : ''}`
+      )
+      .join(' ｜ ');
+}
+
+async function loadRunApprovals(runId) {
+  try {
+    const events = await api(`/api/runs/${runId}/approvals`);
+    if (!state.currentRun || state.currentRun.run.run_id !== runId) return;
+    state.currentApprovals = events || [];
+    renderApprovalHistory();
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+async function submitRun() {
+  if (!state.currentRun) return;
+  const comment = prompt('提交审批备注（可选）');
+  if (comment === null) return;
+  try {
+    const detail = await api(
+      `/api/runs/${state.currentRun.run.run_id}/submit-approval`,
+      { method: 'POST', body: { comment } }
+    );
+    showRunDetail(detail);
+    await loadRuns();
+    toast('已提交审批', 'success');
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function approveRun() {
+  if (!state.currentRun) return;
+  const comment = prompt('审批意见（可选）');
+  if (comment === null) return;
+  try {
+    const detail = await api(`/api/runs/${state.currentRun.run.run_id}/approve`, {
+      method: 'POST',
+      body: { comment },
+    });
+    showRunDetail(detail);
+    await loadRuns();
+    toast('审批已通过，可以出账', 'success');
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function rejectRun() {
+  if (!state.currentRun) return;
+  const reason = prompt('请填写驳回原因（必填）');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    toast('驳回原因不能为空', 'error');
+    return;
+  }
+  try {
+    const detail = await api(`/api/runs/${state.currentRun.run.run_id}/reject`, {
+      method: 'POST',
+      body: { reason },
+    });
+    showRunDetail(detail);
+    await loadRuns();
+    toast('已驳回批次', 'success');
+  } catch (error) {
+    showError(error);
+  }
+}
+
 async function finalizeRun() {
   if (!state.currentRun) return;
   if (!confirm('确认出账？系统会重新核算、写入数据库并生成 Excel。')) return;
@@ -853,6 +1012,87 @@ async function importWorkbook(type, input) {
   }
 }
 
+// ---------------------------------------------------------------- 审批链
+
+async function loadApprovalTab() {
+  if (!state.departments.length) await loadDepartments(true);
+  fillFlowDepartmentSelect();
+  await loadApprovalFlows();
+}
+
+async function loadApprovalFlows() {
+  state.approvalFlows = await api('/api/approval/flows');
+  renderApprovalFlows();
+}
+
+function renderApprovalFlows() {
+  const body = $('#flow-rows');
+  if (!body) return;
+  if (!state.approvalFlows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="hint">暂无审批链</td></tr>';
+    return;
+  }
+  body.innerHTML = state.approvalFlows
+    .map(
+      (flow) => `
+      <tr>
+        <td>${esc(flow.name)}</td>
+        <td>${esc(flow.scope_type === 'DEPARTMENT' ? flow.scope_value : '全部部门')}</td>
+        <td class="num">${Number(flow.min_amount || 0).toFixed(2)}${
+          flow.max_amount === null || flow.max_amount === undefined
+            ? ' 起'
+            : ' ~ ' + Number(flow.max_amount).toFixed(2)
+        }</td>
+        <td class="num">${flow.priority}</td>
+        <td><span class="status ${flow.enabled ? 'SENT' : 'FAILED'}">${flow.enabled ? '启用' : '停用'}</span></td>
+        <td>${esc(flow.description) || '<span class="hint">—</span>'}</td>
+        <td>
+          <button class="link" data-edit-flow="${flow.flow_id}">编辑</button>
+          <button class="link danger-text" data-delete-flow="${flow.flow_id}">删除</button>
+        </td>
+      </tr>`
+    )
+    .join('');
+}
+
+function toggleFlowDepartmentField() {
+  const label = $('#flow-department-label');
+  if (!label) return;
+  label.classList.toggle('hidden', $('#flow-scope-type').value !== 'DEPARTMENT');
+}
+
+function fillFlowDepartmentSelect() {
+  const select = $('#flow-department');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = state.departments
+    .map((department) => `<option value="${esc(department.name)}">${esc(department.name)}</option>`)
+    .join('');
+  if (previous) select.value = previous;
+}
+
+function showApprovalFlowForm(flow) {
+  const form = $('#flow-form');
+  form.reset();
+  form.dataset.flowId = flow ? flow.flow_id : '';
+  $('#flow-form-title').textContent = flow ? `编辑审批链 · ${flow.name}` : '新增审批链';
+  form.elements.name.value = flow ? flow.name : '';
+  form.elements.scope_type.value = flow ? flow.scope_type : 'GLOBAL';
+  fillFlowDepartmentSelect();
+  if (flow && flow.scope_type === 'DEPARTMENT') {
+    form.elements.scope_value.value = flow.scope_value;
+  }
+  form.elements.min_amount.value = flow ? flow.min_amount : 0;
+  form.elements.max_amount.value =
+    flow && flow.max_amount !== null && flow.max_amount !== undefined ? flow.max_amount : '';
+  form.elements.priority.value = flow ? flow.priority : 100;
+  form.elements.enabled.checked = flow ? flow.enabled : true;
+  form.elements.description.value = flow ? flow.description || '' : '';
+  toggleFlowDepartmentField();
+  form.classList.remove('hidden');
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 // ---------------------------------------------------------------- 部门
 
 async function loadDepartments(includeInactive = true) {
@@ -862,6 +1102,7 @@ async function loadDepartments(includeInactive = true) {
   renderDepartments();
   fillEmployeeDepartmentSelect($('#employee-department').value || null);
   fillUserDepartmentSelect();
+  fillFlowDepartmentSelect();
   fillScopeSelect();
 }
 
@@ -2270,8 +2511,60 @@ function bindEvents() {
     }
   });
 
+  $('#flow-new').addEventListener('click', () => showApprovalFlowForm(null));
+  $('#flow-cancel').addEventListener('click', () => $('#flow-form').classList.add('hidden'));
+  $('#flow-scope-type').addEventListener('change', toggleFlowDepartmentField);
+  $('#flow-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const scopeType = form.elements.scope_type.value;
+    const payload = {
+      name: form.elements.name.value.trim(),
+      scope_type: scopeType,
+      scope_value: scopeType === 'DEPARTMENT' ? form.elements.scope_value.value : '*',
+      min_amount: num(form.elements.min_amount.value) ?? 0,
+      max_amount: num(form.elements.max_amount.value),
+      priority: num(form.elements.priority.value) ?? 100,
+      enabled: form.elements.enabled.checked,
+      description: form.elements.description.value.trim(),
+    };
+    try {
+      const flowId = form.dataset.flowId;
+      await api(flowId ? `/api/approval/flows/${flowId}` : '/api/approval/flows', {
+        method: flowId ? 'PUT' : 'POST',
+        body: payload,
+      });
+      form.classList.add('hidden');
+      await loadApprovalFlows();
+      toast('审批链已保存', 'success');
+    } catch (error) {
+      showError(error);
+    }
+  });
+  $('#flow-rows').addEventListener('click', async (event) => {
+    const editId = event.target.dataset.editFlow;
+    if (editId) {
+      const flow = state.approvalFlows.find((item) => String(item.flow_id) === editId);
+      if (flow) showApprovalFlowForm(flow);
+      return;
+    }
+    const deleteId = event.target.dataset.deleteFlow;
+    if (!deleteId) return;
+    if (!confirm('确认删除该审批链？已提交的批次仍保留审批链名称快照。')) return;
+    try {
+      await api(`/api/approval/flows/${deleteId}`, { method: 'DELETE' });
+      await loadApprovalFlows();
+      toast('审批链已删除', 'success');
+    } catch (error) {
+      showError(error);
+    }
+  });
+
   $('#run-preview').addEventListener('click', previewRun);
   $('#run-apply-adjust').addEventListener('click', previewRun);
+  $('#run-submit').addEventListener('click', submitRun);
+  $('#run-approve').addEventListener('click', approveRun);
+  $('#run-reject').addEventListener('click', rejectRun);
   $('#run-finalize').addEventListener('click', finalizeRun);
   $('#run-send').addEventListener('click', sendRun);
   $('#runs-refresh').addEventListener('click', () => loadRuns().catch(showError));

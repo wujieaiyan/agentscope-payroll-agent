@@ -61,6 +61,14 @@ class PayrollAdminWebTest {
         assertTrue(preview.contains("\"DRAFT\""));
         long runId = extractRunId(preview);
 
+        String submitted = post("/api/runs/" + runId + "/submit-approval", "{\"comment\":\"月度核算\"}");
+        assertTrue(submitted.contains("\"PENDING_APPROVAL\""), submitted);
+        assertTrue(submitted.contains("默认审批链"), submitted);
+
+        String approved = post("/api/runs/" + runId + "/approve", "{\"comment\":\"同意\"}");
+        assertTrue(approved.contains("\"APPROVED\""), approved);
+        assertTrue(approved.contains("\"APPROVE\""), approved);
+
         String finalized = post("/api/runs/" + runId + "/finalize", "");
         assertTrue(finalized.contains("\"FINALIZED\""));
 

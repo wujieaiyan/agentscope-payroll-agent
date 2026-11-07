@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.config;
 
 import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
@@ -9,6 +10,7 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.memory.VectorMemorySettings;
+import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
@@ -68,18 +70,34 @@ public class PayrollConfiguration {
     }
 
     @Bean
+    public H2PayrollRunStore payrollRunStore(PayrollDatabase database) {
+        return new H2PayrollRunStore(database);
+    }
+
+    @Bean
     public PayrollRunService payrollRunService(
             PayrollEngine engine,
             H2PayrollRepository repository,
-            PayrollDatabase database,
+            H2PayrollRunStore runStore,
             @Value("${payroll.output-dir}") String outputDir) {
         return new PayrollRunService(
                 engine,
                 repository,
-                new H2PayrollRunStore(database),
+                runStore,
                 new ExcelExporter(),
                 new DryRunEmailGateway(),
                 Path.of(outputDir));
+    }
+
+    @Bean
+    public H2ApprovalStore approvalStore(PayrollDatabase database) {
+        return new H2ApprovalStore(database);
+    }
+
+    @Bean
+    public ApprovalService approvalService(
+            H2ApprovalStore store, H2PayrollRunStore runStore) {
+        return new ApprovalService(store, runStore);
     }
 
     @Bean

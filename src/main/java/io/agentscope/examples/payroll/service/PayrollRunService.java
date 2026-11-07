@@ -5,6 +5,8 @@ import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.domain.EmailStatus;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.PayrollAdjustment;
+import io.agentscope.examples.payroll.domain.PayrollApproval;
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollEmailReport;
 import io.agentscope.examples.payroll.domain.PayrollEmailResult;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -13,6 +15,7 @@ import io.agentscope.examples.payroll.domain.PayrollRun;
 import io.agentscope.examples.payroll.domain.PayrollRunDetail;
 import io.agentscope.examples.payroll.domain.PayrollRunFailure;
 import io.agentscope.examples.payroll.domain.PayrollRunItem;
+import io.agentscope.examples.payroll.domain.PayrollRunStatus;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
@@ -122,13 +125,16 @@ public final class PayrollRunService {
         PayrollRun run =
                 runStore.createDraft(
                         period.toString(), all ? "全部" : requestedScope, items, failures);
-        return new PayrollRunDetail(run, items, failures);
+        return new PayrollRunDetail(run, items, failures, List.of());
     }
 
     public PayrollRunDetail finalizeRun(long runId) {
         PayrollRun run = requireRun(runId);
-        if (!"DRAFT".equals(run.status())) {
+        if (PayrollRunStatus.isFinal(run.status())) {
             return detail(runId);
+        }
+        if (!PayrollRunStatus.APPROVED.equals(run.status())) {
+            throw new PayrollException(finalizeStatusMessage(run.status()));
         }
         List<PayrollRunFailure> failures = runStore.failures(runId);
         if (!failures.isEmpty()) {
@@ -143,17 +149,41 @@ public final class PayrollRunService {
             throw new PayrollException("批次没有可出账的明细");
         }
         YearMonth period = parsePeriod(run.period());
+        List<PayrollRunItem> recalculatedItems = new ArrayList<>(items.size());
         for (PayrollRunItem item : items) {
             PayrollResult recalculated =
                     engine.calculate(item.employeeId(), period, item.adjustment());
-            runStore.updateResult(runId, recalculated);
+            recalculatedItems.add(
+                    new PayrollRunItem(
+                            item.employeeId(),
+                            item.employeeName(),
+                            item.department(),
+                            item.city(),
+                            item.email(),
+                            item.adjustment(),
+                            recalculated,
+                            item.emailStatus(),
+                            item.emailReason()));
+        }
+        PayrollApproval approval = run.approval();
+        String currentHash =
+                ApprovalService.snapshotHash(
+                        run.period(), run.scope(), recalculatedItems);
+        if (approval == null
+                || approval.snapshotHash() == null
+                || !approval.snapshotHash().equals(currentHash)) {
+            throw new PayrollConflictException(
+                    "核算结果与审批快照不一致（审批后政策/考勤/考核发生变化），请重新提交审批");
+        }
+        for (PayrollRunItem item : recalculatedItems) {
+            runStore.updateResult(runId, item.payroll());
         }
         PayrollRunDetail detail = detail(runId);
         Path excel =
                 excelExporter.write(
                         detail.run(), detail.items(), detail.failures(), outputDir);
         if (!runStore.markFinalized(runId, excel.toString())) {
-            throw new PayrollException("批次状态已变化，请刷新后重试");
+            throw new PayrollConflictException("批次状态已变化，请刷新后重试");
         }
         return detail(runId);
     }
@@ -201,7 +231,8 @@ public final class PayrollRunService {
 
     public PayrollRunDetail detail(long runId) {
         PayrollRun run = requireRun(runId);
-        return new PayrollRunDetail(run, runStore.items(runId), runStore.failures(runId));
+        return new PayrollRunDetail(
+                run, runStore.items(runId), runStore.failures(runId), List.of());
     }
 
     public List<PayrollRun> runs() {
@@ -216,6 +247,15 @@ public final class PayrollRunService {
         return runStore
                 .findRun(runId)
                 .orElseThrow(() -> new PayrollException("工资批次不存在：" + runId));
+    }
+
+    private static String finalizeStatusMessage(String status) {
+        return switch (status) {
+            case PayrollRunStatus.DRAFT -> "批次尚未提交审批，不能出账";
+            case PayrollRunStatus.PENDING_APPROVAL -> "批次正在等待审批，审批通过后才能出账";
+            case PayrollRunStatus.REJECTED -> "批次已被驳回，请修改后重新提交审批";
+            default -> "批次状态不允许出账：" + status;
+        };
     }
 
     private static YearMonth parsePeriod(String period) {

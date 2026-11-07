@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.db;
 
 import io.agentscope.examples.payroll.domain.PayrollAdjustment;
+import io.agentscope.examples.payroll.domain.PayrollApproval;
 import io.agentscope.examples.payroll.domain.PayrollEmailResult;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollResult;
@@ -163,7 +164,7 @@ public final class H2PayrollRunStore {
         String sql =
                 """
                 UPDATE payroll_runs SET status = 'FINALIZED', excel_path = ?, finalized_at = ?
-                WHERE run_id = ? AND status = 'DRAFT'
+                WHERE run_id = ? AND status = 'APPROVED'
                 """;
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -333,6 +334,27 @@ public final class H2PayrollRunStore {
                 rs.getBigDecimal("total_employer_cost"),
                 rs.getString("excel_path"),
                 rs.getObject("created_at", LocalDateTime.class),
-                rs.getObject("finalized_at", LocalDateTime.class));
+                rs.getObject("finalized_at", LocalDateTime.class),
+                new PayrollApproval(
+                        nullableLong(rs, "approval_flow_id"),
+                        rs.getString("approval_flow_name"),
+                        nullableLong(rs, "submitted_by_id"),
+                        rs.getString("submitted_by_name"),
+                        rs.getObject("submitted_at", LocalDateTime.class),
+                        rs.getString("submit_comment"),
+                        nullableLong(rs, "approved_by_id"),
+                        rs.getString("approved_by_name"),
+                        rs.getObject("approved_at", LocalDateTime.class),
+                        rs.getString("approval_comment"),
+                        nullableLong(rs, "rejected_by_id"),
+                        rs.getString("rejected_by_name"),
+                        rs.getObject("rejected_at", LocalDateTime.class),
+                        rs.getString("rejection_reason"),
+                        rs.getString("snapshot_hash")));
+    }
+
+    private static Long nullableLong(ResultSet rs, String column) throws SQLException {
+        long value = rs.getLong(column);
+        return rs.wasNull() ? null : value;
     }
 }

@@ -333,3 +333,87 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 - 下一步：任务 #49 可配置审批链与批次状态机。审批动作应直接调用
   `AuditService.record("payroll.approve", "approval_request", id, before, after)`，
   并复用 `AuditContext` 的 actor/IP。
+
+## 16. 可配置审批链与批次状态机（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #49 已完成：批次出账前必须走“提交审批 → 审批通过”，审批链可在管理台配置。
+
+### 状态机
+
+```
+DRAFT / REJECTED --submit--> PENDING_APPROVAL --approve--> APPROVED --finalize--> FINALIZED --send--> SENT
+                                     |
+                                  reject
+                                     v
+                                  REJECTED
+```
+
+- `PayrollRunStatus` 定义状态常量与 `isFinal`；出账只接受 `APPROVED`。
+- `REJECTED` 可再次提交；`PENDING_APPROVAL`/`APPROVED` 不能重复提交（并发时由 SQL
+  `WHERE status IN (...)` 兜底，失败抛 `PayrollConflictException` → 409）。
+
+### 数据模型
+
+- `approval_flows`：`name`、`scope_type`（`GLOBAL`/`DEPARTMENT`）、`scope_value`
+  （全局固定 `*`）、`min_amount`、`max_amount`、`priority`、`enabled`、`description`、
+  `created_at`、`updated_at`。同一 `(scope_type, scope_value)` 只允许一条 `enabled` 流程。
+  首次建库插入“默认审批链”（GLOBAL、0 起、无上限、优先级 100）。
+- `payroll_runs` 新增 15 列：`approval_flow_id/name`、`submitted_by_id/name/at`、
+  `submit_comment`、`approved_by_id/name/at`、`approval_comment`、
+  `rejected_by_id/name/at`、`rejection_reason`、`snapshot_hash`。
+  使用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，旧库自动升级。
+- `payroll_approval_events`：追加式轨迹（`SUBMIT`/`APPROVE`/`REJECT`），
+  记录 actor、flow 快照、备注与当次金额指纹。
+
+### 金额指纹与校验
+
+- `ApprovalService.snapshotHash(period, scope, items)`：按工号排序，
+  对 `period|scope` 与每人的 `adjustment_json|result_json` 取 SHA-256。
+- 提交时写入 `snapshot_hash`；审批时用库中明细重算并比对。
+- 出账时 `PayrollRunService` 先调用确定性引擎全员重算，再比对审批指纹；
+  任何考勤、考核、政策、微调变化都会返回 409“核算结果与审批快照不一致”，
+  必须驳回或重新提交审批。
+
+### 权限与接口
+
+- 新增权限：`payroll:approve`（HR、ADMIN）、`approval:manage`（仅 ADMIN）。
+- 批次接口：`POST /api/runs/{id}/submit-approval`（`payroll:write`）、
+  `POST /api/runs/{id}/approve|reject`（`payroll:approve`）、
+  `GET /api/runs/{id}/approvals`（`payroll:read`）。
+- 审批链接口：`GET/POST /api/approval/flows`、`PUT/DELETE /api/approval/flows/{id}`
+  （`approval:manage`），分别记录 `approval_flow.create/update/delete` 审计事件。
+- 提交人不能审批或驳回自己提交的批次；关闭认证（系统账号 id=0）时跳过该检查，
+  便于本地演示与既有测试。
+- 管理台：工资批次面板新增“提交审批/审批通过/驳回”按钮与审批信息/轨迹；
+  新增“审批链”页签，可维护范围、金额区间、优先级与启用状态。
+
+### 关键文件
+
+- `domain/PayrollRunStatus.java`、`PayrollApproval.java`、`PayrollApprovalEvent.java`、
+  `ApprovalFlow.java`、`PayrollConflictException.java`
+- `db/H2ApprovalStore.java`、`db/H2PayrollRunStore.java`、`db/PayrollDatabase.java`
+- `service/ApprovalService.java`、`service/PayrollRunService.java`
+- `web/ApprovalController.java`、`web/PayrollWebController.java`、`web/ApiExceptionHandler.java`
+- `support/Permissions.java`、`static/index.html`、`static/app.js`、`static/style.css`
+
+### 测试
+
+- 新增 `ApprovalServiceTest`（8）、`H2ApprovalStoreTest`（5）、`ApprovalWebTest`（3）；
+  `PayrollRunServiceTest` 与 `PayrollAdminWebTest` 改为先提交/审批再出账。
+  全量 `mvn test` 116 个测试通过。
+- 覆盖：提交/通过/驳回/重新提交、自批与自驳拦截、审批轨迹、
+  提交后明细变化检测、审批后考勤变化导致出账冲突、部门流程优先、无流程报错、
+  同范围唯一生效、金额区间、HTTP 权限与驳回原因必填。
+
+### 已知限制
+
+1. 审批链只按“部门 + 批次总额”匹配，尚未支持多级会签、或签与按组织架构解析审批人。
+2. 一个范围只允许一条生效流程；如需按金额分档，需在同一流程上设置区间或扩展为多级模型。
+3. 提交后预调微调不落库（`preview` 直接生成草稿），重新预览会产生新批次，旧批次需人工清理。
+4. 管理台审批使用 `prompt()` 输入备注/驳回原因，后续可替换为带校验的弹窗。
+5. 微信风格审批卡片、审批超时提醒与催办尚未实现。
+
+### 下一步
+
+- 任务 #50：对话金额工具调用级追溯（把智能体工具结果与会话消息关联）。
+- 任务 #51：回归测试与交接文档整合；任务 #50 完成后再统一跑一次全量回归。

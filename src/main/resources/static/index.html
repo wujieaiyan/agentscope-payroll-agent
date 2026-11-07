@@ -26,6 +26,7 @@
   <button data-tab="policies">城市政策</button>
   <button data-tab="attendance">考勤</button>
   <button data-tab="payroll">工资批次</button>
+  <button data-tab="approval" data-permission="approval:manage" class="hidden">审批链</button>
   <button data-tab="chat" data-permission="chat:use" class="hidden">智能问答</button>
   <button data-tab="users" data-permission="user:manage" class="hidden">用户</button>
   <button data-tab="departments" data-permission="department:manage" class="hidden">部门</button>
@@ -193,8 +194,12 @@
         </table>
       </div>
       <div id="run-failures" class="failures hidden"></div>
+      <div id="run-approval" class="run-approval hidden"></div>
       <div class="actions">
         <button id="run-apply-adjust" class="hidden">应用微调并重新预览</button>
+        <button id="run-submit" class="primary hidden">提交审批</button>
+        <button id="run-approve" class="primary hidden">审批通过</button>
+        <button id="run-reject" class="danger hidden">驳回</button>
         <button id="run-finalize" class="primary hidden">出账并生成 Excel</button>
         <a id="run-excel" class="button hidden" href="#" target="_blank" rel="noopener">下载 Excel</a>
         <button id="run-send" class="danger hidden">确认无误，发送全员邮件</button>
@@ -223,6 +228,45 @@
         <tr><th>批次</th><th>期间</th><th>范围</th><th>状态</th><th class="num">人数</th><th class="num">实发合计</th><th>创建时间</th><th>操作</th></tr>
         </thead>
         <tbody id="run-history-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-approval" class="tab">
+    <div class="toolbar">
+      <button id="flow-new" class="primary">新增审批链</button>
+      <span class="hint">同一范围仅一条生效流程；部门专属优先于全局，金额按批次实发合计匹配。</span>
+    </div>
+    <form id="flow-form" class="card form hidden">
+      <h2 id="flow-form-title">新增审批链</h2>
+      <div class="grid">
+        <label>名称<input name="name" required maxlength="64"></label>
+        <label>适用范围
+          <select name="scope_type" id="flow-scope-type">
+            <option value="GLOBAL">全部部门</option>
+            <option value="DEPARTMENT">指定部门</option>
+          </select>
+        </label>
+        <label id="flow-department-label" class="hidden">部门
+          <select name="scope_value" id="flow-department"></select>
+        </label>
+        <label>金额下限（实发合计）<input name="min_amount" type="number" step="0.01" min="0" value="0"></label>
+        <label>金额上限（可空）<input name="max_amount" type="number" step="0.01" min="0"></label>
+        <label>优先级<input name="priority" type="number" min="0" max="1000" value="100"></label>
+        <label class="inline"><input type="checkbox" name="enabled" checked> 启用</label>
+        <label class="span-2">说明<input name="description" maxlength="200"></label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">保存审批链</button>
+        <button type="button" id="flow-cancel">取消</button>
+      </div>
+    </form>
+    <div class="card">
+      <table>
+        <thead>
+        <tr><th>名称</th><th>范围</th><th>金额区间</th><th class="num">优先级</th><th>状态</th><th>说明</th><th>操作</th></tr>
+        </thead>
+        <tbody id="flow-rows"></tbody>
       </table>
     </div>
   </section>

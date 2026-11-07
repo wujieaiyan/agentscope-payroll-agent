@@ -6,7 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agentscope.examples.payroll.db.H2ApprovalStore;
+import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.EmailStatus;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.PayrollAdjustment;
@@ -14,6 +17,7 @@ import io.agentscope.examples.payroll.domain.PayrollEmailReport;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollRunDetail;
 import io.agentscope.examples.payroll.domain.PayrollRunItem;
+import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import java.io.IOException;
@@ -31,6 +35,7 @@ class PayrollRunServiceTest {
 
     private PayrollServices services;
     private PayrollRunService runService;
+    private ApprovalService approvalService;
     private Path outputDir;
 
     @BeforeEach
@@ -40,6 +45,17 @@ class PayrollRunServiceTest {
         outputDir = Files.createTempDirectory("payroll-output-");
         services = PayrollServices.forDatabase(database, outputDir);
         runService = services.runService();
+        approvalService =
+                new ApprovalService(
+                        new H2ApprovalStore(database), new H2PayrollRunStore(database));
+    }
+
+    /** 走完整审批链路：自动审批通过后返回批次 ID。 */
+    private long approvedRun(String period, String scope, Map<String, PayrollAdjustment> adjustments) {
+        long runId = runService.preview(period, scope, adjustments).run().runId();
+        approvalService.submit(runId, AuthUser.system(), "月度核算");
+        approvalService.approve(runId, AuthUser.system(), "同意");
+        return runId;
     }
 
     @Test
@@ -88,7 +104,7 @@ class PayrollRunServiceTest {
     @Test
     @DisplayName("出账重新核算并生成 Excel，落库后状态变为已出账")
     void finalizesAndWritesExcel() {
-        long runId = runService.preview("2026-10", "全部", Map.of()).run().runId();
+        long runId = approvedRun("2026-10", "全部", Map.of());
 
         PayrollRunDetail detail = runService.finalizeRun(runId);
 
@@ -104,7 +120,7 @@ class PayrollRunServiceTest {
     @Test
     @DisplayName("发送前必须确认；dry-run 报告区分成功与失败并给出原因")
     void sendsDryRunReport() {
-        long runId = runService.preview("2026-10", "全部", Map.of()).run().runId();
+        long runId = approvedRun("2026-10", "全部", Map.of());
         runService.finalizeRun(runId);
 
         assertThrows(PayrollException.class, () -> runService.sendAll(runId, false));
@@ -126,7 +142,17 @@ class PayrollRunServiceTest {
     }
 
     @Test
-    @DisplayName("存在核算失败员工时禁止出账")
+    @DisplayName("未审批通过的批次不允许出账")
+    void blocksFinalizeBeforeApproval() {
+        long runId = runService.preview("2026-10", "全部", Map.of()).run().runId();
+
+        PayrollException error =
+                assertThrows(PayrollException.class, () -> runService.finalizeRun(runId));
+        assertTrue(error.getMessage().contains("审批"), error.getMessage());
+    }
+
+    @Test
+    @DisplayName("存在核算失败员工时禁止提交审批")
     void blocksFinalizeWhenEmployeeFails() {
         services.repository()
                 .saveEmployee(
@@ -153,8 +179,10 @@ class PayrollRunServiceTest {
         PayrollException error =
                 assertThrows(
                         PayrollException.class,
-                        () -> runService.finalizeRun(detail.run().runId()));
-        assertTrue(error.getMessage().contains("核算失败"));
+                        () ->
+                                approvalService.submit(
+                                        detail.run().runId(), AuthUser.system(), "提交"));
+        assertTrue(error.getMessage().contains("核算失败"), error.getMessage());
     }
 
     @Test
