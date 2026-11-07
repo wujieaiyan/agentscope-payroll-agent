@@ -45,7 +45,7 @@ public final class PayrollTools {
             name = "list_employees",
             description =
                     "查询员工清单。返回工号、姓名、部门、岗位与月度固定薪资。"
-                            + "当用户只给出姓名或部门、未提供工号时，必须先用本工具定位员工。",
+                            + "需要按部门筛选、确认同名员工或核对工号时使用。",
             readOnly = true)
     public String listEmployees(
             @ToolParam(
@@ -83,14 +83,15 @@ public final class PayrollTools {
     @Tool(
             name = "get_employee_profile",
             description =
-                    "按工号查询员工薪酬档案，包括固定薪资、公积金比例、专项附加扣除、入职日期与脱敏银行卡。"
+                    "按工号或姓名查询员工薪酬档案，包括固定薪资、公积金比例、专项附加扣除、入职日期与脱敏银行卡。"
                             + "仅在用户明确指定员工后使用。",
             readOnly = true)
     public String getEmployeeProfile(
-            @ToolParam(name = "employee_id", description = "员工工号，如 EMP001") String employeeId) {
+            @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
+                    String employeeId) {
         return execute(
                 () -> {
-                    Employee employee = engine.employee(employeeId);
+                    Employee employee = engine.employee(resolveEmployeeId(employeeId));
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("employee_id", employee.employeeId());
                     payload.put("name", employee.name());
@@ -105,6 +106,7 @@ public final class PayrollTools {
                             employee.specialAdditionalDeduction());
                     payload.put("hire_date", employee.hireDate());
                     payload.put("bank_account_masked", employee.bankAccountMasked());
+                    payload.put("city", employee.city());
                     return payload;
                 });
     }
@@ -116,13 +118,14 @@ public final class PayrollTools {
                             + "核算工资前如需核对考勤，使用本工具；不要自行估算。",
             readOnly = true)
     public String getAttendanceSummary(
-            @ToolParam(name = "employee_id", description = "员工工号，如 EMP001") String employeeId,
+            @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
+                    String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
                 () -> {
                     AttendanceSummary attendance =
-                            engine.attendance(employeeId, parsePeriod(period));
+                            engine.attendance(resolveEmployeeId(employeeId), parsePeriod(period));
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("employee_id", attendance.employeeId());
                     payload.put("period", attendance.period());
@@ -140,13 +143,16 @@ public final class PayrollTools {
             name = "calculate_payroll",
             description =
                     "核算单个员工某月的完整工资：应发、考勤扣款、个人社保公积金、累计预扣个税、实发与企业成本，"
-                            + "并返回个税计算过程和风险提示。所有金额以此工具结果为准，禁止自行计算。",
+                            + "并返回个税计算过程和风险提示。所有金额以此工具结果为准，禁止自行计算。"
+                            + "员工参数可传工号或唯一姓名。",
             readOnly = true)
     public String calculatePayroll(
-            @ToolParam(name = "employee_id", description = "员工工号，如 EMP001") String employeeId,
+            @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
+                    String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
-        return execute(() -> engine.calculate(employeeId, parsePeriod(period)));
+        return execute(
+                () -> engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period)));
     }
 
     @Tool(
@@ -199,13 +205,14 @@ public final class PayrollTools {
                             + "用户询问“有没有问题”“能不能发”或出账前复核时使用。",
             readOnly = true)
     public String validatePayroll(
-            @ToolParam(name = "employee_id", description = "员工工号，如 EMP001") String employeeId,
+            @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
+                    String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
                 () -> {
                     PayrollValidation validation =
-                            engine.validate(employeeId, parsePeriod(period));
+                            engine.validate(resolveEmployeeId(employeeId), parsePeriod(period));
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("employee_id", validation.employeeId());
                     payload.put("period", validation.period());
@@ -223,12 +230,14 @@ public final class PayrollTools {
                             + "用于向员工展示或导出，金额来自系统核算结果。",
             readOnly = true)
     public String generatePayslip(
-            @ToolParam(name = "employee_id", description = "员工工号，如 EMP001") String employeeId,
+            @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
+                    String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
                     String period) {
         return execute(
                 () -> {
-                    PayrollResult payroll = engine.calculate(employeeId, parsePeriod(period));
+                    PayrollResult payroll =
+                            engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period));
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("employee_id", payroll.employeeId());
                     payload.put("period", payroll.period());
@@ -240,16 +249,23 @@ public final class PayrollTools {
     @Tool(
             name = "get_payroll_policy",
             description =
-                    "查询当前生效的薪酬政策参数：个税累计预扣率表、社保公积金比例、缴费基数上下限、"
-                            + "月减除费用、标准工时与病假计薪比例，以及考勤数据就绪月份。"
+                    "查询指定城市当前生效的薪酬政策参数：个税累计预扣率表、社保公积金比例、"
+                            + "缴费基数上下限、月减除费用、标准工时与病假计薪比例，以及考勤数据就绪月份。"
                             + "回答制度、税率、比例类问题前必须先调用本工具。",
             readOnly = true)
-    public String getPayrollPolicy() {
+    public String getPayrollPolicy(
+            @ToolParam(
+                            name = "city",
+                            description = "可选，城市名称，如 北京、上海；不传则返回默认政策",
+                            required = false)
+                    String city) {
         return execute(
                 () -> {
+                    String requested = city == null || city.isBlank() ? "默认" : city.trim();
                     Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("city", requested);
                     payload.put("data_through_period", engine.dataThroughPeriod());
-                    payload.put("policy", engine.policy());
+                    payload.put("policy", engine.policyFor(requested));
                     payload.put(
                             "notes",
                             List.of(
@@ -261,6 +277,34 @@ public final class PayrollTools {
                                     "演示数据不代表任何地区现行政策，生产环境需替换为当地社保年度参数"));
                     return payload;
                 });
+    }
+
+    /** 允许模型直接传姓名，但只在唯一命中时放行，避免同名误算。 */
+    private String resolveEmployeeId(String identifier) {
+        if (identifier == null || identifier.isBlank()) {
+            throw new PayrollException("请提供员工工号或姓名");
+        }
+        String value = identifier.trim();
+        List<Employee> matches =
+                engine.employees().stream()
+                        .filter(
+                                e ->
+                                        e.employeeId().equalsIgnoreCase(value)
+                                                || e.name().equals(value))
+                        .toList();
+        if (matches.size() == 1) {
+            return matches.get(0).employeeId();
+        }
+        if (matches.size() > 1) {
+            throw new PayrollException(
+                    "「"
+                            + value
+                            + "」对应多名员工，请改用工号："
+                            + matches.stream()
+                                    .map(e -> e.employeeId() + "(" + e.name() + ")")
+                                    .collect(Collectors.joining("、")));
+        }
+        throw new PayrollException("未找到员工「" + value + "」，请先用 list_employees 查询工号");
     }
 
     private Map<String, Object> employeeBrief(Employee employee) {

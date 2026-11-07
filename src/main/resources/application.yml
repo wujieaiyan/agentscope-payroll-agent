@@ -1,0 +1,36 @@
+server:
+  address: 127.0.0.1
+  port: "${PAYROLL_WEB_PORT:8080}"
+  shutdown: graceful
+
+spring:
+  application:
+    name: payroll-agent
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  web:
+    resources:
+      cache:
+        period: 0
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+payroll:
+  # legacy=手写三阶段状态机；graph=langgraph4j 图编排（POC，仅切换路由层）
+  orchestrator: "${PAYROLL_ORCHESTRATOR:legacy}"
+  db:
+    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
+    user: "${PAYROLL_DB_USER:sa}"
+    password: "${PAYROLL_DB_PASSWORD:}"
+  output-dir: "${PAYROLL_OUTPUT_DIR:output}"
+  auth:
+    enabled: "${PAYROLL_AUTH_ENABLED:true}"
+    admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+
+# logback.xml 默认 WARN（CLI 保持安静），管理台启动日志需要 INFO。
+logging:
+  level:
+    root: INFO

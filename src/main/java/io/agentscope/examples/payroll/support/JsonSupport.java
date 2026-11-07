@@ -35,6 +35,14 @@ public final class JsonSupport {
         }
     }
 
+    public static <T> T fromJson(String json, Class<T> type) {
+        try {
+            return MAPPER.readValue(json, type);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("JSON 解析失败：" + e.getOriginalMessage(), e);
+        }
+    }
+
     public static <T> List<T> readList(String classpathResource, Class<T> elementType) {
         try (InputStream in =
                 JsonSupport.class.getClassLoader().getResourceAsStream(classpathResource)) {

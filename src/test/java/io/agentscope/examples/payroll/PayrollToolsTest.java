@@ -38,7 +38,17 @@ class PayrollToolsTest {
         String json = tools.calculatePayroll("EMP999", "2026-10");
 
         assertTrue(json.contains("\"status\":\"ERROR\""));
-        assertTrue(json.contains("员工工号不存在"));
+        assertTrue(json.contains("未找到员工"));
+    }
+
+    @Test
+    @DisplayName("唯一姓名可直接核算并解析为工号")
+    void resolvesUniqueEmployeeName() {
+        String json = tools.calculatePayroll("张伟", "2026-10");
+
+        assertTrue(json.contains("\"status\":\"OK\""));
+        assertTrue(json.contains("\"employee_id\":\"EMP001\""));
+        assertTrue(json.contains("\"net_pay\":27661.39"));
     }
 
     @Test
@@ -62,10 +72,18 @@ class PayrollToolsTest {
     @Test
     @DisplayName("政策工具返回考勤就绪月份与税率表")
     void returnsPolicy() {
-        String json = tools.getPayrollPolicy();
+        String json = tools.getPayrollPolicy(null);
 
         assertTrue(json.contains("\"data_through_period\":\"2026-10\""));
         assertTrue(json.contains("\"tax_brackets\""));
         assertTrue(json.contains("累计预扣"));
+    }
+
+    @Test
+    @DisplayName("政策工具可按城市查询")
+    void returnsPolicyByCity() {
+        String beijing = tools.getPayrollPolicy("北京");
+        assertTrue(beijing.contains("\"city\":\"北京\""));
+        assertTrue(beijing.contains("\"status\":\"OK\""));
     }
 }
