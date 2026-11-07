@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
 class GraphPayrollOrchestratorTest {
 
     private final PayrollAgentFactory.Team team =
-            new PayrollAgentFactory.Team(null, null, null, null);
+            new PayrollAgentFactory.Team(null, null, null, null, null);
     private final Set<String> tools = new LinkedHashSet<>();
 
     @Test

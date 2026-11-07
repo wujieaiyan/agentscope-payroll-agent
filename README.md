@@ -240,6 +240,32 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 
   管理员可调用 `POST /api/admin/vector/rebuild` 清空索引并按 H2 历史重建。
   设计、配置与实测记录见 [`docs/vector-memory-spec.md`](docs/vector-memory-spec.md)。
+- **MCP 工具（可选）**：通过 `PAYROLL_MCP_SERVERS` 注册外部 MCP 服务，只挂载到计算智能体。
+  支持 `stdio`、`sse`、`http` 三种传输；`allowedTools` 限定暴露给模型的工具，
+  与本地工具同名时保留本地实现，单个服务连接失败只跳过该服务，不影响本地核算。
+  示例：
+
+  ```bash
+  PAYROLL_MCP_SERVERS='[
+    {"name":"hr","transport":"sse","url":"http://localhost:9000/sse",
+     "allowedTools":["get_employee_profile","get_attendance_summary"],"timeoutSeconds":15}
+  ]' java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  ```
+
+- **角色 Skill 外置（可选）**：三个角色的提示词已拆成 AgentScope 动态技能，系统提示只保留
+  金额安全规则与“第一步加载技能”的指令，模型通过 `load_skill_through_path` 按需读取角色说明。
+  默认使用代码内置版本；设置 `PAYROLL_NACOS_SERVER` 后按 `payroll-calculator.md`、
+  `payroll-validator.md`、`payroll-accountant.md`（group 默认 `payroll-agent`）从 Nacos 读取，
+  缺失或连接失败时逐个技能回退内置版本。发布模板与命令见
+  [`docs/nacos-skills/README.md`](docs/nacos-skills/README.md)。
+  业务工具挂在未激活的技能工具组中，技能加载成功后才会出现在模型工具列表，
+  因此“先加载技能再核算”由工具可见性强制，而不是只靠提示词约束。
+
+  ```bash
+  PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
+  PAYROLL_NACOS_GROUP=payroll-agent \
+  java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  ```
 
 ### 控制台日志
 
@@ -247,6 +273,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 
 ```
 [多智能体] 初始化完成：计算 / 验证 / 核算三个智能体 + 上下文压缩器，模型=ollama:qwen2.5:3b-instruct
+[Skill] 生效技能：[payroll-calculator(nacos), payroll-validator(nacos), payroll-accountant(nacos)]
 [多智能体] 计算智能体工具集：[...]
 [多智能体][calculator] 阶段开始：① 计算智能体：理解诉求并调用核算工具
 [多智能体][calculator] 调用工具：calculate_payroll
@@ -322,6 +349,14 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
+| `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
+| `PAYROLL_NACOS_SERVER` | 空 | Nacos 地址；设置后启用角色 Skill 外置，例如 `http://127.0.0.1:8848` |
+| `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能读取 |
+| `PAYROLL_NACOS_GROUP` | `payroll-agent` | 技能配置所在分组 |
+| `PAYROLL_NACOS_NAMESPACE` | 空 | 命名空间（Nacos 的 tenant） |
+| `PAYROLL_NACOS_USERNAME` / `PAYROLL_NACOS_PASSWORD` | 空 | 开启鉴权的 Nacos 登录账号 |
+| `PAYROLL_NACOS_TIMEOUT_MS` | `2000` | 单次配置读取/登录超时 |
+| `PAYROLL_NACOS_SKILL_TTL_SECONDS` | `60` | 技能内容缓存时间；过期后下一轮重新读取 |
 | `DASHSCOPE_API_KEY` | 无 | 仅 `dashscope:` 模型必填 |
 
 启动时会预检 Ollama 服务与模型是否就绪，未启动或未拉取模型会直接给出中文提示。

@@ -196,3 +196,92 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 - 排查顺序：`[向量] 未启用/初始化失败` → ES 与模型连通性 → `_count` 文档数 → 召回阈值。
 - 版本约束：`elasticsearch-java` 与 `elasticsearch-rest-client` 必须同为 7.17.28；
   同时已排除 Spring Boot 的 `ElasticsearchClientAutoConfiguration`。
+
+## 13. MCP 工具（2026-11-07）
+
+- 入口：`PayrollAgentFactory.createTeam` 构建计算 Toolkit 后调用
+  `McpToolRegistrar.registerAll(...)`；MCP 只挂计算智能体，验证与核算阶段不可见。
+- 配置：环境变量 `PAYROLL_MCP_SERVERS`（JSON 数组），支持 `stdio` / `sse` / `http`、
+  `headers`、`allowedTools`、`timeoutSeconds`；为空表示不启用。
+- 隔离：注册前对 Toolkit 现有工具名做快照，同名工具保留本地实现；`allowedTools`
+  为空才放行该服务全部工具；单个服务初始化失败只 `warn` 并跳过。
+- 生命周期：注册成功的客户端由 `PayrollAgentFactory.Team.close()` 统一关闭；
+  Team 按会话创建，因此每个活跃会话各持一组 MCP 连接。
+- 测试：`McpToolRegistrarTest` 使用假 `McpClientWrapper` 覆盖注册后转发、白名单过滤、
+  同名冲突、故障隔离与配置解析；未依赖真实 MCP 服务。
+- 注意：`Toolkit.callTool` 会先用 `ToolUseBlock.content` 做参数校验；测试调用 MCP 工具时
+  需同时设置 `input` 与 `content`，否则会得到参数校验失败而不是转发到远端。
+- 关键日志前缀 `[MCP]`：注册成功/失败、白名单、同名冲突、客户端关闭异常。
+
+## 14. 角色 Skill 外置与 Nacos（2026-11-07）
+
+按确认方案采用 **AgentScope 动态技能**（模型按需加载），Nacos 不可用或缺少配置时
+**逐个技能回退代码内置提示词**，不阻断启动。
+
+- 提示词拆分：
+  - `RoleSkills` 保存三个角色的职责、工具选择与输出格式，作为内置兜底；
+  - `PayrollAgentFactory.COMMON_RULES` 仍在系统提示词中固定金额安全规则；
+  - 系统提示词 = `COMMON_RULES` + “强制第一步加载技能”指令（含精确 `skillId`）。
+    模型必须先调用 `load_skill_through_path(skillId="<name>_<source>", path="SKILL.md")`。
+- 仓库与回退：
+  - `NacosSkillRepository`：dataId `<skill-id>.md`，`MarkdownSkillParser` 解析 frontmatter，
+    TTL 缓存（默认 60s，负结果同样缓存，避免 Nacos 故障时每轮重试）；
+  - `BuiltInSkillRepository`：只读，来自 `RoleSkills`；
+  - `CompositeSkillRepository`：按顺序合并，同名技能 Nacos 优先、缺失回退内置；
+  - `SkillRepositories.create()`：读取 `PAYROLL_NACOS_*` 环境变量并组装，启动日志给出实际来源。
+- 工具门禁：业务工具通过 `Toolkit.createSkillToolGroup(..., false, skill.getName())` 挂到未激活的
+  `role-tools` 组。**激活键必须是技能的裸名称**（如 `payroll-calculator`），不能传带来源后缀的
+  完整 skillId：AgentScope 的 `SkillToolFactory.activateSkill` 内部用
+  `findSkillToolGroupsByActivateOnSkill(skill.getName())` 匹配，传 `payroll-calculator_nacos`
+  会导致技能加载成功但业务工具永远不可见。技能加载成功后 `Toolkit.updateToolGroups` 激活该组，
+  业务工具才出现在模型工具列表。因此“必须加载技能”由工具可见性强制，而不是只靠提示词。
+  MCP 工具在门禁之后注册，不受该组约束。
+- 技能过滤：`SkillFilter.only("<name>_nacos", "<name>_builtin")`，运行期切换来源不会被过滤掉；
+  门禁用裸名称，与来源无关，Nacos 上线/下线不会破坏已创建会话的工具激活。
+- 生命周期：`PayrollChatService` 按会话创建 `Team`，技能仓库与缓存随之创建；`close()` 为空操作，
+  多智能体共享同一仓库实例是安全的（Nacos 缓存使用 `ConcurrentHashMap`）。
+- 模板与发布：`docs/nacos-skills/` 下的 3 个 `.md` 与发布命令；内容以 `RoleSkills.java` 为准，
+  修改内置提示词后需重新生成模板并发布。
+
+### 实测记录
+
+- 本机 Nacos 2.1.1（`D:\nacos`，JDK 17，`startup.cmd -m standalone`）监听 8848。
+- 发布 group=`payroll-agent` 的 3 个 dataId 后，启动日志：
+
+  ```
+  [Skill] 角色提示词优先读取 Nacos http://127.0.0.1:8848（group=payroll-agent，TTL=60s），缺失时回退代码内置版本
+  [Skill] 从 Nacos 加载技能 payroll-calculator（579 字）
+  [Skill] 生效技能：[payroll-calculator(nacos), payroll-validator(nacos), payroll-accountant(nacos)]
+  ```
+
+- 把 `PAYROLL_NACOS_SERVER` 指向未监听端口：三个技能全部输出 `回退代码内置版本`，`describe` 返回 `(builtin)`。
+- 真实 CLI 对话（qwen2.5:3b + Nacos）中，计算智能体首个工具调用为
+  `load_skill_through_path`，参数 `{"skillId":"payroll-calculator_nacos","path":"SKILL.md"}`，
+  `state=SUCCESS`，证明外置技能已进入模型上下文。
+- 排查发现首版门禁用完整 skillId 注册，技能加载后没有
+  `Activated skill-bound tool group` 日志，业务工具始终不可见。改为裸名称后，
+  日志出现 `Activated skill: payroll-calculator_builtin` 与
+  `Activated skill-bound tool group: role-tools for skill: payroll-calculator`，
+  第二次模型调用即可看到 `calculate_payroll`。
+- 注意：同一个 3B 模型加载技能后仍可能漏调 `calculate_payroll` 并追问工号；这是模型能力问题，
+  不影响金额安全（金额只来自确定性引擎）。生产建议 7B 以上或在线模型。
+
+### 测试
+
+- `NacosSkillRepositoryTest`：frontmatter 解析、无 frontmatter 回退描述、TTL 缓存/刷新、
+  单技能缺失跳过、只读语义。
+- `NacosConfigClientTest`：`HttpServer` 模拟 200/404/500、命名空间与登录 token 复用。
+- `CompositeSkillRepositoryTest`：Nacos 覆盖、逐技能回退、名称去重、关闭来源。
+- `DynamicSkillWiringTest`：系统提示出现 `<available_skills>` 与 `payroll-calculator_builtin`；
+  门禁组按裸名称注册；脚本化模型先调用 `load_skill_through_path`，验证第二次模型调用
+  已能看到 `calculate_payroll`（覆盖本次激活键缺陷）。
+- 全量 `mvn test`：85 个测试通过。
+
+### 已知限制
+
+1. 技能 ID 含来源后缀（`_nacos` / `_builtin`），系统提示在创建会话时写入精确 ID。
+   门禁组按裸名称注册，来源切换不影响工具激活；但若首选来源在会话期间不可用，
+   模型需按提示用 `<available_skills>` 中的另一个 ID 重试一次。
+2. 模板文件是快照，需随 `RoleSkills` 手动同步。
+3. MCP 工具未纳入技能门禁；如需完全一致的“先加载再调用”，可把 MCP 注册也放进同一工具组。
+4. Nacos v1 OpenAPI 默认无鉴权；生产需开启鉴权并配置 `PAYROLL_NACOS_USERNAME/PASSWORD`。

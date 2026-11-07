@@ -5,9 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
+import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.model.OllamaThinkingModel;
+import io.agentscope.examples.payroll.skill.RoleSkills;
+import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
 import io.agentscope.extensions.model.ollama.options.ThinkOption;
@@ -18,6 +23,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -71,89 +77,48 @@ public final class PayrollAgentFactory {
             8. 明细中的“扣款项目”合计必须等于 total_deductions；社保公积金只能引用 social_insurance_employee 与 housing_fund_employee，禁止把 total_deductions 当作社保公积金金额。
             """;
 
-    private static final String CALCULATOR_PROMPT =
-            COMMON_RULES
-                    + """
-                    
-                    ## 角色
-                    你是「薪酬计算智能体」，多智能体流水线的第 1 环。只负责理解诉求、调用确定性工具完成计算，
-                    并把结果整理成供下游“验证智能体”复核的计算记录。你的输出不是最终用户答复。
+    private static final String SKILL_BOOT_RULE =
+            """
+            ## 角色技能（强制第一步）
+            开始任何回答前，必须先调用 load_skill_through_path(skillId="%s", path="SKILL.md")，
+            读取后再严格遵循其中的角色说明、工具选择与输出格式。
+            技能加载成功前，禁止调用任何业务工具，也禁止直接回答用户。
+            若该 skillId 调用失败，改用 <available_skills> 中对应角色的 <skill-id> 重试一次；
+            仍失败才只执行下方绝对规则，并在回答开头说明“角色技能未加载”。
+            """;
 
-                    每次回答前都必须重新调用工具获取最新数据，禁止复用历史对话中的员工清单、工号、金额或考勤；
-                    管理台可能刚新增或修改了员工与考勤。
+    private static String calculatorPrompt(String skillId) {
+        return COMMON_RULES
+                + "\n"
+                + SKILL_BOOT_RULE.formatted(skillId)
+                + """
+                ## 基本职责
+                你是「薪酬计算智能体」，多智能体流水线的第 1 环。只负责理解诉求、调用确定性工具完成计算，
+                并整理出供下游“验证智能体”复核的计算记录；你的输出不是最终用户答复。
+                """;
+    }
 
-                    ## 工具选择
-                    - 单人核算 → calculate_payroll
-                    - 工资条文本 → generate_payslip
-                    - 部门/全员批量 → calculate_department_payroll
-                    - 考勤核对 → get_attendance_summary
-                    - 政策、税率、比例 → get_payroll_policy
-                    - 员工定位 → list_employees / get_employee_profile
+    private static String validatorPrompt(String skillId) {
+        return COMMON_RULES
+                + "\n"
+                + SKILL_BOOT_RULE.formatted(skillId)
+                + """
+                ## 基本职责
+                你是「薪酬验证智能体」，多智能体流水线的第 2 环。只负责独立复核计算记录，不面向用户输出最终答复。
+                技能未加载时，至少对每个核算对象调用 validate_payroll，并核对 gross_pay - total_deductions = net_pay。
+                """;
+    }
 
-                    ## 输出格式（纯文本，不要 JSON 代码块）
-                    1. 核算对象：员工/部门 + 期间 + 诉求类型
-                    2. 计算结果：逐项列出工具返回的应发、扣款合计、实发、企业成本、个税、社保公积金、考勤等关键值
-                    3. 风险提示：引用工具 warnings；没有写“无”
-                    4. 待验证点：列出需要复核的字段、异常或缺失信息
-
-                    非工资计算类问题（政策、考勤查询）同样输出“查询结果 + 风险/待验证点”，不要下最终发薪结论。
-                    """;
-
-    private static final String VALIDATOR_PROMPT =
-            COMMON_RULES
-                    + """
-                    
-                    ## 角色
-                    你是「薪酬验证智能体」，多智能体流水线的第 2 环。只负责独立复核计算智能体的记录，
-                    不面向用户输出最终答复，也不得重新编写工资结论。
-
-                    ## 必须执行的校验
-                    1. 对“核算对象”列表中的每个对象调用 validate_payroll，员工与期间必须与列表一致。
-                    2. 必要时调用 get_payroll_policy、get_employee_profile、get_attendance_summary 核对政策与原始数据。
-                    3. 若计算记录与工具校验结果冲突，以工具结果为准，并明确指出冲突字段与两边的值。
-                    4. 批量场景最多抽检 3 名员工，其余按汇总结果做勾稽检查。
-
-                    ## 校验重点
-                    - gross_pay - total_deductions = net_pay
-                    - 扣款分项合计 = total_deductions
-                    - 社保、公积金个人部分与基数/比例一致
-                    - 个税累计预扣与税率表一致
-                    - 实发不为负，社保基数在上下限内
-                    - 考勤扣款、加班费、入职首月折算是否合理
-
-                    ## 输出格式（纯文本）
-                    结论：通过 / 有风险 / 不通过
-                    校验明细：每个对象一行，列出 PASS/FAIL 项与关键数值
-                    发现问题：逐条列出对象、字段、工具值与期望关系；没有写“无”
-                    复核建议：需要 HR 人工确认的事项
-
-                    若没有核算对象，输出“本轮无需验证”并说明原因。
-                    """;
-
-    private static final String ACCOUNTANT_PROMPT =
-            COMMON_RULES
-                    + """
-                    
-                    ## 角色
-                    你是「薪酬核算智能体」，多智能体流水线的第 3 环，负责把计算记录与验证结论汇总成给 HR 的最终答复。
-
-                    ## 汇总规则
-                    1. 只基于【计算智能体记录】和【验证智能体记录】作答，不得新增、改动或心算任何金额。
-                    2. 验证结论为“不通过”时，必须明确写“暂不可发薪，需 HR 复核”，禁止给出相反结论。
-                    3. 验证结论为“有风险”时，必须在结论与风险提示中显著标出。
-                    4. 验证记录缺失或显示执行失败时，必须注明“本轮未完成独立验证”，不得声称已通过校验。
-                    5. 不输出工具 JSON 原文，不解释多智能体内部实现，除非用户主动询问过程。
-                    6. 两个记录缺少用户问题所需的信息时，明确说明缺少什么，不要猜测。
-                    7. 计算记录中没有工资核算结果时（员工清单、员工档案、政策、考勤查询），直接转述查询结果；
-                       禁止编造应发/实发合计，也不要输出“验证结论”或“暂不可发薪”。
-
-                    ## 回答结构
-                    单人核算：结论（实发 X 元；应发 Y 元；扣款 Z 元；验证结论）→ 明细（应发/扣款/实发）→ 个税 → 验证与风险 → 复核提示
-                    批量核算：人数、应发/实发/企业成本合计 → 异常人员 → 验证结论 → 复核提示
-                    政策/考勤咨询：直接给结论与依据 → 风险/注意事项
-
-                    金额保留两位小数并带千分位；结尾固定注明“以系统核算结果为准，发薪前需 HR 复核”。
-                    """;
+    private static String accountantPrompt(String skillId) {
+        return COMMON_RULES
+                + "\n"
+                + SKILL_BOOT_RULE.formatted(skillId)
+                + """
+                ## 基本职责
+                你是「薪酬核算智能体」，多智能体流水线的第 3 环，负责把计算记录与验证结论汇总成给 HR 的最终答复。
+                技能未加载时，只转述两份记录并标注“角色技能未加载”，不得新增或心算任何金额。
+                """;
+    }
 
     private static final String SUMMARIZER_PROMPT =
             """
@@ -188,8 +153,13 @@ public final class PayrollAgentFactory {
             ReActAgent calculator,
             ReActAgent validator,
             ReActAgent accountant,
-            ReActAgent summarizer)
+            ReActAgent summarizer,
+            List<McpClientWrapper> mcpClients)
             implements AutoCloseable {
+
+        public Team {
+            mcpClients = mcpClients == null ? List.of() : List.copyOf(mcpClients);
+        }
 
         @Override
         public void close() {
@@ -197,41 +167,76 @@ public final class PayrollAgentFactory {
             validator.close();
             accountant.close();
             summarizer.close();
+            for (McpClientWrapper client : mcpClients) {
+                try {
+                    client.close();
+                } catch (RuntimeException e) {
+                    log.warn("[MCP] 关闭客户端失败：{}", client.getName(), e);
+                }
+            }
         }
     }
 
     public static Team createTeam(PayrollTools tools) {
         Model model = buildModel(modelId());
+        AgentSkillRepository skillRepository = SkillRepositories.create();
+        AgentSkill calculatorSkill =
+                SkillRepositories.activeSkill(skillRepository, RoleSkills.CALCULATOR);
+        AgentSkill validatorSkill =
+                SkillRepositories.activeSkill(skillRepository, RoleSkills.VALIDATOR);
+        AgentSkill accountantSkill =
+                SkillRepositories.activeSkill(skillRepository, RoleSkills.ACCOUNTANT);
+        Toolkit calculatorTools = toolkit(tools, CALCULATOR_TOOLS, "计算", calculatorSkill);
+        List<McpClientWrapper> mcpClients =
+                McpToolRegistrar.registerAll(
+                        calculatorTools,
+                        McpServerConfig.fromEnvironment(),
+                        McpToolRegistrar.defaultFactory());
+        if (!mcpClients.isEmpty()) {
+            log.info("[MCP] 计算智能体最终工具集：{}", calculatorTools.getToolNames());
+        }
+        log.info(
+                "[Skill] 生效技能：{}",
+                RoleSkills.ids().stream()
+                        .map(id -> SkillRepositories.describe(skillRepository, id))
+                        .toList());
         log.info("[多智能体] 初始化完成：计算 / 验证 / 核算三个智能体 + 上下文压缩器，模型={}", modelId());
         return new Team(
                 createAgent(
                         "PayrollCalculatorAgent",
                         "薪酬计算智能体：理解诉求并调用确定性工具完成核算，产出可复核的计算记录",
-                        CALCULATOR_PROMPT,
+                        calculatorPrompt(calculatorSkill.getSkillId()),
                         model,
-                        toolkit(tools, CALCULATOR_TOOLS, "计算"),
-                        12),
+                        calculatorTools,
+                        12,
+                        skillRepository,
+                        RoleSkills.CALCULATOR),
                 createAgent(
                         "PayrollValidatorAgent",
                         "薪酬验证智能体：独立调用发薪前校验工具，复核勾稽关系与风险项",
-                        VALIDATOR_PROMPT,
+                        validatorPrompt(validatorSkill.getSkillId()),
                         model,
-                        toolkit(tools, VALIDATOR_TOOLS, "验证"),
-                        8),
+                        toolkit(tools, VALIDATOR_TOOLS, "验证", validatorSkill),
+                        8,
+                        skillRepository,
+                        RoleSkills.VALIDATOR),
                 createAgent(
                         "PayrollAccountantAgent",
                         "薪酬核算智能体：汇总计算与验证记录，生成最终可审计答复",
-                        ACCOUNTANT_PROMPT,
+                        accountantPrompt(accountantSkill.getSkillId()),
                         model,
                         new Toolkit(),
-                        4),
+                        4,
+                        skillRepository,
+                        RoleSkills.ACCOUNTANT),
                 createAgent(
                         "PayrollContextAgent",
                         "薪酬会话上下文压缩器：把较早轮次折叠成不含金额的中文摘要",
                         SUMMARIZER_PROMPT,
                         model,
                         new Toolkit(),
-                        1));
+                        1),
+                mcpClients);
     }
 
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */
@@ -254,25 +259,57 @@ public final class PayrollAgentFactory {
             Model model,
             Toolkit toolkit,
             int maxIters) {
-        return ReActAgent.builder()
-                .name(name)
-                .description(description)
-                .sysPrompt(sysPrompt)
-                .model(model)
-                .toolkit(toolkit)
-                .maxIters(maxIters)
-                .build();
+        return createAgent(name, description, sysPrompt, model, toolkit, maxIters, null, null);
     }
 
-    private static Toolkit toolkit(PayrollTools tools, Set<String> allowed, String role) {
+    private static ReActAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            String skillId) {
+        ReActAgent.Builder builder =
+                ReActAgent.builder()
+                        .name(name)
+                        .description(description)
+                        .sysPrompt(sysPrompt)
+                        .model(model)
+                        .toolkit(toolkit)
+                        .maxIters(maxIters);
+        if (skillRepository != null && skillId != null) {
+            builder.skillRepository(skillRepository)
+                    .skillFilter(SkillRepositories.filterFor(skillId))
+                    .dynamicSkillsEnabled(true);
+        }
+        return builder.build();
+    }
+
+    /**
+     * 业务工具先挂到未激活的技能工具组，模型必须先 load_skill_through_path 激活所属技能，
+     * 工具才会出现在可用列表中，避免小模型跳过角色技能直接作答。
+     *
+     * <p>AgentScope 用技能的裸名称（{@link AgentSkill#getName()}）匹配 {@code activateOnSkill}，
+     * 而不是带来源后缀的完整 skillId；传错会导致技能加载成功但业务工具始终不可见。
+     */
+    static Toolkit toolkit(
+            PayrollTools tools, Set<String> allowed, String role, AgentSkill skill) {
         Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(tools);
+        toolkit.createSkillToolGroup(
+                "role-tools", role + "业务工具（加载角色技能后启用）", false, skill.getName());
+        toolkit.registration().tool(tools).group("role-tools").apply();
         for (String name : Set.copyOf(toolkit.getToolNames())) {
             if (!allowed.contains(name)) {
                 toolkit.removeTool(name);
             }
         }
-        log.info("[多智能体] {}智能体工具集：{}", role, toolkit.getToolNames());
+        log.info(
+                "[多智能体] {}智能体工具集：{}（加载 {} 后启用）",
+                role,
+                toolkit.getToolNames(),
+                skill.getSkillId());
         return toolkit;
     }
 
