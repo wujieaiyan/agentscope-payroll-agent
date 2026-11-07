@@ -499,7 +499,7 @@ DRAFT / REJECTED --submit--> PENDING_APPROVAL --approve--> APPROVED --finalize--
   `H2ChatTraceStoreTest`（3）、`ChatTraceWebTest`（1）。
 - 覆盖：金额/员工/期间提取、批量只取合计、FIFO 配对、未知工具、8KB 截断与金额完整性、
   消息+追溯同事务、跨会话隔离、清空/删除级联、SSE 字段、依据接口与跨用户 400。
-- 全量 `mvn test` 124 个测试通过。
+- 全量 `mvn test` 128 个测试通过。
 
 ### 已知限制
 
@@ -511,7 +511,74 @@ DRAFT / REJECTED --submit--> PENDING_APPROVAL --approve--> APPROVED --finalize--
 
 ### 下一步
 
-- 任务 #51：回归测试与交接文档整合。
+- 任务 #51：回归测试与交接文档整合（见下一节）。
 - 可选增强：追溯反查（按员工/期间/金额筛选）、Excel/PDF 依据导出、
   MCP 工具结果采集（若 AgentScope 后续事件暴露结果内容）。
+
+## 18. 全量回归与交接验收（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #51 完成：审批、审计、追溯三条链路统一回归，测试矩阵与人工验收步骤固化如下。
+
+### 需求覆盖矩阵
+
+| 需求 | 测试 | 关键断言 |
+| --- | --- | --- |
+| 审批状态机 | `ApprovalServiceTest` | 提交→通过→出账；重复提交/非法状态返回冲突；驳回后可重新提交 |
+| 自审拦截 | `ApprovalServiceTest`、`ApprovalWebTest` | 提交人不能审批或驳回自己的批次；关闭认证时跳过 |
+| 金额变化失效 | `ApprovalServiceTest`、`PayrollRunServiceTest` | 提交后改明细拒绝审批；审批后改考勤出账 409；失败员工阻断提交 |
+| 审批链配置 | `ApprovalServiceTest`、`H2ApprovalStoreTest` | 部门优先于全局、金额区间、同范围唯一生效、默认流程 |
+| 审批权限 | `ApprovalWebTest` | HR 可提交不可审批、管理员可审批出账、只读用户 403 |
+| 审计脱敏 | `AuditServiceTest`、`AuditFilterTest` | 密码/银行卡/证件/令牌 → `***`；请求体与前后快照都脱敏 |
+| 审计权限与导出 | `AuditWebTest`、`AuditServiceTest` | 未登录 401、无 `audit:read` 403、筛选分页、CSV 最多 1 万条 |
+| 追溯采集与提取 | `ToolTraceExtractorTest`、`ToolTraceRecorderTest` | 金额/员工/期间；批量只取顶层合计；FIFO 配对；8KB 截断后金额完整 |
+| 追溯持久化 | `H2ChatTraceStoreTest` | 消息+追溯同事务；跨会话隔离；清空/删除级联 |
+| 追溯 SSE 与接口 | `ChatTraceWebTest` | `tool_result` 金额/耗时字段；`done.message_id/trace_count`；跨用户 400 |
+| 会话隔离回归 | `PayrollAuthWebTest`、`ChatTraceWebTest` | 不同用户/窗口会话与消息互不可见；依据接口同样校验归属 |
+
+### 全量回归
+
+```bash
+JAVA_HOME="D:\tools\jdk\jdk-17.0.12" mvn test
+```
+
+- 29 个测试类、128 个测试全部通过（Surefire `Failures: 0, Errors: 0`）。
+- 关键回归类可单独执行：
+
+```bash
+mvn -Dtest=ApprovalServiceTest,ApprovalWebTest,AuditWebTest,\
+AuditServiceTest,AuditFilterTest,PayrollRunServiceTest,\
+ToolTraceExtractorTest,ToolTraceRecorderTest,H2ChatTraceStoreTest,\
+ChatTraceWebTest test
+```
+
+### 人工验收步骤
+
+1. 启动管理台（本地可用内存库，避免污染正式数据）：
+
+   ```bash
+   PAYROLL_AUTH_ENABLED=false PAYROLL_DB_URL="jdbc:h2:mem:verify;DB_CLOSE_DELAY=-1" \
+   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+   ```
+
+2. 打开“智能问答”，提问“张伟 2026-10 的工资是多少”。
+3. 回答完成后展开“计算依据”：应看到 `get_employee_profile` / `calculate_payroll`
+   等工具卡片、¥金额卡片、员工与期间；参数与结果为格式化 JSON。
+4. 刷新页面或切换会话再切回：历史消息下方仍能异步加载同一份依据。
+5. 用另一账号访问同一 `sessionId + messageId`：接口返回 400。
+6. 删除会话后再次查询依据：接口返回 400，库中追溯随会话级联删除。
+7. 服务端日志应出现 `[多智能体][calculator] 工具结束：…金额=…员工=…期间=…`、
+   `[多智能体] 工具追溯汇总：N 次调用，金额类 M 次`、`[会话] 回答已保存：…工具追溯=N条`。
+
+> 内置浏览器在某些环境不提供可见视口（0×0），只能做 DOM 结构断言，无法截图核对像素样式；
+> 本次已确认面板节点、金额卡片与 JSON 区块数量，视觉走查需在常规浏览器完成。
+
+### 交接注意事项
+
+- 提交审批前必须确认批次已生成且无失败员工；审批后任何考勤/考核/政策/微调变化都会使出账冲突。
+- 追溯表不参与审计，不要把它当作合规留痕；合规查询仍走 `/api/audit`。
+- 工具结果字段改名时同步维护 `ToolTraceExtractor` 白名单，否则金额卡片会变空。
+- 新增工具必须走 `PayrollTools.execute(toolName, args, supplier)`，否则结果无法落库。
+- 分支 `feature/payroll-approval-audit-trace` 已包含 #49/#50/#51；PR #1 指向 `main`，
+  后续提交推送前需再次确认。
+
 

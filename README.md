@@ -308,17 +308,22 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 [多智能体] 计算智能体工具集：[...]
 [多智能体][calculator] 阶段开始：① 计算智能体：理解诉求并调用核算工具
 [多智能体][calculator] 调用工具：calculate_payroll
-[多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，参数={"employee_id":"张伟","period":"2026-10"}
+[多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，耗时=42ms，参数={"employee_id":"张伟","period":"2026-10"}，金额={net_pay=21000.50,...}，员工=[EMP001]，期间=2026-10
 [多智能体][calculator] 阶段结束：耗时=20631ms，工具=[calculate_payroll]
 [多智能体] ① 计算完成：耗时=20631ms，核算对象=1，输出=...
 [多智能体][validator] 阶段开始：② 验证智能体：独立复核勾稽关系
 [多智能体] ② 验证完成：输出=...
 [多智能体][accountant] 阶段开始：③ 核算智能体：汇总计算与验证结论
 [上下文] 压缩完成：折叠 3 轮，保留 4 轮，摘要 86 字，耗时=4932ms
+[多智能体] 工具追溯汇总：3 次调用，金额类 2 次
 [多智能体] 完成：总耗时=36771ms，工具=[calculate_payroll, validate_payroll]，答复长度=242，上下文=摘要6轮+最近4轮
+[会话] 回答已保存：sessionId=1，messageId=8，工具追溯=3条
 ```
 
 - 阶段输入 / 输出全文为 DEBUG；INFO 只打印截断预览，避免日志过长。
+- `[多智能体][阶段] 工具结束` 是追溯核对入口：耗时、金额、员工、期间都来自落库前的同一份快照。
+- `[多智能体] 工具追溯汇总` 与 `[会话] 回答已保存` 可确认采集数量与持久化结果。
+- 前端历史追溯加载失败只输出 `[计算依据] 加载失败：...`，不影响正文。
 - `io.agentscope.core.tool.Toolkit` 的注册日志已降到 WARN，工具集改为每角色一行 INFO。
 - Web 侧另有 `[SSE] 对话开始 / 完成 / 失败` 与耗时日志。
 
@@ -572,7 +577,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 mvn test
 ```
 
-共 124 个测试，覆盖：
+共 128 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
