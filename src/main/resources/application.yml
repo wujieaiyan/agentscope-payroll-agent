@@ -33,6 +33,9 @@ payroll:
   auth:
     enabled: "${PAYROLL_AUTH_ENABLED:true}"
     admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+  # 审计日志保留天数，启动时清理更早的记录。
+  audit:
+    retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"
   # 向量记忆：只索引用户问题与压缩摘要，按 user_id 隔离检索。
   memory:
     enabled: "${PAYROLL_MEMORY_ENABLED:false}"

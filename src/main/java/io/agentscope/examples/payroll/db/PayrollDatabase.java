@@ -213,6 +213,38 @@ public final class PayrollDatabase {
                 reason VARCHAR(500),
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                actor_id BIGINT,
+                actor_name VARCHAR(64),
+                action VARCHAR(128) NOT NULL,
+                resource_type VARCHAR(32),
+                resource_id VARCHAR(256),
+                before_json CLOB,
+                after_json CLOB,
+                payload_json CLOB,
+                ip VARCHAR(64),
+                user_agent VARCHAR(256),
+                result VARCHAR(16) NOT NULL,
+                status_code INT,
+                message VARCHAR(500),
+                trace_id VARCHAR(64)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_occurred
+                ON audit_log (occurred_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_actor
+                ON audit_log (actor_id, occurred_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_resource
+                ON audit_log (resource_type, resource_id, occurred_at)
             """);
 
     private static final Map<String, PayrollPolicy> DEMO_CITY_POLICIES = demoCityPolicies();
@@ -499,6 +531,18 @@ public final class PayrollDatabase {
                 statement.setString(4, JsonSupport.toJson(entry.getValue()));
                 statement.setObject(5, LocalDateTime.now());
                 statement.setString(6, entry.getKey());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        // 内置角色不允许在管理台修改，其权限始终跟随代码定义，新增权限码才能对旧库生效。
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "UPDATE roles SET permissions_json = ? WHERE code = ? AND builtin = TRUE")) {
+            for (Map.Entry<String, java.util.Set<String>> entry :
+                    Permissions.builtinRolePermissions().entrySet()) {
+                statement.setString(1, JsonSupport.toJson(entry.getValue()));
+                statement.setString(2, entry.getKey());
                 statement.addBatch();
             }
             statement.executeBatch();

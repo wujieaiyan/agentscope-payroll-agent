@@ -349,6 +349,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
+| `PAYROLL_AUDIT_RETENTION_DAYS` | `180` | 审计日志保留天数，启动时清理更早记录 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
 | `PAYROLL_NACOS_SERVER` | 空 | Nacos 地址；设置后启用角色 Skill 外置，例如 `http://127.0.0.1:8848` |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能读取 |
@@ -414,6 +415,8 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | PUT/DELETE | `/api/admin/roles/{code}` | 修改 / 删除自定义角色（内置角色拒绝） |
 | GET/POST | `/api/admin/departments` | 部门列表 / 新建部门 |
 | PUT/DELETE | `/api/admin/departments/{id}` | 修改 / 删除部门（被占用时拒绝删除） |
+| GET | `/api/audit` | 审计日志分页查询，支持 `from`/`to`/`actor`/`action`/`resource_type`/`resource_id`/`result`/`keyword`/`page`/`size`（需 `audit:read`） |
+| GET | `/api/audit/export` | 按相同条件导出 CSV（含 BOM，最多 1 万条，需 `audit:read`） |
 
 导入接口直接读取请求体，不依赖 multipart/form-data；Excel 上传上限 10MB，对话消息上限 2000 字符。
 错误统一返回 `{"status":"ERROR","message":"..."}`：业务校验与请求体格式错误为 400，未知路径为 404，
@@ -421,8 +424,20 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 返回（HTTP 200），便于前端统一处理。
 
 管理台默认绑定 `127.0.0.1` 并启用登录鉴权：每个 `/api/**` 请求都会校验会话与权限码，
-会话数据按 `user_id` 过滤，会话与消息的读写都会校验归属。若需多人远程访问，
-仍建议放在 HTTPS 反向代理之后，并补充操作审计与行级数据权限。
+会话数据按 `user_id` 过滤，会话与消息的读写都会校验归属。所有写请求（POST/PUT/DELETE）
+与登录/退出/改密都会写入 `audit_log`，业务写操作附带变更前后快照；密码、银行卡、证件号、
+令牌等字段统一脱敏为 `***`。若需多人远程访问，仍建议放在 HTTPS 反向代理之后，
+并补充行级数据权限。
+
+### 审计日志
+
+- 覆盖范围：`/api/**` 的 POST/PUT/DELETE，以及登录成功/失败、退出、修改密码。
+- 显式事件：员工、考核、考勤、城市政策、批次出账/发送、Excel 导入、用户/角色/部门、
+  向量重建，记录 `before_json`、`after_json`、`actor`、`ip`、`user_agent`、`trace_id`。
+- 兜底事件：控制器未显式记录时，过滤器补记 `post /api/...` 事件并保存脱敏后的 JSON 请求体；
+  401/403 等被拦截的请求同样留痕。
+- 查询与导出：需 `audit:read` 权限；CSV 含 UTF-8 BOM，可直接用 Excel 打开。
+- 保留策略：默认 180 天，启动时清理过期记录，可用 `PAYROLL_AUDIT_RETENTION_DAYS` 调整。
 
 ## 工具清单
 
@@ -545,9 +560,9 @@ mvn test
 - 用 HR 主数据、考勤、绩效服务替换 H2 仓库，并做行级数据权限
 - 政策参数（税率、基数、比例、生效日期）迁移到配置中心，按社保年度版本化
 - 以 `employee_id + period` 做幂等键，核算结果落库并保留计算快照（已具备雏形）
-- 管理台已具备登录、角色与接口级权限；生产化还需补充操作审计、会话超时策略与行级数据权限
+- 管理台已具备登录、角色、接口级权限与写操作审计；生产化还需补充会话超时策略、行级数据权限与审计日志异地留存
 - 接入真实 SMTP / 邮件服务商，增加重试、退信处理与发送配额
-- 接入审批流、发薪复核与审计日志，敏感字段加密
+- 接入审批流与发薪复核；审计日志已具备，生产需对接日志平台并加密敏感字段
 - 批量核算分页与缓存，避免大部门一次拉全量
 - 如需限制敏感操作，可结合 AgentScope 的 Permission / HITL 能力增加人工确认
 - 若要升级到仓库内的 `2.0.3-SNAPSHOT`，修改 `pom.xml` 的 `<agentscope.version>` 即可

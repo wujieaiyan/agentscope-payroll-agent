@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.web;
 
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.support.AuditContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -54,6 +55,7 @@ public class ApiExceptionHandler {
     }
 
     private static ResponseEntity<ApiResponse> error(HttpStatus status, String message) {
+        AuditContext.markFailure(message, status.value());
         return ResponseEntity.status(status).body(ApiResponse.error(message));
     }
 }

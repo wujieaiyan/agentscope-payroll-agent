@@ -285,3 +285,51 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 2. 模板文件是快照，需随 `RoleSkills` 手动同步。
 3. MCP 工具未纳入技能门禁；如需完全一致的“先加载再调用”，可把 MCP 注册也放进同一工具组。
 4. Nacos v1 OpenAPI 默认无鉴权；生产需开启鉴权并配置 `PAYROLL_NACOS_USERNAME/PASSWORD`。
+
+## 15. 审计日志基础设施（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+已完成“所有写接口 + 登录”审计，审批链与对话金额追溯尚未开始。
+
+### 数据与写入链路
+
+- 表 `audit_log`：`occurred_at`、`actor_id`、`actor_name`、`action`、`resource_type`、
+  `resource_id`、`before_json`、`after_json`、`payload_json`、`ip`、`user_agent`、
+  `result`、`status_code`、`message`、`trace_id`，按时间、操作人、资源建索引。
+  `payload_json` 是对通用请求事件的补充，显式业务事件仍用前后快照。
+- `AuditFilter`（`OncePerRequestFilter`）只处理 `/api/**` 的 POST/PUT/DELETE：
+  建立 `AuditContext`（traceId、actor、IP、UA），缓存 32KB 以内的 JSON 请求体；
+  请求结束后若控制器没有显式记录，就补一条 `post /api/...` 事件。
+- `AuditContext` 是 ThreadLocal；`AuditService.record(...)` 写显式事件并标记 `recorded`，
+  过滤器据此避免重复。`ApiExceptionHandler` 与 `AuthInterceptor` 把 400/401/403 的
+  中文原因写回上下文，失败请求也有可读 `message`。
+- `AuthController` 显式记录 `auth.login`（成功含角色，失败只留尝试用户名与统一提示）、
+  `auth.logout`、`auth.password`；密码永远不进入快照或请求体。
+- 业务显式事件：`employee.save/deactivate`、`review.save/delete`、`attendance.save`、
+  `policy.save`、`payroll.finalize/send`、`import.excel`、`user.*`、`role.*`、
+  `department.*`、`vector.rebuild`。
+- 脱敏：`AuditSanitizer` 递归替换 `password|old_password|new_password|password_hash|
+  bank_account|bank_account_masked|id_card|token|secret|authorization` 为 `***`；
+  非 JSON 请求体不入库。
+- 查询/导出：`GET /api/audit`、`GET /api/audit/export`，均需 `audit:read`；
+  CSV 带 UTF-8 BOM，导出上限 1 万条。
+- 权限：`Permissions.AUDIT_READ` 只进入 ADMIN（`ALL`），HR/VIEWER 不含。
+  内置角色权限在每次启动时按代码定义刷新，旧库无需手工补权限。
+- 保留：`payroll.audit.retention-days`（默认 180），启动时清理更早记录。
+- 关键文件：`web/AuditFilter.java`、`web/AuditController.java`、`service/AuditService.java`、
+  `db/H2AuditStore.java`、`support/AuditContext.java`、`support/AuditSanitizer.java`。
+
+### 测试与限制
+
+- 新增 `AuditServiceTest`（6）、`AuditFilterTest`（4）、`AuditWebTest`（2）；
+  全量 `mvn test` 99 个测试通过。`AuditWebTest` 覆盖失败登录、登录成功、写接口、
+  退出、`result=FAILURE` 筛选与 CSV 导出。
+- 限制：
+  1. 保留期清理只在启动时执行；长驻进程需补定时任务或外部归档。
+  2. 列表为 offset 分页，数据量大时应改为按 `audit_id` 游标。
+  3. 审计写入失败只打 WARN，不阻断业务；生产应对接日志平台并告警。
+  4. `/api/runs/preview` 与 `/api/chat*` 也是 POST，会产生通用事件；
+     若嫌噪声可在 `AuditFilter.shouldNotFilter` 中排除。
+  5. 管理台尚未提供审计查询页面，当前通过 API/CSV 查看。
+- 下一步：任务 #49 可配置审批链与批次状态机。审批动作应直接调用
+  `AuditService.record("payroll.approve", "approval_request", id, before, after)`，
+  并复用 `AuditContext` 的 actor/IP。
