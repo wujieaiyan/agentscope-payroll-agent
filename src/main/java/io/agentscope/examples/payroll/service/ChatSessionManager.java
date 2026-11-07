@@ -1,9 +1,14 @@
 package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.db.H2ChatStore;
+import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.memory.MemorySeed;
+import io.agentscope.examples.payroll.memory.MemorySource;
+import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -24,12 +29,19 @@ public final class ChatSessionManager implements AutoCloseable {
 
     private final H2ChatStore store;
     private final PayrollChatFactory chatFactory;
+    private final VectorMemoryService memory;
     private final Map<Long, PayrollChat> chats = new ConcurrentHashMap<>();
     private final Set<Long> busy = ConcurrentHashMap.newKeySet();
 
     public ChatSessionManager(H2ChatStore store, PayrollChatFactory chatFactory) {
+        this(store, chatFactory, VectorMemoryService.disabled());
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store, PayrollChatFactory chatFactory, VectorMemoryService memory) {
         this.store = store;
         this.chatFactory = chatFactory;
+        this.memory = memory == null ? VectorMemoryService.disabled() : memory;
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -54,11 +66,50 @@ public final class ChatSessionManager implements AutoCloseable {
         }
         closeChat(sessionId);
         store.delete(sessionId);
+        memory.onSessionDeleted(userId, sessionId);
     }
 
     public List<ChatMessage> messages(long userId, long sessionId) {
         store.requireOwned(sessionId, userId);
         return store.messages(sessionId);
+    }
+
+    public boolean vectorMemoryReady() {
+        return memory.ready();
+    }
+
+    /** 管理员重建向量索引：清空后按 H2 中的历史问题与摘要重灌，返回写入条数。 */
+    public int rebuildVectorMemory() {
+        List<MemorySeed> seeds = new ArrayList<>();
+        for (ChatSession session : store.allSessions()) {
+            ChatContextSnapshot snapshot = store.loadContext(session.id());
+            if (snapshot.summary() != null && !snapshot.summary().isBlank()) {
+                seeds.add(
+                        new MemorySeed(
+                                session.userId(),
+                                session.id(),
+                                null,
+                                snapshot.summarizedTurns(),
+                                MemorySource.SUMMARY,
+                                snapshot.summary()));
+            }
+            int turn = 0;
+            for (ChatMessage message : store.messages(session.id())) {
+                if (!H2ChatStore.ROLE_USER.equals(message.role())) {
+                    continue;
+                }
+                turn++;
+                seeds.add(
+                        new MemorySeed(
+                                session.userId(),
+                                session.id(),
+                                message.id(),
+                                turn,
+                                MemorySource.QUESTION,
+                                message.content()));
+            }
+        }
+        return memory.rebuild(seeds);
     }
 
     public void reset(long userId, long sessionId) {
@@ -67,7 +118,8 @@ public final class ChatSessionManager implements AutoCloseable {
             throw new PayrollException("会话正在生成回答，请稍后再重置");
         }
         store.clear(sessionId);
-        chatFor(sessionId).reset();
+        memory.onSessionReset(userId, sessionId);
+        chatFor(userId, sessionId).reset();
         store.touch(sessionId);
     }
 
@@ -78,8 +130,11 @@ public final class ChatSessionManager implements AutoCloseable {
             throw new PayrollException("该会话正在生成回答，请稍后再试");
         }
         try {
-            PayrollChat chat = chatFor(sessionId);
-            store.append(sessionId, H2ChatStore.ROLE_USER, message, null, null);
+            PayrollChat chat = chatFor(userId, sessionId);
+            ChatMessage saved =
+                    store.append(sessionId, H2ChatStore.ROLE_USER, message, null, null);
+            memory.indexQuestion(
+                    userId, sessionId, saved.id(), store.userTurnCount(sessionId), message);
             if (DEFAULT_TITLE.equals(session.title())) {
                 store.rename(sessionId, autoTitle(message));
             }
@@ -124,8 +179,8 @@ public final class ChatSessionManager implements AutoCloseable {
         busy.remove(sessionId);
     }
 
-    public PayrollChat chatFor(long sessionId) {
-        return chats.computeIfAbsent(sessionId, key -> chatFactory.create(key));
+    public PayrollChat chatFor(long userId, long sessionId) {
+        return chats.computeIfAbsent(sessionId, key -> chatFactory.create(key, userId));
     }
 
     private void closeChat(long sessionId) {

@@ -182,3 +182,17 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 | 会话列表为空或看不到他人会话 | 会话按 `user_id` 隔离，属预期；确认登录账号 |
 | 同一会话提示“正在生成回答” | 同一会话不允许并发流，等待上一轮结束或切换窗口 |
 | 日志过多 | 调整 `logback.xml` 根级别；`Toolkit` 已静音 |
+
+## 12. 向量记忆（2026-11-07）
+
+设计与实测细节见 [`vector-memory-spec.md`](vector-memory-spec.md)，这里只列接手要点。
+
+- 开关：`payroll.memory.enabled` / `PAYROLL_MEMORY_ENABLED`，默认 `false`；
+  开启前需 `ollama pull nomic-embed-text`，并确保 ES `127.0.0.1:9200` 可访问。
+- 写入：用户消息落 H2 后异步提交；摘要压缩成功后替换旧摘要向量；助手答复不入索引。
+- 召回：每轮对话前按 `user_id` 检索，topK=5、余弦阈值 0.55，最多注入 1200 字，失败返回空串。
+- 重建：`POST /api/admin/vector/rebuild`（`ROLE_MANAGE`）清空索引后按 H2 历史重灌。
+- 关键日志前缀 `[向量]`：启动探测、召回耗时/命中数、注入字数、重建条数。
+- 排查顺序：`[向量] 未启用/初始化失败` → ES 与模型连通性 → `_count` 文档数 → 召回阈值。
+- 版本约束：`elasticsearch-java` 与 `elasticsearch-rest-client` 必须同为 7.17.28；
+  同时已排除 Spring Boot 的 `ElasticsearchClientAutoConfiguration`。

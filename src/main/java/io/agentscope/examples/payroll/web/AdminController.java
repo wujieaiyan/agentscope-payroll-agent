@@ -5,6 +5,7 @@ import io.agentscope.examples.payroll.domain.Department;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.Role;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashSet;
@@ -30,14 +31,17 @@ public class AdminController {
     private final H2AdminRepository repository;
     private final AuthService authService;
     private final PasswordEncoder passwordEncoder;
+    private final ChatSessionManager chatManager;
 
     public AdminController(
             H2AdminRepository repository,
             AuthService authService,
-            PasswordEncoder passwordEncoder) {
+            PasswordEncoder passwordEncoder,
+            ChatSessionManager chatManager) {
         this.repository = repository;
         this.authService = authService;
         this.passwordEncoder = passwordEncoder;
+        this.chatManager = chatManager;
     }
 
     @GetMapping("/permissions")
@@ -47,6 +51,15 @@ public class AdminController {
                 Permissions.labels().entrySet().stream()
                         .map(entry -> new PermissionOption(entry.getKey(), entry.getValue()))
                         .toList());
+    }
+
+    /** 清空向量索引并按 H2 历史重建；向量能力未启用时 indexed=0。 */
+    @PostMapping("/vector/rebuild")
+    @RequirePermission(Permissions.ROLE_MANAGE)
+    public ApiResponse rebuildVectors() {
+        boolean enabled = chatManager.vectorMemoryReady();
+        int indexed = enabled ? chatManager.rebuildVectorMemory() : 0;
+        return ApiResponse.ok(Map.of("enabled", enabled, "indexed", indexed));
     }
 
     // ---------------------------------------------------------------- 用户

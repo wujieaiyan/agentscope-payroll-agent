@@ -228,6 +228,18 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
   管理台新增/修改员工后，下一轮对话仍会重新调用工具读取最新数据。
 - **查询类问题快速返回**：计算记录中没有工资核算对象时（员工清单、档案、政策、考勤），直接返回计算记录，
   不再交给核算智能体改写，避免小模型编造工资合计或“验证不通过”。
+- **向量记忆（可选）**：开启后把用户问题与压缩摘要写入 Elasticsearch `payroll-chat-memory`，
+  按 `user_id` 隔离召回相关历史片段，帮助解析“他”“上次那个部门”等指代。
+  助手答复不入索引；金额与比例在写入前替换为占位符，注入前再清洗一次，所有数值仍必须重新调用工具获取。
+  默认关闭，开启步骤：
+
+  ```bash
+  ollama pull nomic-embed-text
+  PAYROLL_MEMORY_ENABLED=true java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  ```
+
+  管理员可调用 `POST /api/admin/vector/rebuild` 清空索引并按 H2 历史重建。
+  设计、配置与实测记录见 [`docs/vector-memory-spec.md`](docs/vector-memory-spec.md)。
 
 ### 控制台日志
 

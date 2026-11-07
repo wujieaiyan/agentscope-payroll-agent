@@ -6,6 +6,8 @@ import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
+import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.memory.VectorMemorySettings;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
@@ -19,6 +21,7 @@ import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.slf4j.Logger;
@@ -83,6 +86,7 @@ public class PayrollConfiguration {
     public PayrollChatFactory payrollChatFactory(
             PayrollEngine engine,
             H2ChatStore chatStore,
+            VectorMemoryService memory,
             @Value("${payroll.orchestrator:legacy}") String orchestrator) {
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
@@ -93,7 +97,41 @@ public class PayrollConfiguration {
             }
             log.info("[多智能体] 编排模式：手写状态机");
         }
-        return sessionId -> new PayrollChatService(engine, chatStore, sessionId, graph);
+        return (sessionId, userId) ->
+                new PayrollChatService(engine, chatStore, sessionId, userId, graph, memory);
+    }
+
+    @Bean(destroyMethod = "close")
+    public VectorMemoryService vectorMemoryService(
+            @Value("${payroll.memory.enabled:false}") boolean enabled,
+            @Value("${payroll.memory.es-url:http://localhost:9200}") String esUrl,
+            @Value("${payroll.memory.es-username:}") String esUsername,
+            @Value("${payroll.memory.es-password:}") String esPassword,
+            @Value("${payroll.memory.index:payroll-chat-memory}") String index,
+            @Value("${payroll.memory.embedding-base-url:http://localhost:11434}")
+                    String embeddingBaseUrl,
+            @Value("${payroll.memory.embedding-model:nomic-embed-text}") String embeddingModel,
+            @Value("${payroll.memory.embedding-dim:768}") int embeddingDim,
+            @Value("${payroll.memory.embed-timeout:3s}") Duration embedTimeout,
+            @Value("${payroll.memory.top-k:5}") int topK,
+            @Value("${payroll.memory.min-score:0.55}") double minScore,
+            @Value("${payroll.memory.max-inject-chars:1200}") int maxInjectChars,
+            @Value("${payroll.memory.async-index:true}") boolean asyncIndex) {
+        return VectorMemoryService.start(
+                new VectorMemorySettings(
+                        enabled,
+                        esUrl,
+                        esUsername,
+                        esPassword,
+                        index,
+                        embeddingBaseUrl,
+                        embeddingModel,
+                        embeddingDim,
+                        embedTimeout,
+                        topK,
+                        minScore,
+                        maxInjectChars,
+                        asyncIndex));
     }
 
     @Bean
@@ -124,8 +162,10 @@ public class PayrollConfiguration {
 
     @Bean(destroyMethod = "close")
     public ChatSessionManager chatSessionManager(
-            H2ChatStore chatStore, PayrollChatFactory chatFactory) {
-        return new ChatSessionManager(chatStore, chatFactory);
+            H2ChatStore chatStore,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory) {
+        return new ChatSessionManager(chatStore, chatFactory, memory);
     }
 
     @Bean

@@ -6,6 +6,10 @@ server:
 spring:
   application:
     name: payroll-agent
+  # 向量库客户端由 PayrollConfiguration 手动创建，禁用 Boot 的 ES 自动装配。
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
   jackson:
     property-naming-strategy: SNAKE_CASE
     default-property-inclusion: non_null
@@ -29,6 +33,21 @@ payroll:
   auth:
     enabled: "${PAYROLL_AUTH_ENABLED:true}"
     admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+  # 向量记忆：只索引用户问题与压缩摘要，按 user_id 隔离检索。
+  memory:
+    enabled: "${PAYROLL_MEMORY_ENABLED:false}"
+    es-url: "${PAYROLL_MEMORY_ES_URL:http://localhost:9200}"
+    es-username: "${PAYROLL_MEMORY_ES_USERNAME:}"
+    es-password: "${PAYROLL_MEMORY_ES_PASSWORD:}"
+    index: "${PAYROLL_MEMORY_INDEX:payroll-chat-memory}"
+    embedding-base-url: "${OLLAMA_BASE_URL:http://localhost:11434}"
+    embedding-model: "${PAYROLL_MEMORY_EMBEDDING_MODEL:nomic-embed-text}"
+    embedding-dim: "${PAYROLL_MEMORY_EMBEDDING_DIM:768}"
+    embed-timeout: "${PAYROLL_MEMORY_EMBED_TIMEOUT:3s}"
+    top-k: "${PAYROLL_MEMORY_TOP_K:5}"
+    min-score: "${PAYROLL_MEMORY_MIN_SCORE:0.55}"
+    max-inject-chars: "${PAYROLL_MEMORY_MAX_INJECT_CHARS:1200}"
+    async-index: "${PAYROLL_MEMORY_ASYNC_INDEX:true}"
 
 # logback.xml 默认 WARN（CLI 保持安静），管理台启动日志需要 INFO。
 logging:

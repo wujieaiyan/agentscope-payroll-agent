@@ -64,6 +64,18 @@
         </dependency>
 
         <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>7.17.28</version>
+        </dependency>
+        <!-- 锁定 7.17 传输层，避免被 Spring Boot BOM 提升到 8.x 后出现 NoSuchMethodError。 -->
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
+            <version>7.17.28</version>
+        </dependency>
+
+        <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <version>2.3.232</version>

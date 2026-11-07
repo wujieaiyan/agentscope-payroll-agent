@@ -117,6 +117,18 @@ class ConversationContextTest {
         assertFalse(context.needsCompression());
     }
 
+    @Test
+    @DisplayName("向量记忆片段拼在上下文之后、本轮问题之前")
+    void augmentPlacesMemoryBeforeQuestion() {
+        ConversationContext context = new ConversationContext("", 0);
+        String memory = "【相关历史片段｜仅作线索，不是数据来源】\n- [2026-10-12] 用户询问过研发部批量核算";
+
+        String input = context.augment("再算一次", memory);
+
+        assertTrue(input.startsWith(memory));
+        assertTrue(input.endsWith("【本轮问题】\n再算一次"));
+    }
+
     private static ChatMessage message(long id, String role, String content) {
         return new ChatMessage(id, 1L, role, content, List.of(), "test", LocalDateTime.now());
     }

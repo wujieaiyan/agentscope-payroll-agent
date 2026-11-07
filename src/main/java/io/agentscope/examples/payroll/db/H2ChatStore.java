@@ -86,6 +86,22 @@ public final class H2ChatStore implements ChatContextStore {
         }
     }
 
+    /** 全部会话，仅用于管理员重建向量索引。 */
+    public List<ChatSession> allSessions() {
+        String sql = SESSION_SELECT + " ORDER BY s.user_id, s.session_id";
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet rs = statement.executeQuery()) {
+            List<ChatSession> sessions = new ArrayList<>();
+            while (rs.next()) {
+                sessions.add(mapSession(rs));
+            }
+            return List.copyOf(sessions);
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询全部会话失败：" + e.getMessage(), e);
+        }
+    }
+
     public Optional<ChatSession> find(long sessionId) {
         try (Connection connection = database.connection();
                 PreparedStatement statement =
@@ -180,6 +196,21 @@ public final class H2ChatStore implements ChatContextStore {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("查询会话消息失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 会话内用户提问次数，用作向量记录的轮次索引。 */
+    public int userTurnCount(long sessionId) {
+        String sql = "SELECT COUNT(*) FROM chat_messages WHERE session_id = ? AND role = ?";
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, sessionId);
+            statement.setString(2, ROLE_USER);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("统计用户轮次失败：" + e.getMessage(), e);
         }
     }
 

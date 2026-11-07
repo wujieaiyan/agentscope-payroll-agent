@@ -17,6 +17,7 @@ import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.examples.payroll.agent.PayrollTools;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -50,17 +51,19 @@ public final class PayrollChatService implements PayrollChat {
     private final PayrollEngine engine;
     private final ChatContextStore contextStore;
     private final long sessionId;
+    private final long userId;
     private final boolean graphOrchestration;
+    private final VectorMemoryService memory;
     private final Object lock = new Object();
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
     public PayrollChatService(PayrollEngine engine) {
-        this(engine, ChatContextStore.noop(), 0L, false);
+        this(engine, ChatContextStore.noop(), 0L, 0L, false, VectorMemoryService.disabled());
     }
 
     public PayrollChatService(PayrollEngine engine, ChatContextStore contextStore, long sessionId) {
-        this(engine, contextStore, sessionId, false);
+        this(engine, contextStore, sessionId, 0L, false, VectorMemoryService.disabled());
     }
 
     public PayrollChatService(
@@ -68,10 +71,28 @@ public final class PayrollChatService implements PayrollChat {
             ChatContextStore contextStore,
             long sessionId,
             boolean graphOrchestration) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                0L,
+                graphOrchestration,
+                VectorMemoryService.disabled());
+    }
+
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
+        this.userId = userId;
         this.graphOrchestration = graphOrchestration;
+        this.memory = memory == null ? VectorMemoryService.disabled() : memory;
         this.context = loadContext(contextStore, sessionId);
     }
 
@@ -106,7 +127,11 @@ public final class PayrollChatService implements PayrollChat {
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             prepareContext(context, events, current.summarizer());
-            String calculatorInput = context.augment(question);
+            String memoryBlock = memory.recall(userId, question);
+            if (!memoryBlock.isBlank()) {
+                log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
+            }
+            String calculatorInput = context.augment(question, memoryBlock);
 
             String reply;
             if (graphOrchestration) {
@@ -387,6 +412,11 @@ public final class PayrollChatService implements PayrollChat {
             }
             conversation.applySummary(summary, batch.size());
             persistContext(conversation);
+            memory.indexSummary(
+                    userId,
+                    sessionId,
+                    conversation.summarizedTurns(),
+                    conversation.summary());
             listener.onContextCompressed(
                     batch.size(),
                     conversation.recentTurnCount(),

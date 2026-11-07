@@ -2,9 +2,9 @@ package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
+import io.agentscope.examples.payroll.memory.SensitiveTextSanitizer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -25,11 +25,6 @@ final class ConversationContext {
     private static final int SUMMARY_LIMIT = 900;
     private static final int QUESTION_LIMIT = 240;
     private static final int ANSWER_LIMIT = 500;
-    private static final Pattern MONEY_WITH_UNIT =
-            Pattern.compile("\\d[\\d,]*(?:\\.\\d+)?\\s*(?:元|万元|万)");
-    private static final Pattern PERCENT = Pattern.compile("\\d+(?:\\.\\d+)?\\s*%");
-    private static final Pattern DECIMAL_AMOUNT = Pattern.compile("\\d[\\d,]*\\.\\d{2,}");
-    private static final Pattern LARGE_NUMBER = Pattern.compile("\\d{5,}");
 
     record Turn(String question, String answer) {
     }
@@ -73,8 +68,27 @@ final class ConversationContext {
 
     /** 把上下文拼到本轮问题前；上下文为空时保持原样，避免小模型被空段落干扰。 */
     String augment(String question) {
-        String block = render();
-        return block.isBlank() ? question : block + "\n\n【本轮问题】\n" + question;
+        return augment(question, "");
+    }
+
+    /** 同时注入向量记忆片段；历史片段只作指代线索，金额仍必须重新计算。 */
+    String augment(String question, String memoryBlock) {
+        String history = render();
+        String memory = memoryBlock == null ? "" : memoryBlock.trim();
+        if (history.isBlank() && memory.isEmpty()) {
+            return question;
+        }
+        StringBuilder builder = new StringBuilder();
+        if (!history.isBlank()) {
+            builder.append(history);
+        }
+        if (!memory.isEmpty()) {
+            if (!builder.isEmpty()) {
+                builder.append("\n\n");
+            }
+            builder.append(memory);
+        }
+        return builder.append("\n\n【本轮问题】\n").append(question).toString();
     }
 
     boolean needsCompression() {
@@ -194,27 +208,7 @@ final class ConversationContext {
 
     /** 摘要由小模型生成，必须在代码层兜底删掉含金额或比例的整句，避免模型复述过期数值。 */
     static String sanitize(String summary) {
-        if (summary == null || summary.isBlank()) {
-            return "";
-        }
-        // 先整体标记金额，避免千分位逗号被后面的分句切碎，只删掉半个数字。
-        String marked = MONEY_WITH_UNIT.matcher(summary).replaceAll("§");
-        marked = PERCENT.matcher(marked).replaceAll("§");
-        marked = DECIMAL_AMOUNT.matcher(marked).replaceAll("§");
-        marked = LARGE_NUMBER.matcher(marked).replaceAll("§");
-        List<String> kept = new ArrayList<>();
-        for (String part : marked.split("[，,。；;\\n]")) {
-            String clause = part.trim();
-            if (clause.isEmpty()
-                    || clause.contains("§")
-                    || clause.contains("银行卡")
-                    || clause.contains("卡号")
-                    || clause.contains("身份证")) {
-                continue;
-            }
-            kept.add(clause);
-        }
-        return String.join("，", kept);
+        return SensitiveTextSanitizer.sanitize(summary);
     }
 
     private static String truncate(String text, int limit) {
