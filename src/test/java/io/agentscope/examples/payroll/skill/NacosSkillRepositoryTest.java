@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.DisplayName;
@@ -28,6 +29,16 @@ class NacosSkillRepositoryTest {
             ---
             ## 角色
             按 Nacos 规范执行计算。
+            """;
+
+    private static final String AUDITOR_MD =
+            """
+            ---
+            name: payroll-auditor
+            description: 薪酬审计角色
+            ---
+            ## 职责
+            独立审计工资数据。
             """;
 
     @Test
@@ -160,6 +171,70 @@ class NacosSkillRepositoryTest {
     }
 
     @Test
+    @DisplayName("列表失败时沿用上次成功快照，Nacos 自定义技能不消失")
+    void listFailureKeepsLastKnownGood() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put("payroll-auditor.md", AUDITOR_MD);
+        AtomicBoolean failing = new AtomicBoolean();
+        AtomicLong now = new AtomicLong(1_000);
+        AtomicInteger listCalls = new AtomicInteger();
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings(ttl()),
+                        dataId -> Optional.ofNullable(configs.get(dataId)),
+                        pattern -> {
+                            listCalls.incrementAndGet();
+                            if (failing.get()) {
+                                throw new IllegalStateException("nacos down");
+                            }
+                            return entries(configs);
+                        },
+                        now::get);
+
+        assertTrue(repository.getAllSkillNames().contains("payroll-auditor"));
+
+        failing.set(true);
+        now.addAndGet(61_000);
+
+        assertTrue(
+                repository.getAllSkillNames().contains("payroll-auditor"),
+                "列表失败时应沿用上次成功快照，而不是退回纯内置清单");
+        assertNotNull(repository.getSkill("payroll-auditor"));
+
+        repository.getAllSkillNames();
+        assertEquals(2, listCalls.get(), "失败后按 TTL 退避，不应每次调用都请求 Nacos");
+    }
+
+    @Test
+    @DisplayName("单个技能拉取异常时沿用上次成功内容")
+    void fetchFailureKeepsLastKnownGoodSkill() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        AtomicBoolean failing = new AtomicBoolean();
+        AtomicLong now = new AtomicLong(1_000);
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings(ttl()),
+                        dataId -> {
+                            if (failing.get()) {
+                                throw new IllegalStateException("read timeout");
+                            }
+                            return Optional.ofNullable(configs.get(dataId));
+                        },
+                        pattern -> entries(configs),
+                        now::get);
+
+        AgentSkill first = repository.getSkill(RoleSkills.CALCULATOR);
+        assertNotNull(first);
+
+        failing.set(true);
+        now.addAndGet(61_000);
+
+        AgentSkill second = repository.getSkill(RoleSkills.CALCULATOR);
+        assertNotNull(second, "读取异常不应让已加载技能消失");
+        assertEquals(first.getSkillContent(), second.getSkillContent());
+    }
+
+    @Test
     @DisplayName("只读仓库不提供写入能力")
     void isReadOnly() {
         NacosSkillRepository repository = repository(allConfigs(), clock());
@@ -225,5 +300,14 @@ class NacosSkillRepositoryTest {
         configs.put("payroll-validator.md", "## 角色\n只做复核。");
         configs.put("payroll-accountant.md", "## 角色\n只做汇总。");
         return configs;
+    }
+
+    private static List<NacosConfigClient.ConfigEntry> entries(Map<String, String> configs) {
+        return configs.entrySet().stream()
+                .map(
+                        entry ->
+                                new NacosConfigClient.ConfigEntry(
+                                        entry.getKey(), entry.getValue(), 1L))
+                .toList();
     }
 }

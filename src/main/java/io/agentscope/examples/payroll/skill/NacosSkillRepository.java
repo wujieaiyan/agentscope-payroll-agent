@@ -50,6 +50,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     private final Set<String> missingWarned = ConcurrentHashMap.newKeySet();
 
     private volatile List<String> knownIds;
+    private volatile List<String> lastGoodIds;
     private volatile long idsFetchedAt;
 
     public NacosSkillRepository(NacosSkillSettings settings) {
@@ -117,6 +118,9 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     /**
      * 内置技能 + Nacos 中额外发布的 {@code <id>.md}。列表按 TTL 缓存，
      * 使管理台新建的技能无需重启即可出现在可绑定技能清单里。
+     *
+     * <p>列表请求失败时沿用上次成功快照：自定义技能没有内置兜底，若瞬时失败就退回
+     * 内置清单，{@code getSkill} 会屏蔽掉 Nacos 技能，模型只能报“角色技能未加载”。
      */
     private List<String> knownIds() {
         if (lister == null) {
@@ -147,10 +151,21 @@ public final class NacosSkillRepository implements AgentSkillRepository {
                     }
                 }
             } catch (RuntimeException e) {
+                List<String> previous = lastGoodIds;
+                if (previous != null) {
+                    log.warn(
+                            "[Skill] 列出 Nacos 技能失败，沿用上次成功快照（{} 个技能）：{}",
+                            previous.size(),
+                            e.getMessage());
+                    knownIds = previous;
+                    idsFetchedAt = now;
+                    return previous;
+                }
                 log.warn("[Skill] 列出 Nacos 技能失败，仅保留内置技能：{}", e.getMessage());
             }
             snapshot = List.copyOf(ids);
             knownIds = snapshot;
+            lastGoodIds = snapshot;
             idsFetchedAt = now;
             return snapshot;
         }
@@ -167,6 +182,14 @@ public final class NacosSkillRepository implements AgentSkillRepository {
         try {
             body = fetcher.fetch(dataId);
         } catch (RuntimeException e) {
+            if (entry != null && entry.skill() != null) {
+                log.warn(
+                        "[Skill] 读取 Nacos 配置 {} 异常，沿用上次成功加载的版本：{}",
+                        dataId,
+                        e.getMessage());
+                cache.put(id, new Entry(now, entry.skill()));
+                return entry.skill();
+            }
             log.warn("[Skill] 读取 Nacos 配置 {} 异常：{}", dataId, e.getMessage());
             body = Optional.empty();
         }

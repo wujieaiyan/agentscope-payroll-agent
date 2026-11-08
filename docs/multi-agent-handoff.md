@@ -1065,3 +1065,39 @@ ChatTraceWebTest test
 - 角色切换后仍提到旧话题：确认 `chat_sessions.persona_key` 是否随角色更新，
   以及事件流是否出现“检测到智能体切换”。
 - 开启向量记忆时，跨会话回忆需显式设置 `PAYROLL_MEMORY_CROSS_SESSION=true`。
+
+## 25. 技能仓库 last-known-good（2026-11-08）
+
+### 背景
+
+使用 `user-talk` 技能的情感专家智能体时，回答开头出现“角色技能未加载”。
+
+### 根因
+
+该句来自 `PayrollAgentFactory.SKILL_BOOT_RULE`，是模型两次调用
+`load_skill_through_path` 都失败后的降级话术，不是启动异常。实测当前代码 + 本机 Nacos
+可正常加载 `user-talk`，问题出在 Nacos 瞬断时的仓库行为：
+
+- `NacosSkillRepository.knownIds()` 列表请求异常时只返回内置技能，并把这个结果缓存整个
+  TTL（默认 60s）；`getSkill` 又先按 `knownIds()` 过滤，自定义技能（无内置兜底）因此消失 60s。
+- `cachedSkill()` 拉取异常时把 `null` 写入缓存（负缓存 60s），已加载成功的技能同样消失。
+
+### 修改
+
+- `knownIds()` 新增 `lastGoodIds`：列表失败且存在上次成功快照时沿用该快照，日志
+  `[Skill] 列出 Nacos 技能失败，沿用上次成功快照（N 个技能）`，并按 TTL 退避重试；
+  首次调用就失败仍退回纯内置清单（原行为）。
+- `cachedSkill()` 拉取异常且已有上次成功内容时复用旧内容，日志
+  `[Skill] 读取 Nacos 配置 ... 异常，沿用上次成功加载的版本`，同样按 TTL 退避；
+  配置确实不存在（返回空）仍走负缓存，避免删除技能后无限重试。
+
+### 测试
+
+- `NacosSkillRepositoryTest` 新增“列表失败时沿用上次成功快照，Nacos 自定义技能不消失”
+  “单个技能拉取异常时沿用上次成功内容”；原“列表读取失败时仅保留内置技能”保留，覆盖首次失败场景。
+- 全量 `mvn -o test`：**227 个测试通过，0 失败**。
+
+### 排查提示
+
+- 再遇到“角色技能未加载”，先 grep `[Skill]`：出现“仅保留内置技能”说明启动后首次列表就失败；
+  出现“沿用上次成功快照”说明技能仍可用，应检查 Nacos 恢复情况或模型是否跳过工具调用。
