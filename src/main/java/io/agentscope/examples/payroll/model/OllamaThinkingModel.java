@@ -23,6 +23,8 @@ import io.agentscope.extensions.model.ollama.options.OllamaOptions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 /**
@@ -35,6 +37,7 @@ import reactor.core.publisher.Flux;
  */
 public final class OllamaThinkingModel extends ChatModelBase {
 
+    private static final Logger log = LoggerFactory.getLogger(OllamaThinkingModel.class);
     private static final String CHAT_ENDPOINT = "/api/chat";
     private static final String STREAM_FORMAT_HEADER = "X-AgentScope-Stream-Format";
 
@@ -73,6 +76,17 @@ public final class OllamaThinkingModel extends ChatModelBase {
                         generateOptions == null ? null : generateOptions.getToolChoice());
         if (effective.getThinkOption() != null && request.getThink() == null) {
             request.setThink(effective.getThinkOption().toJsonValue());
+        }
+        if (log.isDebugEnabled()) {
+            log.debug(
+                    "[ollama] 请求：模型={}，消息={}，工具={}，toolChoice={}",
+                    modelName,
+                    formatted.size(),
+                    tools == null ? List.of() : tools.stream().map(ToolSchema::getName).toList(),
+                    generateOptions == null ? null : generateOptions.getToolChoice());
+        }
+        if (log.isTraceEnabled()) {
+            log.trace("[ollama] 请求体：{}", json.toJson(request));
         }
 
         HttpRequest httpRequest =
@@ -119,6 +133,16 @@ public final class OllamaThinkingModel extends ChatModelBase {
         }
         if (replyId[0] == null) {
             replyId[0] = parsed.getId();
+        }
+        if (log.isDebugEnabled()) {
+            log.debug(
+                    "[ollama] 响应：finish={}，内容块={}，原始长度={}",
+                    parsed.getFinishReason(),
+                    parsed.getContent().size(),
+                    line.length());
+        }
+        if (log.isTraceEnabled()) {
+            log.trace("[ollama] 响应体：{}", line);
         }
         return parsed.withId(replyId[0]);
     }

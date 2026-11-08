@@ -1224,3 +1224,99 @@ ChatTraceWebTest test
   `ToolTraceRecorder` 放入上下文（`runStage` / `executeFlowNode` 已处理）。
 - 修改 `PAYROLL_MODEL` 后行为异常：该变量按进程读取，切换模型会生成新的缓存键并重建
   共享模型；不要在运行中依赖环境变量热更新。
+
+## 27. 整体迁移到 agentscope-harness（2026-11-09）
+
+规格见 [`harness-migration-spec.md`](harness-migration-spec.md)。本次把运行期智能体从
+core `ReActAgent` + `DynamicSkillMiddleware` 全部切换到 `HarnessAgent`，包括三段流水线、
+上下文压缩器、意图抽取、流程节点与自定义技能智能体；业务工具、金额安全、会话隔离和
+运行期缓存均未改变。
+
+### 为什么迁移
+
+- core 的 `SkillBox` 忽略 per-context `SkillFilter`，共享智能体只能靠
+  `SkillRepositories.scoped(...)` 阻断跨角色加载（见 §26）；harness 的技能目录天然按
+  `RuntimeContext` 解析，边界更直接。
+- 统一到一个运行期基类，避免 core/harness 两套技能提示与加载逻辑长期并存。
+
+### 关键差异与处理
+
+| 差异 | 处理 |
+| --- | --- |
+| harness 的 `load_skill_through_path` **不激活工具组** | 新增 `SkillToolGroupActivationMiddleware`：`onActing` 观察加载工具的 `ToolResultEndEvent`，`SUCCESS` 时按 `skillId` 解析裸名称并 `Toolkit.updateToolGroups(..., true)` |
+| `SkillFilter` 按 `AgentSkill.getName()` 匹配，现有过滤传的是 `<name>_<source>` | 不再设置 `SkillFilter`，只用 `SkillRepositories.scoped(...)` 限定仓库视图 |
+| 默认注册文件/Shell/记忆/子智能体/转录/压缩等能力并额外调用 LLM | `HarnessAgentSupport` 逐个 `disable*()`；构建后按白名单删除 harness 追加的工具 |
+| harness 可能复制 `RuntimeContext` 注入会话默认值 | 所有调用继续显式传原上下文；工具追溯记录器在阶段开始时放入上下文，复制不影响读取 |
+| harness 无 `call(Msg, Class)` 重载 | 意图抽取改 `call(List.of(msg), PayrollIntent.class, ctx)` |
+
+### 修改文件
+
+- `pom.xml`：`agentscope-harness` 由 test 改为 compile scope。
+- `agent/HarnessAgentSupport.java`（新）：最小能力集构建、工作区、工具白名单清理。
+- `agent/SkillToolGroupActivationMiddleware.java`（新）：技能加载成功后激活业务工具组。
+- `agent/PayrollAgentFactory.java`：`Team` / `NodeAgent` / `createIntentAgent` 全部返回
+  `HarnessAgent`；有技能时用 scoped 仓库 + 激活中间件；构建日志
+  `[harness] 智能体已构建：...`。
+- `service/PayrollChatService.java`、`service/GraphPayrollOrchestrator.java`、
+  `PayrollApplication.java`：仅类型迁移，编排逻辑不变。
+- `model/OllamaThinkingModel.java`：保留请求/响应 DEBUG/TRACE 日志（默认关闭），
+  仅在启用思考时使用；非思考模型仍是官方 `OllamaChatModel`。
+- 测试 `agent/HarnessAgentWiringTest.java`（新，2 个）；
+  `README.md`、`docs/agent-runtime-cache-spec.md` 同步更新。
+
+### 日志
+
+```
+[harness] 智能体已构建：薪酬计算专家，技能=[payroll-calculator]，工具=[calculate_payroll, ...]
+[Skill] 已激活技能 payroll-calculator 的业务工具组：[role-tools]
+[多智能体][calculator] 阶段结束：耗时=18696ms，工具=[load_skill_through_path, calculate_payroll]
+```
+
+`[Skill] 已激活技能` 只应在角色技能加载成功后出现一次；若重复出现，检查是否每轮都在
+新建智能体（缓存未命中）。
+
+### 测试
+
+- `HarnessAgentWiringTest`（2）：
+  - 首轮工具集只有 `load_skill_through_path`，系统提示包含 `<available_skills>`；
+    加载成功后工具集出现 `calculate_payroll`。
+  - scoped 仓库下加载未绑定技能返回 “Skill not found”，且不泄露其它角色内容。
+- 全量 `mvn -o test`：**241 个测试通过，0 失败**（迁移前 239，新增 2）。
+
+### 本机端到端验证（2026-11-09）
+
+环境：18085 端口、独立 H2（`target/e2e-db`）、`PAYROLL_AUTH_ENABLED=false`、
+`PAYROLL_NACOS_ENABLED=false`、`PAYROLL_MEMORY_ENABLED=false`，本机 Ollama
+`qwen2.5:3b-instruct`。
+
+1. 计算阶段：`load_skill_through_path` SUCCESS → `[Skill] 已激活技能 payroll-calculator`
+   → 同一轮调用 `calculate_payroll`，张伟 2026-10：
+   gross 44,235.63、net 27,661.39、employer cost 58,973.13，与确定性引擎一致。
+   这次验证使用**生产路径**（未开启思考时走官方 `OllamaChatModel`），非仅适配器。
+2. 同会话第二轮不再加载技能，直接调用 `calculate_payroll`（`AgentState.toolContext`
+   同步了工具组激活状态），证明激活在会话内可持久。
+3. 工具集被清理为「业务工具 + `load_skill_through_path`」；SSE 时间线与金额追溯正常。
+4. 流程模式与 CLI 走同一 `HarnessAgentSupport`，未观察到行为差异。
+5. 注意：直接用“核算张伟 2026-10 的工资”时，3b 模型有一次跳过技能加载、改为追问信息；
+   明确写出加载指令后稳定通过。属下述模型能力问题，不影响编排与工具链正确性。
+
+### 已知限制
+
+- `qwen2.5:3b-instruct` 在验证/核算阶段偶发
+  `empty completion (no text, no tool call) — ReAct loop will terminate`。抓取原始 Ollama
+  响应为 `content:""`、`done_reason:"stop"`、`eval_count≈115` 且无 `tool_calls`：模型尝试
+  调用尚未可见的业务工具，Ollama 静默丢弃非法/未知工具调用，于是返回空内容。
+  迁移前后业务代码 diff 仅为类型变化，这不是 harness 回归；换更大模型或启用思考模型可缓解。
+- 若后续要加重试，建议只对「阶段无文本且无工具调用」重试一次，并在日志中标注，
+  不要无条件重放（避免重复核算与重复追溯写入）。
+
+### 排查提示
+
+- 业务工具不可见：确认日志出现 `[Skill] 已激活技能`；确认技能 `toolGroup` 与
+  `createSkillToolGroup(..., false, skillName)` 的绑定关系没被改坏。
+- 技能清单为空：检查是否误设了 `SkillFilter`（harness 要裸名称），或 scoped 仓库的
+  `skillIds` 与技能实际 ID 不一致。
+- 模型看到多余工具：检查 `HarnessAgentSupport.removeHarnessOnlyTools` 的白名单；
+  harness 升级新增默认工具时只会被移除，不会暴露给模型。
+- 上下文串话：确认 `streamEvents` / `call` 都传了会话级 `RuntimeContext`；不要依赖
+  harness 自动注入的上下文副本保存追溯记录器。

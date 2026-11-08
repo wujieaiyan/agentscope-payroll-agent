@@ -11,10 +11,13 @@
 
 ## 2. 非目标
 
-- 不迁移到 `agentscope-harness`（已由 `RuntimeContextIsolationTest` 记录可行性，当前不替换中间件）。
 - 不改技能管理、流程编排的管理台交互。
 - 不做跨进程缓存；多实例部署各自缓存，Nacos 仍是共享配置源。
-- 不引入 TTL 过期重建：技能内容由 core 的 `DynamicSkillMiddleware` 每次调用按内容签名刷新。
+- 不引入 TTL 过期重建：技能内容由 harness 每次调用按 `RuntimeContext` 解析的技能目录刷新。
+
+> 后续变更（2026-11-09）：智能体已整体迁移到 `agentscope-harness`，缓存键与进程级共享
+> 策略不变，构建入口改为 `HarnessAgentSupport`。详见
+> [`harness-migration-spec.md`](harness-migration-spec.md)。
 
 ## 3. 现状瓶颈（证据）
 

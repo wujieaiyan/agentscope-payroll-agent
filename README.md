@@ -388,6 +388,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   [`docs/nacos-skills/README.md`](docs/nacos-skills/README.md)。
   业务工具挂在未激活的技能工具组中，技能加载成功后才会出现在模型工具列表，
   因此“先加载技能再核算”由工具可见性强制，而不是只靠提示词约束。
+  运行期所有智能体（三角色、上下文压缩器、意图提取、流程节点、自定义技能智能体）
+  统一由 `HarnessAgent` 承载；harness 默认的文件系统、Shell、记忆、会话持久化、
+  子智能体、压缩与工具结果驱逐等能力在构建时全部关闭，只保留技能加载与中间件链路。
+  技能加载后由 `SkillToolGroupActivationMiddleware` 激活对应业务工具组。
 
   ```bash
   PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
@@ -400,9 +404,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   管理员修改智能体定义后签名变化，下一轮自动构建新实例，旧实例继续服务其它在途会话。
   会话历史与系统提示中的技能清单由 `RuntimeContext`（`userId + sessionId`）隔离；
   工具追溯记录器放入调用上下文，流程并行节点各持一份，避免共享实例后金额串线。
-  技能内容修改无需重建智能体：core 的动态技能中间件每次调用按内容签名刷新技能。
-  重置会话只清理本会话上下文，不关闭进程级共享实例。设计见
-  [`docs/agent-runtime-cache-spec.md`](docs/agent-runtime-cache-spec.md)。
+  技能内容修改无需重建智能体：harness 每次调用按 `RuntimeContext` 解析技能目录，
+  内容签名变化后自动刷新。重置会话只清理本会话上下文，不关闭进程级共享实例。
+  缓存与迁移设计见 [`docs/agent-runtime-cache-spec.md`](docs/agent-runtime-cache-spec.md)
+  与 [`docs/harness-migration-spec.md`](docs/harness-migration-spec.md)。
 
 ### 控制台日志
 
@@ -771,7 +776,9 @@ src/main/java/io/agentscope/examples/payroll
 ├── config
 │   └── PayrollConfiguration.java # 管理台 Bean 装配与启动信息
 ├── agent
-│   ├── PayrollAgentFactory.java  # 计算/验证/核算三个 ReActAgent、角色提示词与 Ollama 思考开关
+│   ├── PayrollAgentFactory.java  # 计算/验证/核算三个 HarnessAgent、角色提示词与 Ollama 思考开关
+│   ├── HarnessAgentSupport.java  # HarnessAgent 最小构建器与工具集裁剪
+│   ├── SkillToolGroupActivationMiddleware.java  # 技能加载后激活业务工具组
 │   ├── PayrollTools.java         # 8 个 @Tool
 │   └── PayrollIntent.java        # 结构化意图
 ├── model

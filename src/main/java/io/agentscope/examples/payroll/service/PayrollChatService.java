@@ -3,7 +3,6 @@ package io.agentscope.examples.payroll.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.ExceedMaxItersEvent;
@@ -15,6 +14,7 @@ import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
@@ -188,7 +188,7 @@ public final class PayrollChatService implements PayrollChat {
     /**
      * 单轮对话：收集文本与工具名，同时把事件转发给流式监听器。
      *
-     * <p>同一时间只允许一轮对话，避免共享的 ReActAgent 上下文交错。
+     * <p>同一时间只允许一轮对话，避免共享的 HarnessAgent 上下文交错。
      */
     private Reply run(String message, ChatStreamListener listener) {
         if (message == null || message.isBlank()) {
@@ -545,7 +545,7 @@ public final class PayrollChatService implements PayrollChat {
         }
     }
 
-    /** POC：由 langgraph4j 决定阶段流转，节点内部仍复用 AgentScope 的 ReActAgent 与工具。 */
+    /** POC：由 langgraph4j 决定阶段流转，节点内部仍复用 HarnessAgent 与工具。 */
     private String graphReply(
             String question,
             String calculatorInput,
@@ -568,7 +568,7 @@ public final class PayrollChatService implements PayrollChat {
     }
 
     private String validate(
-            ReActAgent validator,
+            HarnessAgent validator,
             String question,
             StageResult calculation,
             ChatStreamListener listener,
@@ -596,7 +596,7 @@ public final class PayrollChatService implements PayrollChat {
     private StageResult runStage(
             String stageKey,
             String stageLabel,
-            ReActAgent agent,
+            HarnessAgent agent,
             String input,
             ChatStreamListener listener,
             boolean answerStage,
@@ -623,7 +623,7 @@ public final class PayrollChatService implements PayrollChat {
     private StageResult runStage(
             String stageKey,
             String stageLabel,
-            ReActAgent agent,
+            HarnessAgent agent,
             String input,
             ChatStreamListener listener,
             boolean answerStage,
@@ -744,7 +744,7 @@ public final class PayrollChatService implements PayrollChat {
      * 既能解析指代，又不会把历史金额带进工具调用。
      */
     private static void clearHistory(
-            ReActAgent agent, RuntimeContext context, String stageKey) {
+            HarnessAgent agent, RuntimeContext context, String stageKey) {
         try {
             agent.clearContext(context);
             log.debug("[多智能体][{}] 已清理历史上下文", stageKey);
@@ -755,7 +755,7 @@ public final class PayrollChatService implements PayrollChat {
 
     /** 达到阈值时把较早轮次交给压缩器折叠成摘要；压缩失败只丢弃最早轮次，不阻断本轮回答。 */
     private void prepareContext(
-            ConversationContext conversation, ChatStreamListener listener, ReActAgent summarizer) {
+            ConversationContext conversation, ChatStreamListener listener, HarnessAgent summarizer) {
         if (conversation.isEmpty()) {
             return;
         }
@@ -804,7 +804,7 @@ public final class PayrollChatService implements PayrollChat {
     private String summarize(
             ConversationContext conversation,
             List<ConversationContext.Turn> batch,
-            ReActAgent summarizer) {
+            HarnessAgent summarizer) {
         clearHistory(summarizer, sessionContext, "summarizer");
         String prompt = ConversationContext.summaryPrompt(conversation.summary(), batch);
         log.debug("[上下文] 压缩输入：\n{}", prompt);

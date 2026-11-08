@@ -51,12 +51,11 @@
             <artifactId>agentscope-extensions-model-ollama</artifactId>
             <version>${agentscope.version}</version>
         </dependency>
-        <!-- 仅用于验证 harness 的上下文级技能目录能否替代每轮重建智能体。 -->
+        <!-- 运行期智能体统一由 HarnessAgent 承载；默认能力在 HarnessAgentSupport 中关闭。 -->
         <dependency>
             <groupId>io.agentscope</groupId>
             <artifactId>agentscope-harness</artifactId>
             <version>${agentscope.version}</version>
-            <scope>test</scope>
         </dependency>
 
         <dependency>

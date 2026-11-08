@@ -1,7 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
-import io.agentscope.core.ReActAgent;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.service.PayrollChatService.CalcTarget;
 import io.agentscope.examples.payroll.service.PayrollChatService.StageResult;
@@ -20,7 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * POC：用 langgraph4j 托管三阶段路由，节点内部仍复用 AgentScope 的 ReActAgent 与工具。
+ * POC：用 langgraph4j 托管三阶段路由，节点内部仍复用 HarnessAgent 与工具。
  *
  * <p>与手写状态机的差异只有“谁决定下一节点”这一层：条件边根据计算阶段是否产生核算对象
  * 决定进入验证节点还是直接结束。金额计算、工具调用、SSE 事件与超时仍由
@@ -44,7 +44,7 @@ final class GraphPayrollOrchestrator {
         StageResult run(
                 String stageKey,
                 String stageLabel,
-                ReActAgent agent,
+                HarnessAgent agent,
                 String input,
                 ChatStreamListener listener,
                 boolean answerStage,
@@ -55,7 +55,7 @@ final class GraphPayrollOrchestrator {
     @FunctionalInterface
     interface Validator {
         String validate(
-                ReActAgent validator,
+                HarnessAgent validator,
                 String question,
                 StageResult calculation,
                 ChatStreamListener listener,

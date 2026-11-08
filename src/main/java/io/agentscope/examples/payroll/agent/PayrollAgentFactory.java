@@ -2,12 +2,12 @@ package io.agentscope.examples.payroll.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
+import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
@@ -169,10 +169,10 @@ public final class PayrollAgentFactory {
 
     /** 三个业务智能体与上下文压缩器共享模型实例，避免重复探测 Ollama 与重复加载配置。 */
     public record Team(
-            ReActAgent calculator,
-            ReActAgent validator,
-            ReActAgent accountant,
-            ReActAgent summarizer,
+            HarnessAgent calculator,
+            HarnessAgent validator,
+            HarnessAgent accountant,
+            HarnessAgent summarizer,
             List<McpClientWrapper> mcpClients,
             AgentDefinition activeAgent,
             boolean pipeline)
@@ -184,10 +184,10 @@ public final class PayrollAgentFactory {
 
         /** 兼容仅按默认流水线组装的调用方（测试/CLI）。 */
         public Team(
-                ReActAgent calculator,
-                ReActAgent validator,
-                ReActAgent accountant,
-                ReActAgent summarizer,
+                HarnessAgent calculator,
+                HarnessAgent validator,
+                HarnessAgent accountant,
+                HarnessAgent summarizer,
                 List<McpClientWrapper> mcpClients) {
             this(calculator, validator, accountant, summarizer, mcpClients, null, true);
         }
@@ -206,7 +206,7 @@ public final class PayrollAgentFactory {
             }
         }
 
-        private static void clearAgent(ReActAgent agent, RuntimeContext context) {
+        private static void clearAgent(HarnessAgent agent, RuntimeContext context) {
             if (agent == null) {
                 return;
             }
@@ -236,7 +236,7 @@ public final class PayrollAgentFactory {
             }
         }
 
-        private static void closeAgent(ReActAgent agent) {
+        private static void closeAgent(HarnessAgent agent) {
             if (agent == null) {
                 return;
             }
@@ -249,7 +249,7 @@ public final class PayrollAgentFactory {
     }
 
     /** 流程节点运行时：独立智能体 + 该节点注册的 MCP 客户端，结束即释放。 */
-    public record NodeAgent(ReActAgent agent, List<McpClientWrapper> mcpClients)
+    public record NodeAgent(HarnessAgent agent, List<McpClientWrapper> mcpClients)
             implements AutoCloseable {
 
         public NodeAgent {
@@ -331,7 +331,7 @@ public final class PayrollAgentFactory {
     public static Team createTeam(PayrollTools tools, AgentDefinition activeAgent) {
         Model model = sharedModel();
         AgentSkillRepository skillRepository = SkillRepositories.shared();
-        ReActAgent summarizer =
+        HarnessAgent summarizer =
                 createAgent(
                         "PayrollContextAgent",
                         "薪酬会话上下文压缩器：把较早轮次折叠成不含金额的中文摘要",
@@ -410,7 +410,7 @@ public final class PayrollAgentFactory {
                         toolkit,
                         McpServerConfig.fromEnvironment(),
                         McpToolRegistrar.defaultFactory());
-        ReActAgent nodeAgent =
+        HarnessAgent nodeAgent =
                 createAgent(
                         "FlowNode_" + agent.id(),
                         agent.name() + "：" + (agent.description() == null ? "" : agent.description()),
@@ -429,7 +429,7 @@ public final class PayrollAgentFactory {
             AgentDefinition activeAgent,
             Model model,
             AgentSkillRepository skillRepository,
-            ReActAgent summarizer) {
+            HarnessAgent summarizer) {
         List<AgentSkill> boundSkills = boundSkills(skillRepository, activeAgent);
         AgentSkill primary = boundSkills.get(0);
         Set<String> allowed = allowedTools(activeAgent.skillIds());
@@ -445,7 +445,7 @@ public final class PayrollAgentFactory {
                 activeAgent.id(),
                 activeAgent.skillIds(),
                 toolkit.getToolNames());
-        ReActAgent agent =
+        HarnessAgent agent =
                 createAgent(
                         "PayrollActiveAgent",
                         activeAgent.name() + "：" + activeAgent.description(),
@@ -545,7 +545,7 @@ public final class PayrollAgentFactory {
     }
 
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */
-    public static ReActAgent createIntentAgent(PayrollTools tools) {
+    public static HarnessAgent createIntentAgent(PayrollTools tools) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(tools);
         return createAgent(
@@ -557,7 +557,7 @@ public final class PayrollAgentFactory {
                 6);
     }
 
-    private static ReActAgent createAgent(
+    private static HarnessAgent createAgent(
             String name,
             String description,
             String sysPrompt,
@@ -567,7 +567,7 @@ public final class PayrollAgentFactory {
         return createAgent(name, description, sysPrompt, model, toolkit, maxIters, null, List.of());
     }
 
-    private static ReActAgent createAgent(
+    private static HarnessAgent createAgent(
             String name,
             String description,
             String sysPrompt,
@@ -587,7 +587,7 @@ public final class PayrollAgentFactory {
                 skillId == null ? List.of() : List.of(skillId));
     }
 
-    private static ReActAgent createAgent(
+    private static HarnessAgent createAgent(
             String name,
             String description,
             String sysPrompt,
@@ -596,20 +596,19 @@ public final class PayrollAgentFactory {
             int maxIters,
             AgentSkillRepository skillRepository,
             List<String> skillIds) {
-        ReActAgent.Builder builder =
-                ReActAgent.builder()
-                        .name(name)
-                        .description(description)
-                        .sysPrompt(sysPrompt)
-                        .model(model)
-                        .toolkit(toolkit)
-                        .maxIters(maxIters);
-        if (skillRepository != null && !skillIds.isEmpty()) {
-            builder.skillRepository(SkillRepositories.scoped(skillRepository, skillIds))
-                    .skillFilter(SkillRepositories.filterFor(skillIds))
-                    .dynamicSkillsEnabled(true);
-        }
-        return builder.build();
+        AgentSkillRepository scoped =
+                skillRepository != null && !skillIds.isEmpty()
+                        ? SkillRepositories.scoped(skillRepository, skillIds)
+                        : null;
+        HarnessAgent agent =
+                HarnessAgentSupport.build(
+                        name, description, sysPrompt, model, toolkit, maxIters, scoped);
+        log.debug(
+                "[harness] 智能体已构建：{}，技能={}，工具={}",
+                name,
+                skillIds,
+                agent.getToolkit().getToolNames());
+        return agent;
     }
 
     /**

@@ -1,6 +1,5 @@
 package io.agentscope.examples.payroll;
 
-import io.agentscope.core.ReActAgent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
@@ -18,6 +17,7 @@ import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.service.PayslipFormatter;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import io.agentscope.harness.agent.HarnessAgent;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -79,7 +79,7 @@ public final class PayrollApplication {
             }
 
             if (options.extractText != null) {
-                try (ReActAgent agent = PayrollAgentFactory.createIntentAgent(tools)) {
+                try (HarnessAgent agent = PayrollAgentFactory.createIntentAgent(tools)) {
                     runExtraction(agent, options.extractText);
                 }
             } else {
@@ -139,8 +139,8 @@ public final class PayrollApplication {
         printBatch(engine.calculateDepartment(department, period));
     }
 
-    private static void runExtraction(ReActAgent agent, String text) {
-        Msg msg = agent.call(new UserMessage(text), PayrollIntent.class).block();
+    private static void runExtraction(HarnessAgent agent, String text) {
+        Msg msg = agent.call(List.of(new UserMessage(text)), PayrollIntent.class).block();
         if (msg == null) {
             throw new PayrollException("模型未返回结构化结果");
         }
