@@ -891,3 +891,73 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   .chat-layout { grid-template-columns: 1fr; }
   .chat-sidebar { min-height: 0; max-height: 240px; }
 }
+
+/* ---------------- Agent 管理 ---------------- */
+.agent-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+.agent-filters input,
+.agent-filters select { width: auto; flex: 0 1 180px; }
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.agent-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-card-head { display: flex; align-items: center; gap: 10px; }
+.agent-avatar { font-size: 26px; line-height: 1; }
+.agent-title { display: flex; flex-direction: column; gap: 2px; }
+.agent-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-tags .tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4338ca;
+}
+.agent-tags .tag.skill { background: #ecfdf5; color: #047857; }
+.agent-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted, #64748b);
+  flex: 1;
+}
+.agent-card .actions { justify-content: flex-end; }
+
+.agent-modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+.agent-modal { width: 560px; max-width: 100%; }
+.agent-modal textarea { width: 100%; font: inherit; }
+.agent-skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.agent-skill-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}

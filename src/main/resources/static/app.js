@@ -228,6 +228,7 @@ function showTab(name) {
   if (name === 'users') loadUsersTab().catch(showError);
   if (name === 'departments') loadDepartments(true).catch(showError);
   if (name === 'roles') loadRolesTab().catch(showError);
+  if (name === 'agents') initAgentsTab();
 }
 
 async function loadEmployees() {

@@ -31,6 +31,7 @@
   <button data-tab="users" data-permission="user:manage" class="hidden">用户</button>
   <button data-tab="departments" data-permission="department:manage" class="hidden">部门</button>
   <button data-tab="roles" data-permission="role:manage" class="hidden">角色</button>
+  <button data-tab="agents" data-permission="agent:manage" class="hidden">Agent 管理</button>
 </nav>
 
 <main>
@@ -392,6 +393,10 @@
       </form>
     </div>
   </section>
+
+  <section class="tab" id="tab-agents">
+    <div id="agents-app"></div>
+  </section>
 </main>
 
 <dialog id="password-dialog" class="dialog">
@@ -410,6 +415,8 @@
 </dialog>
 
 <div id="toast" class="toast hidden"></div>
+<script src="vendor/vue.global.prod.js"></script>
 <script src="app.js"></script>
+<script src="agents.js"></script>
 </body>
 </html>
