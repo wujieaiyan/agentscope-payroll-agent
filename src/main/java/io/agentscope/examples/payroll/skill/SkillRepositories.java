@@ -15,7 +15,35 @@ public final class SkillRepositories {
 
     private static final Logger log = LoggerFactory.getLogger(SkillRepositories.class);
 
+    private static volatile AgentSkillRepository shared;
+
     private SkillRepositories() {
+    }
+
+    /**
+     * 进程级共享仓库：智能体按定义缓存后，所有实例共用同一份 Nacos 快照与 HTTP 客户端。
+     *
+     * <p>{@link NacosSkillRepository} 使用并发缓存与 volatile 快照，TTL 到期刷新和
+     * last-known-good 回退都按仓库实例生效；共享不会改变单次读取的语义。
+     */
+    public static AgentSkillRepository shared() {
+        AgentSkillRepository repository = shared;
+        if (repository != null) {
+            return repository;
+        }
+        synchronized (SkillRepositories.class) {
+            if (shared == null) {
+                shared = create();
+            }
+            return shared;
+        }
+    }
+
+    /** 清空共享仓库；仅用于测试或配置热切换。 */
+    public static void resetShared() {
+        synchronized (SkillRepositories.class) {
+            shared = null;
+        }
     }
 
     public static AgentSkillRepository create() {

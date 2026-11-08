@@ -395,6 +395,15 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
   ```
 
+- **运行期实例复用**：技能仓库（含 Nacos HTTP 客户端）与模型按进程级单例复用；智能体按
+  “编排模式 + 定义签名（`id/name/description/skillIds`）+ 模型”缓存，同一模式只构建一次。
+  管理员修改智能体定义后签名变化，下一轮自动构建新实例，旧实例继续服务其它在途会话。
+  会话历史与系统提示中的技能清单由 `RuntimeContext`（`userId + sessionId`）隔离；
+  工具追溯记录器放入调用上下文，流程并行节点各持一份，避免共享实例后金额串线。
+  技能内容修改无需重建智能体：core 的动态技能中间件每次调用按内容签名刷新技能。
+  重置会话只清理本会话上下文，不关闭进程级共享实例。设计见
+  [`docs/agent-runtime-cache-spec.md`](docs/agent-runtime-cache-spec.md)。
+
 ### 控制台日志
 
 开发排查以 `[多智能体]` 为前缀，输出到 stderr（`logback.xml` 配置），与 CLI 结果分开：
@@ -403,6 +412,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 [多智能体] 初始化完成：计算 / 验证 / 核算三个智能体 + 上下文压缩器，模型=ollama:qwen2.5:3b-instruct
 [Skill] 生效技能：[payroll-calculator(nacos), payroll-validator(nacos), payroll-accountant(nacos)]
 [多智能体] 计算智能体工具集：[...]
+[多智能体] 智能体缓存就绪：薪酬计算（pipeline），模式=三段流水线，缓存条目=1，耗时=1ms
 [多智能体][calculator] 阶段开始：① 计算智能体：理解诉求并调用核算工具
 [多智能体][calculator] 调用工具：calculate_payroll
 [多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，耗时=42ms，参数={"employee_id":"张伟","period":"2026-10"}，金额={net_pay=21000.50,...}，员工=[EMP001]，期间=2026-10
@@ -417,6 +427,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 [会话] 回答已保存：sessionId=1，messageId=8，工具追溯=3条
 ```
 
+- 第二轮起日志出现 `[多智能体] 复用已缓存智能体`（DEBUG）；定义或模型变化时才重新打印
+  `智能体缓存就绪`。`缓存条目` 是进程内当前缓存的智能体定义数，用于排查是否按预期复用。
 - 阶段输入 / 输出全文为 DEBUG；INFO 只打印截断预览，避免日志过长。
 - `[多智能体][阶段] 工具结束` 是追溯核对入口：耗时、金额、员工、期间都来自落库前的同一份快照。
 - `[多智能体] 工具追溯汇总` 与 `[会话] 回答已保存` 可确认采集数量与持久化结果。

@@ -3,6 +3,7 @@ package io.agentscope.examples.payroll.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.ReActAgent;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.skill.AgentSkill;
@@ -12,6 +13,7 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.model.OllamaThinkingModel;
+import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.skill.RoleSkills;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
@@ -48,6 +50,10 @@ public final class PayrollAgentFactory {
     private static final int DEFAULT_OLLAMA_NUM_CTX = 8192;
     private static final double DEFAULT_OLLAMA_TEMPERATURE = 0.1;
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    private static final AgentCache AGENTS = new AgentCache();
+    private static volatile Model sharedModel;
+    private static volatile String sharedModelId;
 
     private static final Set<String> CALCULATOR_TOOLS =
             Set.of(
@@ -186,22 +192,29 @@ public final class PayrollAgentFactory {
             this(calculator, validator, accountant, summarizer, mcpClients, null, true);
         }
 
-        /** 配置的核算智能体未变化时复用已有实例，避免每轮重建并重新探测模型。 */
-        public boolean matches(AgentDefinition other) {
-            return signature(activeAgent).equals(signature(other));
+        /** 清空本会话在各智能体上的历史；共享实例不能按会话关闭。 */
+        public void clearSession(RuntimeContext context) {
+            clearAgent(calculator, context);
+            if (validator != calculator) {
+                clearAgent(validator, context);
+            }
+            if (accountant != calculator) {
+                clearAgent(accountant, context);
+            }
+            if (summarizer != calculator) {
+                clearAgent(summarizer, context);
+            }
         }
 
-        private static String signature(AgentDefinition agent) {
+        private static void clearAgent(ReActAgent agent, RuntimeContext context) {
             if (agent == null) {
-                return "";
+                return;
             }
-            return agent.id()
-                    + "|"
-                    + agent.name()
-                    + "|"
-                    + agent.description()
-                    + "|"
-                    + agent.skillIds();
+            try {
+                agent.clearContext(context);
+            } catch (RuntimeException e) {
+                log.warn("[多智能体] 清理会话上下文失败", e);
+            }
         }
 
         @Override
@@ -269,9 +282,55 @@ public final class PayrollAgentFactory {
         return createTeam(tools, null);
     }
 
+    /**
+     * 进程级复用智能体定义：同一模式 + 定义签名 + 模型只构建一次。
+     *
+     * <p>每个缓存实例只注册自己绑定的技能（{@code SkillRepositories.scoped}），因此共享
+     * 智能体之间不存在跨角色加载技能的问题；会话历史由传入的 {@link RuntimeContext} 隔离。
+     */
+    public static Team sharedTeam(PayrollEngine engine, AgentDefinition activeAgent) {
+        String key =
+                "team|"
+                        + runtimeKey(engine)
+                        + "|"
+                        + (isPipeline(activeAgent) ? "pipeline" : definitionSignature(activeAgent))
+                        + "|"
+                        + modelId();
+        return AGENTS.get(key, () -> createTeam(new PayrollTools(engine), activeAgent));
+    }
+
+    /** 流程节点按智能体定义复用；节点级会话隔离由调用方的 RuntimeContext 保证。 */
+    public static NodeAgent sharedFlowNodeAgent(PayrollEngine engine, AgentDefinition agent) {
+        String key = "node|" + runtimeKey(engine) + "|" + definitionSignature(agent) + "|" + modelId();
+        return AGENTS.get(
+                key, () -> createFlowNodeAgent(new PayrollTools(engine), agent, sharedModel()));
+    }
+
+    /**
+     * 生产环境只有一个 {@link PayrollEngine}；把引擎身份纳入 key，避免测试或嵌入场景
+     * 复用另一个引擎上的工具实例。
+     */
+    private static String runtimeKey(PayrollEngine engine) {
+        return engine == null ? "none" : "engine@" + System.identityHashCode(engine);
+    }
+
+    /** 定义签名：任一字段变化都会生成新的缓存条目。 */
+    static String definitionSignature(AgentDefinition agent) {
+        if (agent == null) {
+            return "";
+        }
+        return agent.id()
+                + "|"
+                + agent.name()
+                + "|"
+                + agent.description()
+                + "|"
+                + agent.skillIds();
+    }
+
     public static Team createTeam(PayrollTools tools, AgentDefinition activeAgent) {
-        Model model = buildModel(modelId());
-        AgentSkillRepository skillRepository = SkillRepositories.create();
+        Model model = sharedModel();
+        AgentSkillRepository skillRepository = SkillRepositories.shared();
         ReActAgent summarizer =
                 createAgent(
                         "PayrollContextAgent",
@@ -341,7 +400,7 @@ public final class PayrollAgentFactory {
     /** 流程编排按节点创建独立智能体；模型实例由调用方按轮次复用，避免重复探测 Ollama。 */
     public static NodeAgent createFlowNodeAgent(
             PayrollTools tools, AgentDefinition agent, Model model) {
-        AgentSkillRepository skillRepository = SkillRepositories.create();
+        AgentSkillRepository skillRepository = SkillRepositories.shared();
         List<AgentSkill> skills = boundSkills(skillRepository, agent);
         AgentSkill primary = skills.get(0);
         Set<String> allowed = flowTools(agent.skillIds());
@@ -584,9 +643,34 @@ public final class PayrollAgentFactory {
         return configured == null || configured.isBlank() ? DEFAULT_MODEL : configured.trim();
     }
 
-    /** 流程编排每轮创建一个模型实例，供该轮所有并行节点共享。 */
-    public static Model createFlowModel() {
-        return buildModel(modelId());
+    /** 进程级共享模型：构建时会探测 Ollama，所有智能体复用同一次探测结果。 */
+    public static Model sharedModel() {
+        String modelId = modelId();
+        Model model = sharedModel;
+        if (model != null && modelId.equals(sharedModelId)) {
+            return model;
+        }
+        synchronized (PayrollAgentFactory.class) {
+            if (sharedModel == null || !modelId.equals(sharedModelId)) {
+                sharedModel = buildModel(modelId);
+                sharedModelId = modelId;
+            }
+            return sharedModel;
+        }
+    }
+
+    /** 清空共享模型与智能体缓存；仅用于测试或应用关闭。 */
+    public static void resetRuntimeCache() {
+        synchronized (PayrollAgentFactory.class) {
+            sharedModel = null;
+            sharedModelId = null;
+            AGENTS.clear();
+        }
+    }
+
+    /** 当前缓存的智能体定义数量，用于启动/切换日志与排查。 */
+    public static int cachedAgentCount() {
+        return AGENTS.size();
     }
 
     public static String ollamaBaseUrl() {

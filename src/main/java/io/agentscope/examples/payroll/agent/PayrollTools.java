@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.agent;
 
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import io.agentscope.examples.payroll.domain.AttendanceSummary;
@@ -58,10 +59,12 @@ public final class PayrollTools {
                             name = "department",
                             description = "可选，按部门精确过滤，如 研发部、销售部；不传则返回全部员工",
                             required = false)
-                    String department) {
+                    String department,
+            RuntimeContext context) {
         return execute(
                 "list_employees",
                 args("department", department),
+                context,
                 () -> {
                     String requested = department == null ? "" : department.trim();
                     List<Employee> employees = engine.employees();
@@ -96,10 +99,12 @@ public final class PayrollTools {
             readOnly = true)
     public String getEmployeeProfile(
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
-                    String employeeId) {
+                    String employeeId,
+            RuntimeContext context) {
         return execute(
                 "get_employee_profile",
                 args("employee_id", employeeId),
+                context,
                 () -> {
                     Employee employee = engine.employee(resolveEmployeeId(employeeId));
                     Map<String, Object> payload = new LinkedHashMap<>();
@@ -131,10 +136,12 @@ public final class PayrollTools {
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
                     String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
-                    String period) {
+                    String period,
+            RuntimeContext context) {
         return execute(
                 "get_attendance_summary",
                 args("employee_id", employeeId, "period", period),
+                context,
                 () -> {
                     AttendanceSummary attendance =
                             engine.attendance(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -162,10 +169,12 @@ public final class PayrollTools {
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
                     String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
-                    String period) {
+                    String period,
+            RuntimeContext context) {
         return execute(
                 "calculate_payroll",
                 args("employee_id", employeeId, "period", period),
+                context,
                 () -> engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period)));
     }
 
@@ -187,13 +196,15 @@ public final class PayrollTools {
                             name = "include_details",
                             description = "是否返回每名员工的完整明细，默认 false 仅返回摘要",
                             required = false)
-                    Boolean includeDetails) {
+                    Boolean includeDetails,
+            RuntimeContext context) {
         return execute(
                 "calculate_department_payroll",
                 args(
                         "department", department,
                         "period", period,
                         "include_details", includeDetails),
+                context,
                 () -> {
                     BatchPayrollResult batch =
                             engine.calculateDepartment(department, parsePeriod(period));
@@ -227,10 +238,12 @@ public final class PayrollTools {
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
                     String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
-                    String period) {
+                    String period,
+            RuntimeContext context) {
         return execute(
                 "validate_payroll",
                 args("employee_id", employeeId, "period", period),
+                context,
                 () -> {
                     PayrollValidation validation =
                             engine.validate(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -254,10 +267,12 @@ public final class PayrollTools {
             @ToolParam(name = "employee_id", description = "员工工号或姓名，如 EMP001 或 张伟")
                     String employeeId,
             @ToolParam(name = "period", description = "工资期间，格式 YYYY-MM，如 2026-10")
-                    String period) {
+                    String period,
+            RuntimeContext context) {
         return execute(
                 "generate_payslip",
                 args("employee_id", employeeId, "period", period),
+                context,
                 () -> {
                     PayrollResult payroll =
                             engine.calculate(resolveEmployeeId(employeeId), parsePeriod(period));
@@ -281,10 +296,12 @@ public final class PayrollTools {
                             name = "city",
                             description = "可选，城市名称，如 北京、上海；不传则返回默认政策",
                             required = false)
-                    String city) {
+                    String city,
+            RuntimeContext context) {
         return execute(
                 "get_payroll_policy",
                 args("city", city),
+                context,
                 () -> {
                     String requested = city == null || city.isBlank() ? "默认" : city.trim();
                     Map<String, Object> payload = new LinkedHashMap<>();
@@ -366,7 +383,11 @@ public final class PayrollTools {
         }
     }
 
-    private String execute(String toolName, Map<String, Object> arguments, Supplier<Object> action) {
+    private String execute(
+            String toolName,
+            Map<String, Object> arguments,
+            RuntimeContext context,
+            Supplier<Object> action) {
         long startedAt = System.nanoTime();
         String result;
         try {
@@ -381,9 +402,10 @@ public final class PayrollTools {
             log.warn("payroll tool failed", e);
             result = error("核算执行失败：" + e.getMessage());
         }
-        if (recorder != null) {
+        ToolTraceRecorder activeRecorder = recorderFor(context);
+        if (activeRecorder != null) {
             try {
-                recorder.record(
+                activeRecorder.record(
                         toolName,
                         JsonSupport.toJson(arguments),
                         result,
@@ -393,6 +415,20 @@ public final class PayrollTools {
             }
         }
         return result;
+    }
+
+    /**
+     * 共享智能体下不能把追溯记录器绑在工具实例上：每个阶段/流程节点把本次调用的记录器
+     * 放进 RuntimeContext，工具按调用取用，避免并发会话的金额追溯串线。
+     */
+    private ToolTraceRecorder recorderFor(RuntimeContext context) {
+        if (context != null) {
+            ToolTraceRecorder scoped = context.get(ToolTraceRecorder.class);
+            if (scoped != null) {
+                return scoped;
+            }
+        }
+        return recorder;
     }
 
     private static Map<String, Object> args(Object... pairs) {

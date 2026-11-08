@@ -1101,3 +1101,126 @@ ChatTraceWebTest test
 
 - 再遇到“角色技能未加载”，先 grep `[Skill]`：出现“仅保留内置技能”说明启动后首次列表就失败；
   出现“沿用上次成功快照”说明技能仍可用，应检查 Nacos 恢复情况或模型是否跳过工具调用。
+
+## 26. 智能体运行期缓存与上下文隔离（2026-11-08）
+
+### 背景
+
+原实现每轮对话（流程模式为每个节点）都会重新创建技能仓库（含 Nacos `HttpClient`）、
+探测 Ollama `/api/tags` 与 `/api/show`、构建智能体，并重新注册工具。技能 TTL 缓存因此
+在流程模式下几乎失效，万人并发下会放大连接与构建开销。改造前先用
+`RuntimeContextIsolationTest`（提交 `2742d67`）验证单实例边界，再落地进程级复用。
+
+### 结论（spike 证据）
+
+| 能力 | 单实例 + RuntimeContext | 说明 |
+| --- | --- | --- |
+| 系统提示中的技能清单 | 隔离 | 不同 `RuntimeContext` 的 `SkillFilter` 生效 |
+| 会话历史 | 隔离 | 历史按上下文保存，`clearContext(ctx)` 只清本会话 |
+| `load_skill_through_path` | **不隔离** | core 的 `SkillBox` 忽略 per-context `SkillFilter`，B 会话能加载 A 的角色技能 |
+
+因此共享智能体必须同时绑定 `SkillRepositories.scoped(...)` 限定视图；仅靠 `SkillFilter`
+不足以阻断跨角色加载。`agentscope-harness` 的上下文级技能目录也能阻断，但需要替换 core
+动态技能中间件并调整过滤语义（裸名称 vs `skillId`），本次不迁移。
+
+### 修改
+
+- `SkillRepositories.shared()`：进程级技能仓库单例（Nacos 优先 + 内置回退）。
+  `NacosSkillRepository` 本身是并发缓存 + volatile 快照，TTL 与 last-known-good 语义不变；
+  管理台仍用 `create()` 读取最新配置。`resetShared()` 仅供测试/热切换。
+- `PayrollAgentFactory`：
+  - `AgentCache`（新文件）：`ConcurrentHashMap.computeIfAbsent`，同 key 只构建一次；
+    `clear()` 关闭 `AutoCloseable` 条目。
+  - `sharedModel()`：按 `PAYROLL_MODEL` 懒加载模型单例，避免重复探测 Ollama。
+  - `sharedTeam(engine, activeAgent)`：key 为
+    `team|engine@<identityHashCode>|<pipeline|定义签名>|<modelId>`。
+  - `sharedFlowNodeAgent(engine, agent)`：key 为
+    `node|engine@<identityHashCode>|<定义签名>|<modelId>`。
+  - 定义签名 = `id|name|description|skillIds`；任一变化即缓存未命中。
+  - `Team.clearSession(RuntimeContext)`：只调用各智能体的 `clearContext(ctx)`；
+    会话不再调用 `Team.close()`，避免关闭其它会话正在使用的共享实例。
+  - `resetRuntimeCache()` / `cachedAgentCount()`：测试与日志排查入口。
+- `PayrollTools`：8 个 `@Tool` 方法增加末尾 `RuntimeContext context` 参数。
+  AgentScope 反射注入该参数且不写入工具 schema；`execute` 优先从
+  `context.get(ToolTraceRecorder.class)` 取记录器，未提供时回退构造器注入
+  （兼容 CLI 与直调测试）。
+- `PayrollChatService`：
+  - 构造会话级 `RuntimeContext`（`userId`、`sessionId`、`ToolTraceRecorder`）。
+  - `runStage` / `summarize` / `clearHistory` 全部显式传上下文；每个阶段执行前把该阶段
+    记录器放入上下文。
+  - 流程节点使用 `sessionId + ":" + node.id()` 的独立上下文与独立记录器，执行完
+    `clearContext(nodeContext)`；并行节点即使复用同一智能体实例也不互相串状态。
+  - `reset()` 清理会话上下文后置空本地 `team` 引用并打日志，不关闭共享实例。
+
+### 行为与生命周期
+
+- **定义变化**：签名变化 → 下一轮构建新实例；旧实例保留，继续服务在途会话。
+- **技能内容变化**：无需重建智能体。core 的 `DynamicSkillMiddleware` 每次调用比较内容
+  SHA-256，变化时只重建 `SkillBox`。
+- **Nacos 抖动**：共享仓库沿用 last-known-good，缓存命中不受影响。
+- **会话隔离**：历史、系统提示、工具追溯都挂在 `RuntimeContext`；`reset()` 只清本会话。
+- **进程退出**：共享实例不逐会话关闭；由 JVM 退出回收，测试可调用
+  `PayrollAgentFactory.resetRuntimeCache()`。
+
+### 日志
+
+```
+[多智能体] 智能体缓存就绪：薪酬计算（pipeline），模式=三段流水线，缓存条目=1，耗时=1ms
+[多智能体] 复用已缓存智能体：薪酬计算（pipeline）        # DEBUG，第二轮起
+[多智能体] 会话已重置，共享智能体实例保留
+```
+
+- `缓存条目` 是进程内缓存的智能体定义数；持续增长说明定义签名在变化（检查 Agent 管理保存、
+  流程节点引用是否每轮生成新 id）。
+- 首次构建仍会探测一次 Ollama；之后每轮不再探测。
+
+### 测试
+
+- `RuntimeContextIsolationTest`（3，改造前提交）：共享实例的提示词/历史隔离；
+  scoped 仓库阻断跨技能加载；harness 上下文目录方案对照。
+- `AgentCacheTest`（5）：同 key 仅构建一次（含 8 线程并发首次访问）、不同 key 各自构建、
+  `clear()` 关闭 `AutoCloseable`、定义签名覆盖名称/描述/技能变化。
+- `PayrollToolsContextTest`（4）：记录写入上下文记录器；不同会话互不可见；
+  无上下文或上下文未带记录器时回退构造器注入。
+- 全量 `mvn test`：**239 个测试通过，0 失败**。
+
+### 本机端到端验证（2026-11-08）
+
+环境：18083 端口，`PAYROLL_AUTH_ENABLED=false`、`PAYROLL_NACOS_ENABLED=false`、
+`PAYROLL_MEMORY_ENABLED=false`、内存 H2，使用本机 Ollama `qwen2.5:3b-instruct`。
+
+1. 会话 1 首条消息：`[多智能体] 初始化完成` 后出现
+   `智能体缓存就绪：薪酬计算专家(payroll-calculator)，模式=三段流水线，缓存条目=1，耗时=177ms`。
+   177ms 包含首次 Ollama 探测与三个智能体构建。
+2. 同会话第二条“销售部有哪些员工？”：日志只出现
+   `DEBUG 复用已缓存智能体`，耗时 4.5s，答复工具为 `list_employees`；
+   追溯接口返回 `message_id=4`、`agent=calculator`、`args_json={"department":"销售部"}`，
+   证明共享智能体下上下文记录器仍能正确归属到本轮。
+3. 新建会话 2 首条消息：日志为 `智能体缓存就绪 ... 缓存条目=1，耗时=0ms`。
+   这是新会话第一次绑定本地 `team` 引用时打印的，0ms 与条目数不变说明命中了缓存；
+   同一 `PayrollChatService` 的后续轮次才会出现 DEBUG `复用已缓存智能体`。
+4. 重置会话 2：日志 `会话已重置，共享智能体实例保留`，随后其它会话仍可继续使用同一实例。
+
+注意：Windows 下 `spring-boot:run` 的日志按 GBK 写入文件，直接 grep 中文会失效；
+可先 `iconv -f GBK -t UTF-8 target/e2e-cache.log` 再检索。验证完成后已停止该测试实例。
+
+### 已知限制与后续建议
+
+1. 缓存没有容量上限与 TTL。生产环境智能体定义数量有限，影响可控；若管理台高频修改定义，
+   旧实例会累积。后续可按“最后使用时间 + 最大条目数”做 LRU 淘汰（淘汰前需确认无在途调用）。
+2. 定义签名只覆盖影响运行时的字段；`avatar/tags/visibility/status` 变化不会重建实例，
+   这些字段只在管理台展示或解析阶段使用。
+3. 单进程内共享；多实例部署各自缓存，Nacos 仍是配置源，行为一致。
+4. `Model` 单例依赖其无状态假设（formatter/transport/options 不可变）。若替换为带可变
+   session 的模型客户端，需要重新评估共享。
+
+### 排查提示
+
+- 修改智能体后回复没变化：grep `[多智能体] 智能体缓存就绪`，确认出现新的耗时日志与
+  缓存条目增加；若没有，检查保存是否成功、`resolveActiveAgent()` 是否解析到旧定义。
+- 不同会话串话：确认所有 `streamEvents` / `call` 都传了 `RuntimeContext`；
+  新增阶段或工具时不要在无上下文的情况下直接调用共享智能体。
+- 金额追溯缺失：确认 `PayrollTools` 调用链传入了 `RuntimeContext`，且当前阶段已把
+  `ToolTraceRecorder` 放入上下文（`runStage` / `executeFlowNode` 已处理）。
+- 修改 `PAYROLL_MODEL` 后行为异常：该变量按进程读取，切换模型会生成新的缓存键并重建
+  共享模型；不要在运行中依赖环境变量热更新。
