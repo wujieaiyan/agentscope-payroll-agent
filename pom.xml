@@ -51,6 +51,13 @@
             <artifactId>agentscope-extensions-model-ollama</artifactId>
             <version>${agentscope.version}</version>
         </dependency>
+        <!-- 仅用于验证 harness 的上下文级技能目录能否替代每轮重建智能体。 -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-harness</artifactId>
+            <version>${agentscope.version}</version>
+            <scope>test</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
