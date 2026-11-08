@@ -3,41 +3,88 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>薪酬管理台</title>
+  <title>薪酬智能体 · 管理台</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="vendor/vue-flow-core.css">
   <link rel="stylesheet" href="vendor/vue-flow-theme-default.css">
 </head>
 <body>
-<header>
-  <div class="brand">
-    <h1>薪酬管理台</h1>
-    <span class="sub">Payroll Admin · 本地单机 · 金额由确定性引擎计算</span>
-  </div>
-  <div class="header-actions">
-    <span id="health" class="badge">连接中…</span>
-    <span id="current-user" class="badge user-badge">未登录</span>
-    <button id="change-password" class="ghost hidden">修改密码</button>
-    <button id="logout" class="ghost hidden">退出</button>
-  </div>
-</header>
+<div class="app-layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">薪</div>
+      <div class="brand-text">
+        <div class="brand-name">薪酬智能体</div>
+        <div class="brand-sub">PAYROLL AGENT CONSOLE</div>
+      </div>
+    </div>
 
-<nav id="tabs">
-  <button data-tab="employees" class="active">员工</button>
-  <button data-tab="reviews">考核</button>
-  <button data-tab="policies">城市政策</button>
-  <button data-tab="attendance">考勤</button>
-  <button data-tab="payroll">工资批次</button>
-  <button data-tab="approval" data-permission="approval:manage" class="hidden">审批链</button>
-  <button data-tab="chat" data-permission="chat:use" class="hidden">智能问答</button>
-  <button data-tab="users" data-permission="user:manage" class="hidden">用户</button>
-  <button data-tab="departments" data-permission="department:manage" class="hidden">部门</button>
-  <button data-tab="roles" data-permission="role:manage" class="hidden">角色</button>
-  <button data-tab="agents" data-permission="agent:manage" class="hidden">Agent 管理</button>
-  <button data-tab="flows" data-permission="flow:manage" class="hidden">流程编排</button>
-</nav>
+    <nav id="tabs" class="nav">
+      <div class="nav-group">
+        <div class="nav-label">人事运营</div>
+        <button data-tab="employees" class="nav-item active">员工档案</button>
+        <button data-tab="reviews" class="nav-item">绩效考核</button>
+        <button data-tab="attendance" class="nav-item">考勤管理</button>
+        <button data-tab="policies" class="nav-item">城市政策</button>
+        <button data-tab="payroll" class="nav-item">工资批次</button>
+        <button data-tab="approval" data-permission="approval:manage" class="nav-item hidden">审批链</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">智能体</div>
+        <button data-tab="chat" data-permission="chat:use" class="nav-item hidden">智能问答</button>
+        <button data-tab="agents" data-permission="agent:manage" class="nav-item hidden">Agent 管理</button>
+        <button data-tab="flows" data-permission="flow:manage" class="nav-item hidden">流程编排</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">系统管理</div>
+        <button data-tab="users" data-permission="user:manage" class="nav-item hidden">用户</button>
+        <button data-tab="departments" data-permission="department:manage" class="nav-item hidden">部门</button>
+        <button data-tab="roles" data-permission="role:manage" class="nav-item hidden">角色权限</button>
+      </div>
+    </nav>
 
-<main>
+    <div class="sidebar-foot">
+      <div class="demo-card">
+        <div class="demo-card-title">本地演示环境</div>
+        <p>金额始终由确定性引擎计算；模型或 Nacos 不可用时自动回退。</p>
+      </div>
+      <div class="user-card">
+        <div id="user-avatar" class="avatar">·</div>
+        <div class="user-info">
+          <strong id="current-user">未登录</strong>
+          <small id="current-user-meta">加载中…</small>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main-wrap">
+    <header class="topbar">
+      <div class="topbar-left">
+        <nav class="topbar-crumbs" aria-label="面包屑">
+          <span id="crumb-group">人事运营</span>
+          <span class="crumb-sep">/</span>
+          <span id="crumb-page" class="crumb current">员工档案</span>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <span id="health" class="badge">连接中…</span>
+        <span class="env-pill">LOCAL</span>
+        <button id="change-password" class="ghost hidden">修改密码</button>
+        <button id="logout" class="ghost hidden">退出</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="page-head">
+        <div>
+          <span class="eyebrow" id="page-eyebrow">PEOPLE OPS</span>
+          <h1 class="page-title" id="page-title">员工档案</h1>
+          <p class="page-subtitle" id="page-subtitle">维护员工基础信息、薪酬参数与在职状态；停用员工不参与核算与批量出账。</p>
+        </div>
+      </div>
+
   <div id="import-report" class="card import-report hidden">
     <div class="panel-head">
       <h2 id="import-report-title">导入结果</h2>
@@ -405,7 +452,9 @@
   <section class="tab" id="tab-flows">
     <div id="flows-app"></div>
   </section>
-</main>
+    </main>
+  </div>
+</div>
 
 <dialog id="password-dialog" class="dialog">
   <form id="password-form">

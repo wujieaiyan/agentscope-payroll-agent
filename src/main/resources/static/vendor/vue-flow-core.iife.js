@@ -4491,14 +4491,13 @@ Edge: ${id2}`,
     [Position.Top]: Position.Bottom,
     [Position.Bottom]: Position.Top
   };
-  const productionEnvs = ["production", "prod"];
   function warn(message, ...args) {
     if (isDev()) {
       console.warn(`[Vue Flow]: ${message}`, ...args);
     }
   }
   function isDev() {
-    return !productionEnvs.includes(production || "");
+    return false;
   }
   function getHandleBounds(type, nodeElement, nodeBounds, zoom2) {
     const handles = nodeElement.querySelectorAll(`.vue-flow__handle.${type}`);

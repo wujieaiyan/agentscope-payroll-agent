@@ -716,8 +716,12 @@ ChatTraceWebTest test
 
 1. 每轮对话读取 `activeFlow()`；为空、结构非法、引用智能体缺失/下架时告警并回退原链路。
 2. 从 START 出发，按“所有入边已确定”逐层推进；同层节点提交固定线程池并行执行。
-3. 节点输入 = 本轮问题与会话线索 + 所有经**选中路径**可达的上游输出（按拓扑层级排序）。
-   兄弟分支输出不会串入；汇合节点自然拿到多条分支结果。
+3. 节点输入 = `【用户问题】` + 所有经**选中路径**可达的上游记录（按拓扑层级排序）。
+   兄弟分支输出不会串入；汇合节点自然拿到多条分支结果。记录标题去掉“①②”编号，
+   得到 `【计算智能体记录】` / `【验证智能体记录】`，与角色技能引用一致；
+   已执行但无文本的节点保留 `（本节点未返回内容）` 占位，上游有核算对象时追加
+   `【上游核算对象（最多处理前 3 个）】` 清单。实测中缺少这些结构会让小模型在
+   验证/核算节点输出空文本。
 4. 条件节点不调用模型：`HAS_CALCULATION_TARGETS` / `HAS_TOOL_ERROR` /
    `OUTPUT_CONTAINS`，只统计祖先节点结果。
 5. 未选中的边标记阻断；无选中入边的节点标记 SKIPPED 并继续阻断下游；END 不执行模型。
@@ -740,12 +744,35 @@ ChatTraceWebTest test
 - 条件节点通过 `sourceHandle=TRUE/FALSE` 区分“是/否”分支；前端两个锚点固定在节点右侧
   32%/68% 位置，属性面板只暴露预设条件与关键字。
 - 未启用 Nacos 时画布仍可查看与拖动，但保存、删除、激活按钮禁用。
+- `vendor/vue-flow-core.iife.js` 是下载后手工修正的生产构建：原始文件 `isDev()` 引用了
+  未定义的 `production` 变量，每次进入页签都会抛
+  `ReferenceError: production is not defined`（栈顶 `vendor/vue-flow-core.iife.js:4501`
+  → `flows.js:520` → `app.js:234`）。现固定 `isDev()` 返回 `false`；替换该文件后需复查。
+- 画布默认 `fitView` 会按整图缩放，节点较多时文字偏小；工具栏提供 `－ / ＋ / 适应画布`，
+  也可滚轮缩放、拖拽平移。流程页采用“画布在左、流程列表与节点属性在右”的两列布局，
+  让画布拿到最大宽度；`@media (max-width: 1100px)` 再退回单列。
+
+### 管理台外壳（知识库风格）
+
+外壳参考 `knowledge-base-console` 的布局与配色重做，修改界面时注意以下约定：
+
+| 位置 | 约定 |
+| --- | --- |
+| `index.html` | `.app-layout` = 236px 深色侧边栏 + 主区；导航仍是 `nav#tabs > button[data-tab]` |
+| `data-permission` | 页签与按钮的显隐唯一来源仍是 `applyPermissions()`；新增导航必须同时给 `data-tab` 与 `data-permission` |
+| `app.js` `TAB_META` | 每个页签的分组、eyebrow、标题、副标题；`showTab()` 据此更新面包屑与页头，新增页签必须补条目 |
+| `style.css` `:root` | 暖纸底 `--bg`、墨绿 `--primary`、黄铜 `--accent`、深色 `--sidebar`；组件只引用变量 |
+| 聊天气泡 | 保留微信式左右布局（用户 `#95ec69`、助手白底、画布 `#f1efe8`），宽度上限 680px |
+| 流程页 | `.flows-page` 用 grid areas：`main` 在左，`list` / `props` 在右 |
+
+页面结构变更后至少回归：12 个页签切换、面包屑与用户卡片、登录页、≤900px 单列布局，
+并确认控制台除登录页 `alreadyLoggedIn()` 的预期 401 外没有新增报错。
 
 ### 测试
 
 - `FlowValidatorTest`（7）：内置流程、智能体引用、条件分支/关键字、环与死路、汇合、名称/端点。
-- `AgentFlowExecutorTest`（11）：线性、真/假分支、工具错误、关键字、同层并行（CyclicBarrier）、
-  汇合输入、跳过传播、节点失败、缺失端点/无答复、坏图。
+- `AgentFlowExecutorTest`（12）：线性、真/假分支、工具错误、关键字、同层并行（CyclicBarrier）、
+  汇合输入、空输出占位与核算对象清单、跳过传播、节点失败、缺失端点/无答复、坏图。
 - `NacosFlowRegistryTest`（9）：未启用只读、配置缺失/损坏回退、保存/重载、更新保留创建信息、
   激活、删除保护、写入失败。
 - `FlowAdminControllerTest`（7）：归一化、校验、更新路径 id、删除/激活、审计、列表与 meta。
