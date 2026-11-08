@@ -1,0 +1,41 @@
+[
+  {
+    "id": "payroll-calculator",
+    "name": "薪酬计算专家",
+    "avatar": "🧮",
+    "description": "薪酬计算智能体：理解诉求并调用确定性工具完成核算，产出可复核的计算记录",
+    "tags": ["薪酬", "内置"],
+    "skillIds": ["payroll-calculator"],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": "2026-11-08T09:00:00",
+    "updatedAt": "2026-11-08T09:00:00"
+  },
+  {
+    "id": "payroll-validator",
+    "name": "薪酬复核专家",
+    "avatar": "🔍",
+    "description": "薪酬验证智能体：独立复核勾稽关系与关键金额，输出验证结论",
+    "tags": ["薪酬", "内置"],
+    "skillIds": ["payroll-validator"],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": "2026-11-08T09:00:00",
+    "updatedAt": "2026-11-08T09:00:00"
+  },
+  {
+    "id": "payroll-accountant",
+    "name": "薪酬入账专家",
+    "avatar": "📒",
+    "description": "薪酬核算智能体：汇总计算与验证结论，输出面向用户的最终答复",
+    "tags": ["薪酬", "内置"],
+    "skillIds": ["payroll-accountant"],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": "2026-11-08T09:00:00",
+    "updatedAt": "2026-11-08T09:00:00"
+  }
+]

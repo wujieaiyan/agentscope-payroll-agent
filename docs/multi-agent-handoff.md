@@ -581,4 +581,100 @@ ChatTraceWebTest test
 - 分支 `feature/payroll-approval-audit-trace` 已包含 #49/#50/#51；PR #1 指向 `main`，
   后续提交推送前需再次确认。
 
+## 19. Agent 管理（2026-11-08，分支 `feature/agent-management`）
+
+管理台新增“Agent 管理”页签：维护专家智能体定义（名称、头像、描述、标签、绑定技能、
+可见范围、上下架状态），整个列表存储为 Nacos 配置 `payroll-agents.json`。
+当前只做管理与展示，尚未接入对话编排。
+
+### 存储与回退
+
+- `AgentDefinition`（record）字段：`id/name/avatar/description/tags/skillIds/
+  visibility/status/createdBy/createdAt/updatedAt`，JSON 使用 camelCase。
+- `NacosAgentRegistry`：
+  - `list()` 带 TTL 缓存（复用 `PAYROLL_NACOS_SKILL_TTL_SECONDS`），Nacos 不可用、
+    dataId 缺失或 JSON 损坏时回退三个内置智能体（计算/复核/入账）。
+  - `save()` 按 `id` 新建或更新；更新保留 `createdBy/createdAt`，刷新 `updatedAt`；
+    新建 id 为 `agent-<8 位>`，创建人取当前登录用户。
+  - `delete()` 重写完整列表。
+  - 未启用 Nacos（`PAYROLL_NACOS_SERVER` 为空）时 `writable=false`，写操作抛
+    `PayrollException`，管理台禁用按钮。
+- `NacosConfigClient` 新增 `publish`/`remove`，复用现有 token 刷新与超时逻辑；
+  发布失败返回 `false`，由注册表转成中文异常，不修改本地缓存。
+- 首次保存会把“当前列表（含内置默认项）+ 修改”整体写入 Nacos；多实例并发编辑为
+  最后写入覆盖，暂无版本号/乐观锁。
+
+### 接口与权限
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/admin/agents` | 列表，支持 `keyword/tag/skillId/status/visibility` |
+| GET | `/api/admin/agents/meta` | `writable`、`location`、已有标签 |
+| GET | `/api/admin/agents/skills` | 可绑定技能（名称、描述、来源） |
+| POST | `/api/admin/agents` | 新建 |
+| PUT | `/api/admin/agents/{id}` | 修改 |
+| DELETE | `/api/admin/agents/{id}` | 删除 |
+
+- 新权限码 `agent:manage`，仅内置 `ADMIN` 拥有；HR/VIEWER 访问返回 403。
+- 校验：名称 ≤30 字、描述 ≤200 字、头像 ≤8 字符、标签 ≤6 个且单个 ≤12 字；
+  技能必须存在于当前技能仓库；`visibility` 仅 `PUBLIC/PRIVATE`，`status` 仅
+  `ONLINE/OFFLINE`；空白字段归一化（头像默认 🤖、可见范围默认公开、状态默认下架）。
+- 审计：`agent.create` / `agent.update` / `agent.delete`，修改与删除带 before 快照。
+  失败请求仍由 `AuditFilter` 兜底记录。
+
+### 前端
+
+- 新增页签与 `agents.js`，使用本地 vendored Vue 3（`static/vendor/vue.global.prod.js`），
+  不引入构建链；复用 `app.js` 的 `api()/toast()/showError()`。
+- 卡片网格 + 关键字/标签/技能/状态/范围筛选；弹窗编辑名称、头像、枚举、标签与技能多选。
+- Nacos 未启用时顶部提示“存储：代码内置（未启用 Nacos，只读）”，新增/编辑/删除按钮禁用。
+- 注意：`initAgentsTab` 必须保存 `createApp(App).mount(...)` 的返回值（组件代理）才能调用
+  `reload()`；保存 app 实例会导致二次进入页签时报 `reload is not a function`。
+
+### 日志
+
+```
+[Agent] Nacos 未提供 payroll-agents.json，使用内置默认智能体
+[Agent] 从 Nacos 加载 3 个智能体定义
+[Agent] 已保存智能体配置（共 4 个）
+[Skill] 发布配置 payroll-agents.json 失败：HTTP 500
+```
+
+### 测试
+
+- 新增 `NacosAgentRegistryTest`（8）：假 Nacos HTTP 服务覆盖回退、保存/重载、更新保留创建信息、
+  删除、损坏 JSON、TTL 缓存、未启用只读、写入失败。
+- 新增 `AgentAdminControllerTest`（8）：过滤、归一化、枚举/长度/技能校验、更新/删除不存在、
+  审计前后快照、meta。
+- 新增 `AgentAdminWebTest`（3）：camelCase 序列化、meta/skills、未登录 401、HR 403、
+  校验 400、审计兜底。
+- 全量：`JAVA_HOME="D:\tools\jdk\jdk-17.0.12" mvn test` → **31 个测试类、145 个测试全部通过**。
+
+### 人工验收
+
+1. 启动本机 Nacos 后，用环境变量启动管理台：
+
+   ```bash
+   PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
+   PAYROLL_DB_URL="jdbc:h2:mem:agent-verify;DB_CLOSE_DELAY=-1" \
+   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+   ```
+
+2. 管理员登录，打开“Agent 管理”：应显示三个内置智能体，顶部提示 Nacos 存储位置。
+3. 新建一个智能体，绑定 `payroll-calculator`，保存；刷新页面仍存在。
+4. 在 Nacos 控制台查看 `payroll-agents.json`：应包含内置项与新增项。
+5. 修改/删除该智能体，确认列表与 Nacos 内容同步，审计日志出现
+   `agent.create/agent.update/agent.delete`。
+6. 用 HR 账号访问页签或直接请求接口：应看不到页签，接口返回 403。
+7. 取消 `PAYROLL_NACOS_SERVER` 重启：页签只读，保存按钮禁用，列表仍显示内置智能体。
+
+### 已知限制与下一步
+
+1. 智能体定义尚未接入对话编排；后续可让用户选择智能体，或按技能组合生成子智能体。
+2. 单 JSON 配置、最后写入覆盖，缺少版本号/乐观锁与多实例冲突提示。
+3. `visibility=PRIVATE` 目前只做展示，读取接口仍只对 `agent:manage` 开放，没有按用户可见性过滤。
+4. 绑定技能来自当前技能仓库（Nacos 优先、内置回退），技能被删除后旧定义不会自动清理。
+5. 前端使用 vendored Vue 3 与原生 `confirm`，后续可替换为带校验的弹窗并补充无障碍支持。
+
+
 
