@@ -17,9 +17,11 @@ function initAgentsTab() {
       return {
         loading: false,
         saving: false,
+        activating: false,
         agents: [],
         skills: [],
         meta: { writable: false, location: '', tags: [] },
+        active: { agentId: '', name: '', configured: '' },
         filters: { keyword: '', tag: '', skillId: '', status: '', visibility: '' },
         dialogVisible: false,
         editingId: null,
@@ -31,6 +33,11 @@ function initAgentsTab() {
         return this.meta.writable
           ? `存储：Nacos ${this.meta.location}`
           : '存储：代码内置（未启用 Nacos，只读）';
+      },
+      activeText() {
+        return this.active.name
+          ? `核算智能体：${this.active.name}`
+          : '核算智能体：默认流水线';
       },
       filteredAgents() {
         const f = this.filters;
@@ -61,14 +68,16 @@ function initAgentsTab() {
       async reload() {
         this.loading = true;
         try {
-          const [agents, meta, skills] = await Promise.all([
+          const [agents, meta, skills, active] = await Promise.all([
             api('/api/admin/agents'),
             api('/api/admin/agents/meta'),
             api('/api/admin/agents/skills'),
+            api('/api/admin/agents/active'),
           ]);
           this.agents = agents || [];
           this.meta = meta || { writable: false, location: '', tags: [] };
           this.skills = skills || [];
+          this.active = active || { agentId: '', name: '', configured: '' };
         } catch (error) {
           showError(error);
         } finally {
@@ -138,6 +147,27 @@ function initAgentsTab() {
           showError(error);
         }
       },
+      isActive(agent) {
+        return agent.id === this.active.agentId;
+      },
+      canActivate(agent) {
+        return this.meta.writable
+          && !this.isActive(agent)
+          && agent.status === 'ONLINE'
+          && agent.visibility === 'PUBLIC';
+      },
+      async activate(agent) {
+        this.activating = true;
+        try {
+          await api(`/api/admin/agents/${agent.id}/active`, { method: 'PUT' });
+          toast(`已将「${agent.name}」设为核算智能体，下一轮对话生效`, 'success');
+          await this.reload();
+        } catch (error) {
+          showError(error);
+        } finally {
+          this.activating = false;
+        }
+      },
       statusText(status) {
         return status === 'ONLINE' ? '已上架' : '已下架';
       },
@@ -154,6 +184,7 @@ function initAgentsTab() {
           <h2>Agent 管理</h2>
           <div class="actions">
             <span class="hint">{{ storageText }}</span>
+            <span class="hint agent-active-hint">{{ activeText }}</span>
             <button type="button" @click="reload">刷新</button>
             <button type="button" class="primary" @click="openCreate" :disabled="!meta.writable">新建智能体</button>
           </div>
@@ -192,6 +223,7 @@ function initAgentsTab() {
                 <strong>{{ agent.name }}</strong>
                 <span class="hint">{{ visibilityText(agent.visibility) }} · {{ statusText(agent.status) }}</span>
               </div>
+              <span v-if="isActive(agent)" class="agent-active-badge">当前核算</span>
             </div>
             <div class="agent-tags">
               <span v-for="tag in agent.tags" :key="tag" class="tag">{{ tag }}</span>
@@ -200,6 +232,9 @@ function initAgentsTab() {
             <p class="agent-desc">{{ agent.description || '（无描述）' }}</p>
             <p class="hint">更新于 {{ formatTime(agent.updatedAt) }} · 创建人 {{ agent.createdBy || '-' }}</p>
             <div class="actions">
+              <button type="button" class="tiny" @click="activate(agent)" :disabled="!canActivate(agent) || activating">
+                {{ isActive(agent) ? '核算中' : '设为核算智能体' }}
+              </button>
               <button type="button" class="tiny" @click="openEdit(agent)" :disabled="!meta.writable">编辑</button>
               <button type="button" class="tiny danger" @click="remove(agent)" :disabled="!meta.writable">删除</button>
             </div>

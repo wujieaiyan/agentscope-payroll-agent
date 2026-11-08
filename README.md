@@ -44,12 +44,13 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 发薪前校验 | 勾稽关系、社保基数上下限、实发是否为负等 6 项检查 |
 | 考勤核对 | 事假、病假、旷工、工作日/休息日/法定节假日加班 |
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
-| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 21 项权限码；用户、部门、角色均可在管理台维护 |
+| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 22 项权限码；用户、部门、角色均可在管理台维护 |
 | Agent 管理 | 专家智能体定义（名称、头像、标签、绑定技能、上下架、公开/私有）存储于 Nacos，支持搜索筛选与增删改；未启用 Nacos 时只读回退三个内置智能体 |
+| 流程编排 | 拖拽画布把已注册智能体与条件判断组成 DAG：分支、汇合、同层并行；可保存多条流程并指定全局默认，下一轮对话生效；未设置时沿用原流水线 |
 | 多用户会话 | 每个登录用户拥有独立会话列表；同一用户可打开多个会话窗口，消息按会话持久化并按用户隔离 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
 | 导入模板 | 管理台一键下载标准表头与填写说明，避免列名不一致 |
-| 对话界面 | “智能问答”页签由三个智能体串行完成：计算 → 验证 → 核算，SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
+| 对话界面 | “智能问答”页签默认由三个智能体串行完成：计算 → 验证 → 核算；激活全局默认流程后按 DAG 执行。SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
 | 城市政策 | 每个城市独立维护个税参数、社保公积金比例与基数上下限 |
 | 工资批次 | 预览 → 人工微调 → 提交审批 → 审批通过 → 出账（服务端重算）→ 确认发送 |
 | 审批链 | 全局/部门审批链可配置优先级与金额区间；提交人不能自批；金额指纹固定审批快照，审批后数据变化必须重新提交 |
@@ -180,14 +181,14 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 
 | 角色 | 说明 | 主要权限 |
 | --- | --- | --- |
-| `ADMIN` | 系统管理员 | 全部 21 项权限，含用户、部门、角色、审计与审批链管理 |
+| `ADMIN` | 系统管理员 | 全部 22 项权限，含用户、部门、角色、审计、审批链、Agent 管理与流程编排 |
 | `HR` | 人事专员 | 员工/考核/考勤/工资批次读写、审批工资批次、Excel 导入、智能问答；政策只读 |
 | `VIEWER` | 只读访客 | 员工/考核/政策/考勤/工资批次/部门/角色只读 + 智能问答 |
 
 权限码按“查看/维护”成对划分：`employee:*`、`review:*`、`policy:*`、`attendance:*`、`payroll:*`，
 外加 `payroll:approve`、`approval:manage`、`import:use`、`chat:use`、`department:read|manage`、
-`role:read|manage`、`user:manage`、`audit:read`、`agent:manage`。`agent:manage` 仅内置管理员拥有，
-用于 Agent 管理页签与智能体定义接口。
+`role:read|manage`、`user:manage`、`audit:read`、`agent:manage`、`flow:manage`。
+`agent:manage` 与 `flow:manage` 仅内置管理员拥有，分别用于 Agent 管理页签与流程编排页签。
 自定义角色可自由组合权限码；内置角色不可修改或删除。
 
 安全规则：不能停用自己或修改自己的角色；系统始终保留至少一名启用状态的管理员；
@@ -209,8 +210,11 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
   技能必须存在于当前技能仓库、状态/可见范围必须为枚举值。
 - 审计：新增/修改/删除分别记录 `agent.create`、`agent.update`、`agent.delete`，
   修改与删除附带变更前快照。
-- 当前智能体定义尚未接入对话编排，仅作为 Agent 广场的数据基础；对话仍固定使用
+- 智能体定义可直接被“流程编排”的 `AGENT` 节点引用；未设置全局默认流程时，对话仍固定使用
   计算 → 验证 → 核算三阶段流水线。
+- 流程本身也存储在 Nacos：`payroll-flows.json` 保存流程数组，`payroll-flow-settings.json`
+  保存 `activeFlowId`。画布与执行语义详见 [docs/agent-orchestration.md](docs/agent-orchestration.md)，
+  配置模板见 `docs/nacos-skills/payroll-flows.json`。
 
 配置结构（字段为 camelCase，时间为 ISO-8601）：
 
@@ -506,6 +510,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | GET | `/api/admin/agents/meta` | 存储可写性、Nacos 位置与已有标签集合 |
 | GET | `/api/admin/agents/skills` | 可绑定技能清单（名称、描述、来源） |
 | PUT/DELETE | `/api/admin/agents/{id}` | 修改 / 删除智能体定义（需 `agent:manage`，Nacos 未启用时拒绝写） |
+| GET/POST | `/api/admin/flows` | 流程列表与激活状态 / 新建流程（需 `flow:manage`） |
+| GET | `/api/admin/flows/meta` | 存储可写性、Nacos 位置与可选智能体 |
+| PUT/DELETE | `/api/admin/flows/{id}` | 更新 / 删除流程（默认流程不可删） |
+| PUT | `/api/admin/flows/{id}/active` | 设为全局默认流程，下一轮对话生效 |
 | GET | `/api/audit` | 审计日志分页查询，支持 `from`/`to`/`actor`/`action`/`resource_type`/`resource_id`/`result`/`keyword`/`page`/`size`（需 `audit:read`） |
 | GET | `/api/audit/export` | 按相同条件导出 CSV（含 BOM，最多 1 万条，需 `audit:read`） |
 

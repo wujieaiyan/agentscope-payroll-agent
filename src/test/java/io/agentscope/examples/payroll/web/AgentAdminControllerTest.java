@@ -237,18 +237,48 @@ class AgentAdminControllerTest {
     }
 
     @Test
-    @DisplayName("meta 返回存储可写性、位置与标签集合")
+    @DisplayName("meta 返回存储可写性、位置、标签集合与核算智能体")
     void metaReportsStorage() {
         AgentDefinition agent = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
         when(registry.writable()).thenReturn(true);
         when(registry.location()).thenReturn("http://nacos/payroll-agent");
+        when(registry.activeAgentId()).thenReturn("agent-1");
         when(registry.list()).thenReturn(List.of(agent));
 
         Map<?, ?> meta = (Map<?, ?>) controller.meta().data();
 
         assertEquals(true, meta.get("writable"));
         assertEquals("http://nacos/payroll-agent", meta.get("location"));
+        assertEquals("agent-1", meta.get("activeAgentId"));
         assertTrue(meta.get("tags").toString().contains("税务"), meta.toString());
+    }
+
+    @Test
+    @DisplayName("设置为核算智能体写入审计")
+    void setActiveWritesAudit() {
+        AgentDefinition before = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
+        when(registry.list()).thenReturn(List.of(before));
+        when(registry.setActiveAgent("agent-1")).thenReturn("agent-1");
+
+        ApiResponse response = controller.setActive("agent-1");
+
+        assertEquals(Map.of("activeAgentId", "agent-1"), response.data());
+        verify(auditService)
+                .record("agent.activate", "agent_definition", "agent-1", null, before);
+    }
+
+    @Test
+    @DisplayName("active 返回实际生效与配置的核算智能体")
+    void activeReportsEffectiveAgent() {
+        AgentDefinition effective = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
+        when(registry.activeAgent()).thenReturn(effective);
+        when(registry.activeAgentId()).thenReturn("configured-9");
+
+        Map<?, ?> data = (Map<?, ?>) controller.active().data();
+
+        assertEquals("agent-1", data.get("agentId"));
+        assertEquals("个税顾问", data.get("name"));
+        assertEquals("configured-9", data.get("configured"));
     }
 
     private static List<AgentDefinition> ids(ApiResponse response) {

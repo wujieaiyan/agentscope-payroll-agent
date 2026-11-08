@@ -917,6 +917,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 8px;
 }
 .agent-card-head { display: flex; align-items: center; gap: 10px; }
+.agent-active-badge {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #86efac;
+  white-space: nowrap;
+}
+.agent-active-hint { color: #15803d; }
 .agent-avatar { font-size: 26px; line-height: 1; }
 .agent-title { display: flex; flex-direction: column; gap: 2px; }
 .agent-tags { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -960,4 +971,146 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   align-items: center;
   gap: 6px;
   font-size: 13px;
+}
+
+/* ---------------- 流程编排 ---------------- */
+.flows-page {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr) minmax(220px, 280px);
+  gap: 16px;
+  align-items: start;
+}
+.flow-list { margin-bottom: 0; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.flow-list h2 { margin: 0; }
+.flow-new { width: 100%; }
+.flow-item {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+.flow-item:hover { background: #f1f5f9; }
+.flow-item.active { border-color: var(--primary); background: #eff6ff; }
+.flow-item p { margin: 3px 0 0; }
+.flow-item-head { display: flex; align-items: center; gap: 8px; }
+.flow-item-head strong { font-size: 13px; }
+.flow-badge {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #86efac;
+}
+.flow-storage { margin: 6px 0 0; word-break: break-all; line-height: 1.5; }
+.flow-main { margin-bottom: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.flow-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.flow-name { flex: 1 1 180px; min-width: 120px; }
+.flow-canvas-wrap {
+  display: flex;
+  height: 540px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+.flow-palette {
+  width: 118px;
+  flex: none;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-palette p { margin: 2px 0 0; line-height: 1.45; }
+.flow-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  cursor: grab;
+  user-select: none;
+  font-size: 13px;
+}
+.flow-palette-item:hover { border-color: var(--primary); color: var(--primary); }
+.flow-palette-icon { font-size: 15px; line-height: 1; }
+.flow-canvas { flex: 1; min-width: 0; height: 100%; }
+.flow-canvas .vue-flow__node {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  width: 190px;
+  font-size: 12px;
+  box-shadow: none;
+}
+.flow-canvas .vue-flow__node-start,
+.flow-canvas .vue-flow__node-end { width: 106px; }
+.flow-canvas .vue-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--primary);
+  border: 2px solid #fff;
+}
+.flow-canvas .vue-flow__edge-path { stroke: #64748b; stroke-width: 1.6; }
+.flow-canvas .vue-flow__edge.selected .vue-flow__edge-path { stroke: var(--primary); }
+.flow-canvas .vue-flow__edge-textbg { fill: #f8fafc; }
+.flow-canvas .vue-flow__edge-text { font-size: 11px; fill: #475569; }
+.flow-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+}
+.flow-start { justify-content: center; background: #ecfdf5; border-color: #6ee7b7; color: #047857; font-weight: 600; }
+.flow-end { justify-content: center; background: #eef2ff; border-color: #c7d2fe; color: #3730a3; font-weight: 600; }
+.flow-agent { border-left: 3px solid var(--primary); }
+.flow-avatar { font-size: 20px; line-height: 1; flex: none; }
+.flow-node-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.flow-node-text small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-condition {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+.flow-condition small { color: #92400e; font-size: 11px; }
+.flow-branch { position: absolute; right: -24px; font-size: 11px; color: var(--muted); }
+.flow-branch-true { top: 22%; }
+.flow-branch-false { top: 58%; }
+.flow-desc { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.flow-desc textarea { width: 100%; font: inherit; }
+.flow-props { margin-bottom: 0; display: flex; flex-direction: column; gap: 10px; }
+.flow-props h2 { margin: 0 0 2px; }
+.flow-props label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.flow-props hr { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+.flow-errors {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.flow-errors p { margin: 2px 0; }
+
+@media (max-width: 1100px) {
+  .flows-page { grid-template-columns: 1fr; }
+  .flow-canvas-wrap { height: 460px; }
 }

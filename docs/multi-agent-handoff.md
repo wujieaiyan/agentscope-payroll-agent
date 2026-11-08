@@ -678,3 +678,96 @@ ChatTraceWebTest test
 
 
 
+
+## 20. 智能体流程编排（2026-11-08，分支 `feature/agent-orchestration`）
+
+> 本节补上 §19 的“已知限制 1”：智能体定义现已接入对话编排。
+
+### 需求与结论
+
+管理台新增“流程编排”页签：用 Vue Flow 拖拽画布把已注册智能体与条件节点连成 DAG，
+管理员把某条流程设为全局默认后，下一轮对话按该流程执行。已确认的取舍：
+
+| 决策点 | 结论 |
+| --- | --- |
+| 范围 | 完整 DAG：分支、汇合、多流程、全局默认流程 |
+| 节点 | 开始 / 智能体 / 条件 / 结束；条件只允许预设枚举 |
+| 编辑器 | 本地 vendored Vue Flow 1.42.1 + Vue 3.5.45，无构建链 |
+| 生效 | 全局默认流程，保存/激活后下一轮对话生效 |
+| 并行 | 同层就绪节点真并行，每节点独立智能体/工具/追溯 |
+
+规格与 JSON 模型见 [agent-orchestration.md](agent-orchestration.md)。
+
+### 关键文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `domain/FlowNode.java` / `FlowEdge.java` / `FlowDefinition.java` | camelCase 流程模型 |
+| `service/FlowValidator.java` | 结构、引用、分支锚点、无环、可达性校验 |
+| `service/AgentFlowExecutor.java` | 分层调度、条件求值、跳过传播、汇合输入与最终答复选择 |
+| `service/SynchronizedChatStreamListener.java` | 并行节点 SSE 事件串行化 |
+| `skill/NacosFlowRegistry.java` | `payroll-flows.json` / `payroll-flow-settings.json` 读写、内置流程 |
+| `web/FlowAdminController.java` | `/api/admin/flows` CRUD、激活、审计 |
+| `agent/PayrollAgentFactory.java` | `createFlowNodeAgent` / `createFlowModel`，按技能选择角色提示词 |
+| `service/PayrollChatService.java` | 每轮解析默认流程；失败回退既有链路 |
+| `static/flows.js` + `style.css` + `index.html` | Vue Flow 画布、节点面板、属性面板 |
+
+### 执行语义
+
+1. 每轮对话读取 `activeFlow()`；为空、结构非法、引用智能体缺失/下架时告警并回退原链路。
+2. 从 START 出发，按“所有入边已确定”逐层推进；同层节点提交固定线程池并行执行。
+3. 节点输入 = 本轮问题与会话线索 + 所有经**选中路径**可达的上游输出（按拓扑层级排序）。
+   兄弟分支输出不会串入；汇合节点自然拿到多条分支结果。
+4. 条件节点不调用模型：`HAS_CALCULATION_TARGETS` / `HAS_TOOL_ERROR` /
+   `OUTPUT_CONTAINS`，只统计祖先节点结果。
+5. 未选中的边标记阻断；无选中入边的节点标记 SKIPPED 并继续阻断下游；END 不执行模型。
+6. 最终答复取 END 选中路径中拓扑层级最深的节点输出；同层多分支则按节点 id 拼接。
+7. 每节点独立 `ReActAgent` + `PayrollTools` + `ToolTraceRecorder`，结束即关闭 MCP 客户端；
+   模型实例每轮创建一次并由同层节点共享，避免重复探测 Ollama。
+8. 单节点失败整轮失败并返回可定位错误；单阶段超时仍为 150 秒。
+
+### 存储与权限
+
+- 流程列表：Nacos `payroll-flows.json`；默认流程：`payroll-flow-settings.json`。
+- Nacos 未启用：列表回退内置 `payroll-default`，页面只读，默认流程保持未设置。
+- 新增权限 `flow:manage`；内置角色启动时按代码重同步，旧库无需迁移。
+- 审计：`flow.create` / `flow.update` / `flow.delete` / `flow.activate`。
+
+### 前端注意事项
+
+- `flows.js` 与 `agents.js` 相同：保存 `app.mount()` 返回的组件代理（`flowsVm`），
+  才能二次进入页签时调用 `reload()`。
+- 条件节点通过 `sourceHandle=TRUE/FALSE` 区分“是/否”分支；前端两个锚点固定在节点右侧
+  32%/68% 位置，属性面板只暴露预设条件与关键字。
+- 未启用 Nacos 时画布仍可查看与拖动，但保存、删除、激活按钮禁用。
+
+### 测试
+
+- `FlowValidatorTest`（7）：内置流程、智能体引用、条件分支/关键字、环与死路、汇合、名称/端点。
+- `AgentFlowExecutorTest`（11）：线性、真/假分支、工具错误、关键字、同层并行（CyclicBarrier）、
+  汇合输入、跳过传播、节点失败、缺失端点/无答复、坏图。
+- `NacosFlowRegistryTest`（9）：未启用只读、配置缺失/损坏回退、保存/重载、更新保留创建信息、
+  激活、删除保护、写入失败。
+- `FlowAdminControllerTest`（7）：归一化、校验、更新路径 id、删除/激活、审计、列表与 meta。
+- `FlowAdminWebTest`（3）：camelCase、401/403、结构校验 400、未知流程 400。
+- 全量回归命令：`JAVA_HOME="D:\tools\jdk\jdk-17.0.12" mvn test`。
+
+### 人工验收
+
+1. 启动 Nacos 与管理台（`PAYROLL_NACOS_SERVER=http://127.0.0.1:8848`）。
+2. 管理员登录 → “流程编排”：应看到内置“薪酬标准流程”，可拖拽/连线；保存后 Nacos 出现
+   `payroll-flows.json`。
+3. 新建一条包含条件分支的流程，保存并“设为默认”；刷新页面默认标记仍在。
+4. 回到“智能问答”提问：日志出现 `[流程编排] 使用全局默认流程`、节点完成与条件判断行；
+   查询类问题应只执行计算节点并直接返回记录。
+5. 构造两个同层智能体节点，确认日志时间接近且线程名为 `flow-node-*`。
+6. 下架某节点引用的智能体后提问：日志告警并回退既有链路，对话不中断。
+7. 用 HR 账号访问：页签不可见，`/api/admin/flows` 返回 403。
+
+### 已知限制
+
+1. 流程按最后写入覆盖，没有版本号/乐观锁与多实例冲突提示。
+2. 条件只支持三种预设，暂不支持数值比较或自定义表达式。
+3. 节点级失败即整轮失败，没有“忽略失败继续”策略。
+4. 画布未做自动布局；节点较多时需要手动整理位置。
+5. `FlowDefinition.createdBy/createdAt` 由注册表维护，客户端传入值会被忽略。

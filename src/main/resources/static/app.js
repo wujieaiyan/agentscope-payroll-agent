@@ -171,6 +171,8 @@ async function loadHealth() {
     badge.className = 'badge ok';
     const chatModel = $('#chat-model');
     if (chatModel) chatModel.textContent = '模型 ' + (health.chat_model || '未配置');
+    const chatAgent = $('#chat-agent');
+    if (chatAgent) chatAgent.textContent = '核算智能体 ' + (health.chat_agent || '默认流水线');
     setPeriodDefaults(health.data_through_period);
   } catch (error) {
     badge.textContent = '数据库连接失败';
@@ -229,6 +231,7 @@ function showTab(name) {
   if (name === 'departments') loadDepartments(true).catch(showError);
   if (name === 'roles') loadRolesTab().catch(showError);
   if (name === 'agents') initAgentsTab();
+  if (name === 'flows') initFlowsTab();
 }
 
 async function loadEmployees() {

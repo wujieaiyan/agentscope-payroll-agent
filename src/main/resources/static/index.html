@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>薪酬管理台</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="vendor/vue-flow-core.css">
+  <link rel="stylesheet" href="vendor/vue-flow-theme-default.css">
 </head>
 <body>
 <header>
@@ -32,6 +34,7 @@
   <button data-tab="departments" data-permission="department:manage" class="hidden">部门</button>
   <button data-tab="roles" data-permission="role:manage" class="hidden">角色</button>
   <button data-tab="agents" data-permission="agent:manage" class="hidden">Agent 管理</button>
+  <button data-tab="flows" data-permission="flow:manage" class="hidden">流程编排</button>
 </nav>
 
 <main>
@@ -275,6 +278,7 @@
   <section id="tab-chat" class="tab">
     <div class="toolbar">
       <span class="badge" id="chat-model">模型加载中…</span>
+      <span class="badge" id="chat-agent">核算智能体加载中…</span>
       <span class="hint">每个会话拥有独立上下文，消息仅本人可见；对话只做查询、核算与解释，金额始终来自确定性引擎。</span>
     </div>
     <div class="chat-layout">
@@ -397,6 +401,10 @@
   <section class="tab" id="tab-agents">
     <div id="agents-app"></div>
   </section>
+
+  <section class="tab" id="tab-flows">
+    <div id="flows-app"></div>
+  </section>
 </main>
 
 <dialog id="password-dialog" class="dialog">
@@ -416,7 +424,9 @@
 
 <div id="toast" class="toast hidden"></div>
 <script src="vendor/vue.global.prod.js"></script>
+<script src="vendor/vue-flow-core.iife.js"></script>
 <script src="app.js"></script>
 <script src="agents.js"></script>
+<script src="flows.js"></script>
 </body>
 </html>

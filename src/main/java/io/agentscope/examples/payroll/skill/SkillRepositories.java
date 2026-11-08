@@ -3,6 +3,7 @@ package io.agentscope.examples.payroll.skill;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.SkillFilter;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
+import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,9 +36,17 @@ public final class SkillRepositories {
      * 使运行期 Nacos 恢复后无需重启即可切换到外置技能。
      */
     public static SkillFilter filterFor(String skillId) {
-        return SkillFilter.only(
-                skillId + "_" + NacosSkillRepository.SOURCE,
-                skillId + "_" + BuiltInSkillRepository.SOURCE);
+        return filterFor(List.of(skillId));
+    }
+
+    /** 智能体可绑定多个技能，过滤器需要同时放行这些技能的两个来源。 */
+    public static SkillFilter filterFor(List<String> skillIds) {
+        List<String> fullIds = new ArrayList<>(skillIds.size() * 2);
+        for (String skillId : skillIds) {
+            fullIds.add(skillId + "_" + NacosSkillRepository.SOURCE);
+            fullIds.add(skillId + "_" + BuiltInSkillRepository.SOURCE);
+        }
+        return SkillFilter.only(fullIds.toArray(String[]::new));
     }
 
     /**

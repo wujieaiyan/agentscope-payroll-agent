@@ -44,8 +44,9 @@ public class AgentAdminController {
     private final AuditService auditService;
 
     @Autowired
-    public AgentAdminController(AuthService authService, AuditService auditService) {
-        this(new NacosAgentRegistry(), SkillRepositories.create(), authService, auditService);
+    public AgentAdminController(
+            NacosAgentRegistry registry, AuthService authService, AuditService auditService) {
+        this(registry, SkillRepositories.create(), authService, auditService);
     }
 
     AgentAdminController(
@@ -92,7 +93,7 @@ public class AgentAdminController {
         return ApiResponse.ok(agents);
     }
 
-    /** 存储状态：是否可写（Nacos 启用）与配置位置，前端据此禁用保存按钮。 */
+    /** 存储状态：是否可写（Nacos 启用）、配置位置与当前核算智能体。 */
     @GetMapping("/meta")
     @RequirePermission(Permissions.AGENT_MANAGE)
     public ApiResponse meta() {
@@ -103,7 +104,30 @@ public class AgentAdminController {
                 .flatMap(a -> a.tags().stream())
                 .collect(Collectors.toCollection(java.util.TreeSet::new));
         meta.put("tags", tags);
+        meta.put("activeAgentId", registry.activeAgentId());
         return ApiResponse.ok(meta);
+    }
+
+    /** 当前全局核算智能体；配置的智能体不可用时返回实际生效的兜底智能体。 */
+    @GetMapping("/active")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse active() {
+        AgentDefinition effective = registry.activeAgent();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("agentId", effective.id());
+        result.put("name", effective.name());
+        result.put("configured", registry.activeAgentId());
+        return ApiResponse.ok(result);
+    }
+
+    /** 管理员指定全局核算智能体，所有会话下一轮对话生效。 */
+    @PutMapping("/{id}/active")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse setActive(@PathVariable String id) {
+        AgentDefinition before = find(id);
+        String agentId = registry.setActiveAgent(id);
+        auditService.record("agent.activate", "agent_definition", agentId, null, before);
+        return ApiResponse.ok(Map.of("activeAgentId", agentId));
     }
 
     /** 可绑定技能清单，供编辑表单的技能多选。 */

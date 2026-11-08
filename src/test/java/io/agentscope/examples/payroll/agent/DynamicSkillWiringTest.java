@@ -18,6 +18,7 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.examples.payroll.agent.PayrollTools;
+import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
 import io.agentscope.examples.payroll.service.PayrollEngine;
@@ -70,6 +71,44 @@ class DynamicSkillWiringTest {
         assertTrue(SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-calculator_builtin"));
         assertTrue(SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-calculator_nacos"));
         assertTrue(!SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-validator_builtin"));
+    }
+
+    @Test
+    @DisplayName("多技能过滤器同时放行智能体绑定的全部角色")
+    void filterAllowsAllBoundSkills() {
+        var filter = SkillRepositories.filterFor(List.of(RoleSkills.CALCULATOR, RoleSkills.VALIDATOR));
+
+        assertTrue(filter.isAllowed("payroll-calculator_builtin"));
+        assertTrue(filter.isAllowed("payroll-validator_nacos"));
+        assertFalse(filter.isAllowed("payroll-accountant_builtin"));
+    }
+
+    @Test
+    @DisplayName("绑定计算技能的智能体走三段流水线，其余按技能单兵作答")
+    void pipelineDependsOnBoundSkills() {
+        assertTrue(PayrollAgentFactory.isPipeline(null));
+        assertTrue(
+                PayrollAgentFactory.isPipeline(
+                        agentDefinition(List.of(RoleSkills.CALCULATOR, RoleSkills.VALIDATOR))));
+        assertFalse(
+                PayrollAgentFactory.isPipeline(
+                        agentDefinition(List.of(RoleSkills.VALIDATOR))));
+        assertFalse(PayrollAgentFactory.isPipeline(agentDefinition(List.of())));
+    }
+
+    private static AgentDefinition agentDefinition(List<String> skillIds) {
+        return new AgentDefinition(
+                "agent-test",
+                "测试智能体",
+                "🤖",
+                "测试用",
+                List.of(),
+                skillIds,
+                AgentDefinition.VISIBILITY_PUBLIC,
+                AgentDefinition.STATUS_ONLINE,
+                "system",
+                null,
+                null);
     }
 
     @Test

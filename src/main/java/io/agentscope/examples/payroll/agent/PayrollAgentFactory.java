@@ -9,6 +9,7 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
+import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.model.OllamaThinkingModel;
 import io.agentscope.examples.payroll.skill.RoleSkills;
@@ -22,7 +23,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -154,19 +157,53 @@ public final class PayrollAgentFactory {
             ReActAgent validator,
             ReActAgent accountant,
             ReActAgent summarizer,
-            List<McpClientWrapper> mcpClients)
+            List<McpClientWrapper> mcpClients,
+            AgentDefinition activeAgent,
+            boolean pipeline)
             implements AutoCloseable {
 
         public Team {
             mcpClients = mcpClients == null ? List.of() : List.copyOf(mcpClients);
         }
 
+        /** 兼容仅按默认流水线组装的调用方（测试/CLI）。 */
+        public Team(
+                ReActAgent calculator,
+                ReActAgent validator,
+                ReActAgent accountant,
+                ReActAgent summarizer,
+                List<McpClientWrapper> mcpClients) {
+            this(calculator, validator, accountant, summarizer, mcpClients, null, true);
+        }
+
+        /** 配置的核算智能体未变化时复用已有实例，避免每轮重建并重新探测模型。 */
+        public boolean matches(AgentDefinition other) {
+            return signature(activeAgent).equals(signature(other));
+        }
+
+        private static String signature(AgentDefinition agent) {
+            if (agent == null) {
+                return "";
+            }
+            return agent.id()
+                    + "|"
+                    + agent.name()
+                    + "|"
+                    + agent.description()
+                    + "|"
+                    + agent.skillIds();
+        }
+
         @Override
         public void close() {
-            calculator.close();
-            validator.close();
-            accountant.close();
-            summarizer.close();
+            closeAgent(calculator);
+            if (validator != calculator) {
+                closeAgent(validator);
+            }
+            if (accountant != calculator) {
+                closeAgent(accountant);
+            }
+            closeAgent(summarizer);
             for (McpClientWrapper client : mcpClients) {
                 try {
                     client.close();
@@ -175,11 +212,67 @@ public final class PayrollAgentFactory {
                 }
             }
         }
+
+        private static void closeAgent(ReActAgent agent) {
+            if (agent == null) {
+                return;
+            }
+            try {
+                agent.close();
+            } catch (RuntimeException e) {
+                log.warn("[多智能体] 关闭智能体失败", e);
+            }
+        }
+    }
+
+    /** 流程节点运行时：独立智能体 + 该节点注册的 MCP 客户端，结束即释放。 */
+    public record NodeAgent(ReActAgent agent, List<McpClientWrapper> mcpClients)
+            implements AutoCloseable {
+
+        public NodeAgent {
+            mcpClients = mcpClients == null ? List.of() : List.copyOf(mcpClients);
+        }
+
+        @Override
+        public void close() {
+            try {
+                agent.close();
+            } catch (RuntimeException e) {
+                log.warn("[流程编排] 关闭节点智能体失败", e);
+            }
+            for (McpClientWrapper client : mcpClients) {
+                try {
+                    client.close();
+                } catch (RuntimeException e) {
+                    log.warn("[MCP] 关闭节点客户端失败：{}", client.getName(), e);
+                }
+            }
+        }
+    }
+
+    /** 绑定薪酬计算技能的智能体走「计算 → 验证 → 核算」流水线，其余智能体按技能单兵作答。 */
+    public static boolean isPipeline(AgentDefinition activeAgent) {
+        return activeAgent == null || activeAgent.skillIds().contains(RoleSkills.CALCULATOR);
     }
 
     public static Team createTeam(PayrollTools tools) {
+        return createTeam(tools, null);
+    }
+
+    public static Team createTeam(PayrollTools tools, AgentDefinition activeAgent) {
         Model model = buildModel(modelId());
         AgentSkillRepository skillRepository = SkillRepositories.create();
+        ReActAgent summarizer =
+                createAgent(
+                        "PayrollContextAgent",
+                        "薪酬会话上下文压缩器：把较早轮次折叠成不含金额的中文摘要",
+                        SUMMARIZER_PROMPT,
+                        model,
+                        new Toolkit(),
+                        1);
+        if (!isPipeline(activeAgent)) {
+            return createActiveAgentTeam(tools, activeAgent, model, skillRepository, summarizer);
+        }
         AgentSkill calculatorSkill =
                 SkillRepositories.activeSkill(skillRepository, RoleSkills.CALCULATOR);
         AgentSkill validatorSkill =
@@ -229,14 +322,146 @@ public final class PayrollAgentFactory {
                         4,
                         skillRepository,
                         RoleSkills.ACCOUNTANT),
+                summarizer,
+                mcpClients,
+                activeAgent,
+                true);
+    }
+
+    /** 流程编排按节点创建独立智能体；模型实例由调用方按轮次复用，避免重复探测 Ollama。 */
+    public static NodeAgent createFlowNodeAgent(
+            PayrollTools tools, AgentDefinition agent, Model model) {
+        AgentSkillRepository skillRepository = SkillRepositories.create();
+        List<AgentSkill> skills = boundSkills(skillRepository, agent);
+        AgentSkill primary = skills.get(0);
+        Set<String> allowed = flowTools(agent.skillIds());
+        Toolkit toolkit = toolkit(tools, allowed, agent.name(), primary);
+        List<McpClientWrapper> mcpClients =
+                McpToolRegistrar.registerAll(
+                        toolkit,
+                        McpServerConfig.fromEnvironment(),
+                        McpToolRegistrar.defaultFactory());
+        ReActAgent nodeAgent =
                 createAgent(
-                        "PayrollContextAgent",
-                        "薪酬会话上下文压缩器：把较早轮次折叠成不含金额的中文摘要",
-                        SUMMARIZER_PROMPT,
+                        "FlowNode_" + agent.id(),
+                        agent.name() + "：" + (agent.description() == null ? "" : agent.description()),
+                        flowNodePrompt(agent, primary.getSkillId()),
                         model,
-                        new Toolkit(),
-                        1),
-                mcpClients);
+                        toolkit,
+                        12,
+                        skillRepository,
+                        agent.skillIds());
+        return new NodeAgent(nodeAgent, mcpClients);
+    }
+
+    /** 管理员指定的非计算类智能体：技能决定可用工具，单智能体直接面向 HR 作答。 */
+    private static Team createActiveAgentTeam(
+            PayrollTools tools,
+            AgentDefinition activeAgent,
+            Model model,
+            AgentSkillRepository skillRepository,
+            ReActAgent summarizer) {
+        List<AgentSkill> boundSkills = boundSkills(skillRepository, activeAgent);
+        AgentSkill primary = boundSkills.get(0);
+        Set<String> allowed = allowedTools(activeAgent.skillIds());
+        Toolkit toolkit = toolkit(tools, allowed, activeAgent.name(), primary);
+        List<McpClientWrapper> mcpClients =
+                McpToolRegistrar.registerAll(
+                        toolkit,
+                        McpServerConfig.fromEnvironment(),
+                        McpToolRegistrar.defaultFactory());
+        log.info(
+                "[Agent] 核算智能体：{}（{}），技能={}，工具={}",
+                activeAgent.name(),
+                activeAgent.id(),
+                activeAgent.skillIds(),
+                toolkit.getToolNames());
+        ReActAgent agent =
+                createAgent(
+                        "PayrollActiveAgent",
+                        activeAgent.name() + "：" + activeAgent.description(),
+                        activeAgentPrompt(activeAgent, primary.getSkillId()),
+                        model,
+                        toolkit,
+                        12,
+                        skillRepository,
+                        activeAgent.skillIds());
+        return new Team(agent, null, null, summarizer, mcpClients, activeAgent, false);
+    }
+
+    private static List<AgentSkill> boundSkills(
+            AgentSkillRepository repository, AgentDefinition activeAgent) {
+        List<AgentSkill> skills = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String skillId : activeAgent.skillIds()) {
+            if (!seen.add(skillId)) {
+                continue;
+            }
+            if (repository.getSkill(skillId) != null || RoleSkills.ids().contains(skillId)) {
+                skills.add(SkillRepositories.activeSkill(repository, skillId));
+            }
+        }
+        if (skills.isEmpty()) {
+            skills.add(SkillRepositories.activeSkill(repository, RoleSkills.CALCULATOR));
+        }
+        return skills;
+    }
+
+    private static Set<String> allowedTools(List<String> skillIds) {
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String skillId : skillIds) {
+            if (RoleSkills.CALCULATOR.equals(skillId)) {
+                allowed.addAll(CALCULATOR_TOOLS);
+            } else if (RoleSkills.VALIDATOR.equals(skillId)) {
+                allowed.addAll(VALIDATOR_TOOLS);
+            }
+        }
+        if (allowed.isEmpty()) {
+            allowed.addAll(CALCULATOR_TOOLS);
+        }
+        return allowed;
+    }
+
+    /** 流程节点工具白名单：计算/验证技能映射业务工具；入账等只读技能不获得计算工具。 */
+    private static Set<String> flowTools(List<String> skillIds) {
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String skillId : skillIds) {
+            if (RoleSkills.CALCULATOR.equals(skillId)) {
+                allowed.addAll(CALCULATOR_TOOLS);
+            } else if (RoleSkills.VALIDATOR.equals(skillId)) {
+                allowed.addAll(VALIDATOR_TOOLS);
+            }
+        }
+        return allowed;
+    }
+
+    /** 流程节点沿用角色提示词，避免把“第 2/3 环”误当成独立核算智能体。 */
+    private static String flowNodePrompt(AgentDefinition agent, String skillId) {
+        List<String> skillIds = agent.skillIds();
+        if (skillIds.contains(RoleSkills.VALIDATOR)) {
+            return validatorPrompt(skillId);
+        }
+        if (skillIds.contains(RoleSkills.ACCOUNTANT)) {
+            return accountantPrompt(skillId);
+        }
+        if (skillIds.contains(RoleSkills.CALCULATOR)) {
+            return calculatorPrompt(skillId);
+        }
+        return activeAgentPrompt(agent, skillId);
+    }
+
+    private static String activeAgentPrompt(AgentDefinition agent, String skillId) {
+        String description = agent.description() == null ? "" : agent.description();
+        return COMMON_RULES
+                + "\n"
+                + SKILL_BOOT_RULE.formatted(skillId)
+                + """
+                ## 基本职责
+                你是「%s」，管理员已指定你负责本轮会话的薪酬核算。%s
+                严格按已加载的技能处理用户诉求：需要核算时调用工具，核对工具结果后再给出最终 HR 答复；
+                缺少员工、期间或政策信息时明确追问，不得编造任何金额、考勤或员工数据。
+                """
+                        .formatted(agent.name(), description);
     }
 
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */
@@ -259,7 +484,7 @@ public final class PayrollAgentFactory {
             Model model,
             Toolkit toolkit,
             int maxIters) {
-        return createAgent(name, description, sysPrompt, model, toolkit, maxIters, null, null);
+        return createAgent(name, description, sysPrompt, model, toolkit, maxIters, null, List.of());
     }
 
     private static ReActAgent createAgent(
@@ -271,6 +496,26 @@ public final class PayrollAgentFactory {
             int maxIters,
             AgentSkillRepository skillRepository,
             String skillId) {
+        return createAgent(
+                name,
+                description,
+                sysPrompt,
+                model,
+                toolkit,
+                maxIters,
+                skillRepository,
+                skillId == null ? List.of() : List.of(skillId));
+    }
+
+    private static ReActAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            List<String> skillIds) {
         ReActAgent.Builder builder =
                 ReActAgent.builder()
                         .name(name)
@@ -279,9 +524,9 @@ public final class PayrollAgentFactory {
                         .model(model)
                         .toolkit(toolkit)
                         .maxIters(maxIters);
-        if (skillRepository != null && skillId != null) {
+        if (skillRepository != null && !skillIds.isEmpty()) {
             builder.skillRepository(skillRepository)
-                    .skillFilter(SkillRepositories.filterFor(skillId))
+                    .skillFilter(SkillRepositories.filterFor(skillIds))
                     .dynamicSkillsEnabled(true);
         }
         return builder.build();
@@ -316,6 +561,11 @@ public final class PayrollAgentFactory {
     public static String modelId() {
         String configured = System.getenv("PAYROLL_MODEL");
         return configured == null || configured.isBlank() ? DEFAULT_MODEL : configured.trim();
+    }
+
+    /** 流程编排每轮创建一个模型实例，供该轮所有并行节点共享。 */
+    public static Model createFlowModel() {
+        return buildModel(modelId());
     }
 
     public static String ollamaBaseUrl() {

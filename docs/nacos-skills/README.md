@@ -58,6 +58,37 @@ curl -s -X POST "http://127.0.0.1:8848/nacos/v1/cs/configs" \
   --data-urlencode "content@docs/nacos-skills/payroll-calculator.md"
 ```
 
+## 流程编排配置
+
+流程定义与全局默认流程与技能共用同一个 Nacos group：
+
+| 配置 | dataId | 内容 |
+| --- | --- | --- |
+| 流程列表 | `payroll-flows.json` | 流程定义 JSON 数组，模板见同目录 `payroll-flows.json` |
+| 默认流程 | `payroll-flow-settings.json` | `{"activeFlowId":"payroll-default"}` |
+
+- 未发布 `payroll-flows.json` 时，管理台只显示代码内置的 `payroll-default`；
+  未发布 settings 或 `activeFlowId` 为空时，对话沿用既有链路。
+- 设置默认流程后下一轮对话生效；默认流程引用的所有智能体必须处于 `ONLINE`。
+- 流程字段为 camelCase：`nodes[].agentId`、`nodes[].conditionValue`、`edges[].sourceHandle`。
+- 也可以直接在管理台“流程编排”页签拖拽编辑，保存时会自动写回 `payroll-flows.json`。
+
+```bash
+# 发布流程列表
+curl -s -X POST "http://127.0.0.1:8848/nacos/v1/cs/configs" \
+  --data-urlencode "dataId=payroll-flows.json" \
+  --data-urlencode "group=payroll-agent" \
+  --data-urlencode "type=json" \
+  --data-urlencode "content@docs/nacos-skills/payroll-flows.json"
+
+# 把内置标准流程设为全局默认
+curl -s -X POST "http://127.0.0.1:8848/nacos/v1/cs/configs" \
+  --data-urlencode "dataId=payroll-flow-settings.json" \
+  --data-urlencode "group=payroll-agent" \
+  --data-urlencode "type=json" \
+  --data-urlencode "content={\"activeFlowId\":\"payroll-default\"}"
+```
+
 ## 启动与验证
 
 ```bash

@@ -61,6 +61,11 @@ class AgentAdminWebTest {
         assertTrue(meta.contains("\"writable\""), meta);
         assertTrue(meta.contains("\"location\""), meta);
         assertTrue(meta.contains("\"tags\""), meta);
+        assertTrue(meta.contains("\"activeAgentId\""), meta);
+
+        String active = get(admin, "/api/admin/agents/active");
+        assertTrue(active.contains("\"agentId\":\"payroll-calculator\""), active);
+        assertTrue(active.contains("\"configured\""), active);
 
         String skills = get(admin, "/api/admin/agents/skills");
         assertTrue(skills.contains("\"payroll-calculator\""), skills);

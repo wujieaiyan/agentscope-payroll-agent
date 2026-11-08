@@ -172,6 +172,123 @@ class NacosAgentRegistryTest {
         assertTrue(nacos.configs.isEmpty());
     }
 
+    @Test
+    @DisplayName("未配置时核算智能体默认为内置计算专家")
+    void activeAgentDefaultsToCalculator() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgentId());
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgent().id());
+    }
+
+    @Test
+    @DisplayName("设置核算智能体写入 Nacos，新实例可读取")
+    void setActiveAgentPersists() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition saved = registry.save(newAgent(null, "个税顾问"), "admin");
+
+        assertEquals(saved.id(), registry.setActiveAgent(saved.id()));
+        assertEquals(saved.id(), registry.activeAgentId());
+        assertEquals(saved.id(), registry.activeAgent().id());
+        assertTrue(
+                nacos.configs
+                        .get(NacosAgentRegistry.SETTINGS_DATA_ID)
+                        .contains(saved.id()),
+                nacos.configs.toString());
+
+        NacosAgentRegistry reloaded = registry(true);
+        assertEquals(saved.id(), reloaded.activeAgentId());
+        assertEquals(saved.id(), reloaded.activeAgent().id());
+    }
+
+    @Test
+    @DisplayName("只有公开且已上架的智能体才能设为核算智能体")
+    void setActiveAgentRejectsUnavailable() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition privateAgent =
+                registry.save(
+                        newAgent(
+                                null,
+                                "私有顾问",
+                                AgentDefinition.VISIBILITY_PRIVATE,
+                                AgentDefinition.STATUS_ONLINE),
+                        "admin");
+        AgentDefinition offlineAgent =
+                registry.save(
+                        newAgent(
+                                null,
+                                "下架顾问",
+                                AgentDefinition.VISIBILITY_PUBLIC,
+                                AgentDefinition.STATUS_OFFLINE),
+                        "admin");
+
+        PayrollException privateError =
+                assertThrows(
+                        PayrollException.class,
+                        () -> registry.setActiveAgent(privateAgent.id()));
+        assertTrue(privateError.getMessage().contains("公开"), privateError.getMessage());
+
+        PayrollException offlineError =
+                assertThrows(
+                        PayrollException.class,
+                        () -> registry.setActiveAgent(offlineAgent.id()));
+        assertTrue(offlineError.getMessage().contains("上架"), offlineError.getMessage());
+
+        PayrollException missingError =
+                assertThrows(
+                        PayrollException.class, () -> registry.setActiveAgent("no-such-agent"));
+        assertTrue(missingError.getMessage().contains("不存在"), missingError.getMessage());
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgentId());
+    }
+
+    @Test
+    @DisplayName("配置的核算智能体下架或删除后回退内置计算专家")
+    void activeAgentFallsBackWhenUnavailable() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition saved = registry.save(newAgent(null, "个税顾问"), "admin");
+        registry.setActiveAgent(saved.id());
+
+        registry.save(
+                new AgentDefinition(
+                        saved.id(),
+                        "个税顾问",
+                        "🧾",
+                        "负责个税测算",
+                        List.of("税务"),
+                        List.of(RoleSkills.CALCULATOR),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_OFFLINE,
+                        null,
+                        null,
+                        null),
+                "admin");
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgent().id());
+
+        AgentDefinition second = registry.save(newAgent(null, "社保顾问"), "admin");
+        registry.setActiveAgent(second.id());
+        assertTrue(registry.delete(second.id()));
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgent().id());
+    }
+
+    @Test
+    @DisplayName("未启用 Nacos 时核算智能体只读且回退默认")
+    void activeAgentReadOnlyWhenDisabled() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(false);
+
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgentId());
+        assertEquals(RoleSkills.CALCULATOR, registry.activeAgent().id());
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> registry.setActiveAgent(RoleSkills.CALCULATOR));
+        assertTrue(error.getMessage().contains("Nacos 未启用"), error.getMessage());
+    }
+
     private NacosAgentRegistry registry(boolean enabled) {
         NacosSkillSettings settings =
                 new NacosSkillSettings(
@@ -187,6 +304,11 @@ class NacosAgentRegistryTest {
     }
 
     private static AgentDefinition newAgent(String id, String name) {
+        return newAgent(id, name, AgentDefinition.VISIBILITY_PUBLIC, AgentDefinition.STATUS_ONLINE);
+    }
+
+    private static AgentDefinition newAgent(
+            String id, String name, String visibility, String status) {
         return new AgentDefinition(
                 id,
                 name,
@@ -194,8 +316,8 @@ class NacosAgentRegistryTest {
                 "负责个税测算",
                 List.of("税务"),
                 List.of(RoleSkills.CALCULATOR),
-                AgentDefinition.VISIBILITY_PUBLIC,
-                AgentDefinition.STATUS_ONLINE,
+                visibility,
+                status,
                 null,
                 null,
                 null);

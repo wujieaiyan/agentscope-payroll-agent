@@ -23,6 +23,8 @@ import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
@@ -110,6 +112,8 @@ public class PayrollConfiguration {
             PayrollEngine engine,
             H2ChatStore chatStore,
             VectorMemoryService memory,
+            NacosAgentRegistry agentRegistry,
+            NacosFlowRegistry flowRegistry,
             @Value("${payroll.orchestrator:legacy}") String orchestrator) {
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
@@ -121,7 +125,28 @@ public class PayrollConfiguration {
             log.info("[多智能体] 编排模式：手写状态机");
         }
         return (sessionId, userId) ->
-                new PayrollChatService(engine, chatStore, sessionId, userId, graph, memory);
+                new PayrollChatService(
+                        engine,
+                        chatStore,
+                        sessionId,
+                        userId,
+                        graph,
+                        memory,
+                        agentRegistry::activeAgent,
+                        flowRegistry::activeFlow,
+                        agentRegistry::list);
+    }
+
+    /** 智能体定义与全局核算智能体设置都以 Nacos 为存储，管理接口与运行时共享同一实例。 */
+    @Bean
+    public NacosAgentRegistry agentRegistry() {
+        return new NacosAgentRegistry();
+    }
+
+    /** 流程定义与全局默认流程同样存储于 Nacos，管理台与对话运行时共享同一实例。 */
+    @Bean
+    public NacosFlowRegistry flowRegistry() {
+        return new NacosFlowRegistry();
     }
 
     @Bean(destroyMethod = "close")

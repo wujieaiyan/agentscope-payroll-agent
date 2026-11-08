@@ -1,0 +1,54 @@
+[
+  {
+    "id": "payroll-default",
+    "name": "薪酬标准流程",
+    "description": "计算 → 判断是否有核算对象 → 验证 → 核算；查询类问题直接返回计算记录",
+    "nodes": [
+      { "id": "start", "type": "START", "name": "开始", "x": 60, "y": 180 },
+      {
+        "id": "calculator",
+        "type": "AGENT",
+        "name": "① 计算智能体",
+        "agentId": "payroll-calculator",
+        "x": 300,
+        "y": 180
+      },
+      {
+        "id": "check",
+        "type": "CONDITION",
+        "name": "是否有核算对象",
+        "condition": "HAS_CALCULATION_TARGETS",
+        "x": 560,
+        "y": 180
+      },
+      {
+        "id": "validator",
+        "type": "AGENT",
+        "name": "② 验证智能体",
+        "agentId": "payroll-validator",
+        "x": 820,
+        "y": 70
+      },
+      {
+        "id": "accountant",
+        "type": "AGENT",
+        "name": "③ 核算智能体",
+        "agentId": "payroll-accountant",
+        "x": 1080,
+        "y": 70
+      },
+      { "id": "end", "type": "END", "name": "结束", "x": 1340, "y": 180 }
+    ],
+    "edges": [
+      { "id": "e1", "source": "start", "target": "calculator" },
+      { "id": "e2", "source": "calculator", "target": "check" },
+      { "id": "e3", "source": "check", "target": "validator", "sourceHandle": "TRUE" },
+      { "id": "e4", "source": "validator", "target": "accountant" },
+      { "id": "e5", "source": "accountant", "target": "end" },
+      { "id": "e6", "source": "check", "target": "end", "sourceHandle": "FALSE" }
+    ],
+    "createdBy": "system",
+    "createdAt": "2026-11-08T09:00:00",
+    "updatedAt": "2026-11-08T09:00:00"
+  }
+]

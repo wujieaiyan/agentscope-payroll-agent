@@ -21,6 +21,7 @@ import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
@@ -76,18 +77,21 @@ public class PayrollWebController {
     private final AuditService auditService;
     private final AuthService authService;
     private final ApprovalService approvalService;
+    private final NacosAgentRegistry agentRegistry;
 
     public PayrollWebController(
             PayrollServices services,
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
             AuditService auditService,
             AuthService authService,
-            ApprovalService approvalService) {
+            ApprovalService approvalService,
+            NacosAgentRegistry agentRegistry) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
         this.authService = authService;
         this.approvalService = approvalService;
+        this.agentRegistry = agentRegistry;
     }
 
     @GetMapping("/health")
@@ -98,6 +102,7 @@ public class PayrollWebController {
         payload.put("database", services.database().url());
         payload.put("email_mode", "DRY_RUN");
         payload.put("chat_model", services.chat().modelId());
+        payload.put("chat_agent", agentRegistry.activeAgent().name());
         return ApiResponse.ok(payload);
     }
 
