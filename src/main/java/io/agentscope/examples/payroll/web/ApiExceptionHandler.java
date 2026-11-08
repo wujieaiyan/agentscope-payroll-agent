@@ -1,6 +1,8 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.support.AuditContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -20,6 +22,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler({PayrollException.class, IllegalArgumentException.class})
     public ResponseEntity<ApiResponse> handleBadRequest(RuntimeException e) {
         return error(HttpStatus.BAD_REQUEST, e.getMessage());
+    }
+
+    @ExceptionHandler(PayrollConflictException.class)
+    public ResponseEntity<ApiResponse> handleConflict(PayrollConflictException e) {
+        return error(HttpStatus.CONFLICT, e.getMessage());
     }
 
     @ExceptionHandler(UnauthorizedException.class)
@@ -54,6 +61,7 @@ public class ApiExceptionHandler {
     }
 
     private static ResponseEntity<ApiResponse> error(HttpStatus status, String message) {
+        AuditContext.markFailure(message, status.value());
         return ResponseEntity.status(status).body(ApiResponse.error(message));
     }
 }

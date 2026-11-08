@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.web;
 
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -67,6 +68,7 @@ public final class AuthInterceptor implements HandlerInterceptor {
 
     private static void write(HttpServletResponse response, HttpStatus status, String message)
             throws IOException {
+        AuditContext.markFailure(message, status.value());
         response.setStatus(status.value());
         response.setCharacterEncoding("UTF-8");
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);

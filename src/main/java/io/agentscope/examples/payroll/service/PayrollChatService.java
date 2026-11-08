@@ -15,8 +15,11 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.examples.payroll.agent.PayrollTools;
+import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.support.ToolTraceExtractor;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import java.time.Duration;
@@ -55,6 +58,8 @@ public final class PayrollChatService implements PayrollChat {
     private final boolean graphOrchestration;
     private final VectorMemoryService memory;
     private final Object lock = new Object();
+    private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
+    private final List<ChatToolTrace> collectedTraces = new ArrayList<>();
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
@@ -124,6 +129,8 @@ public final class PayrollChatService implements PayrollChat {
             String question = message.trim();
             long startedAt = System.currentTimeMillis();
             Set<String> tools = new LinkedHashSet<>();
+            collectedTraces.clear();
+            traceRecorder.clear();
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             prepareContext(context, events, current.summarizer());
@@ -147,7 +154,12 @@ public final class PayrollChatService implements PayrollChat {
                     reply.length(),
                     context.summarizedTurns(),
                     context.recentTurnCount());
-            return new Reply(reply, List.copyOf(tools), modelId());
+            log.info(
+                    "[多智能体] 工具追溯汇总：{} 次调用，金额类 {} 次",
+                    collectedTraces.size(),
+                    collectedTraces.stream().filter(trace -> !trace.amounts().isEmpty()).count());
+            return new Reply(
+                    reply, List.copyOf(tools), modelId(), List.copyOf(collectedTraces));
         }
     }
 
@@ -323,16 +335,23 @@ public final class PayrollChatService implements PayrollChat {
                                 } else if (event instanceof ToolResultEndEvent result) {
                                     String args = argsOf(argsByCall, result.getToolCallId());
                                     collectTargets(result.getToolCallName(), args, targets);
+                                    ChatToolTrace trace = traceOf(stageKey, result, args);
+                                    collectedTraces.add(trace);
                                     log.info(
-                                            "[多智能体][{}] 工具结束：{}，state={}，参数={}",
+                                            "[多智能体][{}] 工具结束：{}，state={}，耗时={}ms，参数={}，金额={}，员工={}，期间={}",
                                             stageKey,
                                             result.getToolCallName(),
                                             result.getState(),
-                                            preview(args, 300));
+                                            trace.durationMs(),
+                                            preview(args, 300),
+                                            trace.amounts(),
+                                            trace.employees(),
+                                            trace.period());
                                     listener.onToolResult(
                                             result.getToolCallId(),
                                             result.getToolCallName(),
-                                            result.getState().name());
+                                            result.getState().name(),
+                                            trace);
                                 } else if (event instanceof TextBlockDeltaEvent delta) {
                                     streamed.append(delta.getDelta());
                                     if (answerStage) {
@@ -358,6 +377,7 @@ public final class PayrollChatService implements PayrollChat {
                     System.currentTimeMillis() - startedAt,
                     stageTools);
             listener.onAgentEnd(stageKey);
+            traceRecorder.clear();
         }
 
         String text =
@@ -584,6 +604,42 @@ public final class PayrollChatService implements PayrollChat {
         return args == null ? "" : args.toString();
     }
 
+    /**
+     * 内置工具优先使用采集到的参数与结果；MCP 等外部工具没有采集记录，退化为事件里的参数。
+     */
+    private ChatToolTrace traceOf(String stageKey, ToolResultEndEvent result, String args) {
+        ToolTraceRecorder.Entry entry = traceRecorder.take(result.getToolCallName());
+        if (entry != null) {
+            return ChatToolTrace.draft(
+                    result.getToolCallId(),
+                    entry.toolName(),
+                    stageKey,
+                    entry.argsJson(),
+                    entry.resultJson(),
+                    entry.truncated(),
+                    result.getState().name(),
+                    entry.durationMs(),
+                    entry.employees(),
+                    entry.period(),
+                    entry.department(),
+                    entry.amounts());
+        }
+        ToolTraceExtractor.Evidence evidence = ToolTraceExtractor.extract(args, null);
+        return ChatToolTrace.draft(
+                result.getToolCallId(),
+                result.getToolCallName(),
+                stageKey,
+                args,
+                null,
+                false,
+                result.getState().name(),
+                0,
+                evidence.employees(),
+                evidence.period(),
+                evidence.department(),
+                evidence.amounts());
+    }
+
     @Override
     public String modelId() {
         return PayrollAgentFactory.modelId();
@@ -593,6 +649,8 @@ public final class PayrollChatService implements PayrollChat {
     public void reset() {
         synchronized (lock) {
             context = new ConversationContext("", 0);
+            collectedTraces.clear();
+            traceRecorder.clear();
             persistContext(context);
             if (team != null) {
                 team.close();
@@ -610,7 +668,7 @@ public final class PayrollChatService implements PayrollChat {
     private PayrollAgentFactory.Team team() {
         if (team == null) {
             long startedAt = System.currentTimeMillis();
-            team = PayrollAgentFactory.createTeam(new PayrollTools(engine));
+            team = PayrollAgentFactory.createTeam(new PayrollTools(engine, traceRecorder));
             log.info(
                     "[多智能体] 智能体初始化耗时 {} ms",
                     System.currentTimeMillis() - startedAt);

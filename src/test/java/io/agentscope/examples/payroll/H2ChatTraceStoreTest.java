@@ -1,0 +1,113 @@
+package io.agentscope.examples.payroll;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.agentscope.examples.payroll.db.H2ChatStore;
+import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.domain.ChatMessage;
+import io.agentscope.examples.payroll.domain.ChatSession;
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+class H2ChatTraceStoreTest {
+
+    private H2ChatStore store;
+
+    @BeforeEach
+    void setUp() {
+        PayrollDatabase database = PayrollDatabase.inMemory("chat-trace-" + System.nanoTime());
+        store = new H2ChatStore(database);
+    }
+
+    @Test
+    @DisplayName("助手消息与工具追溯同事务落库，可按消息查询")
+    void savesAndLoadsTraces() {
+        ChatSession session = store.create(1L, "追溯会话");
+        ChatToolTrace trace = trace("call-1", "calculate_payroll", "21000.50");
+
+        ChatMessage saved =
+                store.appendAssistant(
+                        session.id(),
+                        "张伟实发工资 21000.50 元",
+                        List.of("calculate_payroll"),
+                        "stub:test",
+                        List.of(trace));
+
+        assertTrue(saved.id() > 0);
+        assertEquals(H2ChatStore.ROLE_ASSISTANT, saved.role());
+
+        List<ChatToolTrace> loaded = store.traces(session.id(), saved.id());
+        assertEquals(1, loaded.size());
+        ChatToolTrace item = loaded.get(0);
+        assertEquals("call-1", item.toolCallId());
+        assertEquals("calculate_payroll", item.toolName());
+        assertEquals("calculator", item.agent());
+        assertEquals("SUCCESS", item.resultState());
+        assertEquals(42, item.durationMs());
+        assertEquals(List.of("EMP001"), item.employees());
+        assertEquals("2026-10", item.period());
+        assertEquals("研发部", item.department());
+        assertEquals(new BigDecimal("21000.50"), item.amounts().get("net_pay"));
+        assertEquals(saved.id(), item.messageId());
+        assertEquals(session.id(), item.sessionId());
+        assertTrue(item.argsJson().contains("EMP001"));
+        assertTrue(item.resultJson().contains("OK"));
+    }
+
+    @Test
+    @DisplayName("不同会话无法读取他人消息的依据")
+    void isolatesTracesBySession() {
+        ChatSession first = store.create(1L, "会话一");
+        ChatSession second = store.create(2L, "会话二");
+        ChatMessage saved =
+                store.appendAssistant(
+                        first.id(), "回答", List.of(), "stub:test", List.of(trace("call-1", "t", "1")));
+
+        assertTrue(store.traces(second.id(), saved.id()).isEmpty());
+        assertEquals(1, store.traces(first.id(), saved.id()).size());
+    }
+
+    @Test
+    @DisplayName("清空会话会同时删除追溯，删除会话同样级联")
+    void clearsAndDeletesTraces() {
+        ChatSession session = store.create(1L, "会话");
+        ChatMessage saved =
+                store.appendAssistant(
+                        session.id(), "回答", List.of(), "stub:test", List.of(trace("call-1", "t", "1")));
+
+        store.clear(session.id());
+        assertTrue(store.messages(session.id()).isEmpty());
+        assertTrue(store.traces(session.id(), saved.id()).isEmpty());
+
+        ChatMessage again =
+                store.appendAssistant(
+                        session.id(), "再回答", List.of(), "stub:test", List.of(trace("call-2", "t", "2")));
+        assertEquals(1, store.traces(session.id(), again.id()).size());
+        store.delete(session.id());
+        assertTrue(store.traces(session.id(), again.id()).isEmpty());
+    }
+
+    private static ChatToolTrace trace(String callId, String toolName, String netPay) {
+        return ChatToolTrace.draft(
+                callId,
+                toolName,
+                "calculator",
+                "{\"employee_id\":\"EMP001\",\"period\":\"2026-10\"}",
+                "{\"status\":\"OK\",\"data\":{\"employee_id\":\"EMP001\",\"net_pay\":"
+                        + netPay
+                        + "}}",
+                false,
+                "SUCCESS",
+                42,
+                List.of("EMP001"),
+                "2026-10",
+                "研发部",
+                Map.of("net_pay", new BigDecimal(netPay)));
+    }
+}

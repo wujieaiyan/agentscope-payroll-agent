@@ -2,19 +2,27 @@ package io.agentscope.examples.payroll.web;
 
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.domain.AttendanceSummary;
+import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.CityPolicy;
 import io.agentscope.examples.payroll.domain.Employee;
+import io.agentscope.examples.payroll.domain.EmployeeView;
+import io.agentscope.examples.payroll.domain.PayrollEmailReport;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.domain.PayrollRun;
+import io.agentscope.examples.payroll.domain.PayrollRunDetail;
 import io.agentscope.examples.payroll.domain.PerformanceReview;
 import io.agentscope.examples.payroll.domain.ReviewView;
+import io.agentscope.examples.payroll.service.ApprovalService;
+import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.support.Permissions;
+import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -65,12 +73,21 @@ public class PayrollWebController {
 
     private final PayrollServices services;
     private final Executor chatStreamExecutor;
+    private final AuditService auditService;
+    private final AuthService authService;
+    private final ApprovalService approvalService;
 
     public PayrollWebController(
             PayrollServices services,
-            @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
+            @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
+            AuditService auditService,
+            AuthService authService,
+            ApprovalService approvalService) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
+        this.auditService = auditService;
+        this.authService = authService;
+        this.approvalService = approvalService;
     }
 
     @GetMapping("/health")
@@ -96,18 +113,28 @@ public class PayrollWebController {
     @RequirePermission(Permissions.EMPLOYEE_WRITE)
     public ApiResponse saveEmployee(@RequestBody Employee employee) {
         H2PayrollRepository repository = services.repository();
+        EmployeeView before =
+                employee.employeeId() == null || employee.employeeId().isBlank()
+                        ? null
+                        : repository.findEmployeeView(employee.employeeId()).orElse(null);
         repository.saveEmployee(employee);
-        return ApiResponse.ok(
+        EmployeeView after =
                 repository
                         .findEmployeeView(employee.employeeId())
-                        .orElseThrow(() -> new PayrollException("员工保存后无法读取")));
+                        .orElseThrow(() -> new PayrollException("员工保存后无法读取"));
+        auditService.record("employee.save", "employee", after.employeeId(), before, after);
+        return ApiResponse.ok(after);
     }
 
     @PostMapping("/employees/{employeeId}/deactivate")
     @RequirePermission(Permissions.EMPLOYEE_WRITE)
     public ApiResponse deactivateEmployee(@PathVariable String employeeId) {
-        services.repository().deactivateEmployee(employeeId);
-        return ApiResponse.ok(Map.of("employee_id", employeeId, "active", false));
+        H2PayrollRepository repository = services.repository();
+        EmployeeView before = repository.findEmployeeView(employeeId).orElse(null);
+        repository.deactivateEmployee(employeeId);
+        Map<String, Object> after = Map.of("employee_id", employeeId, "active", false);
+        auditService.record("employee.deactivate", "employee", employeeId, before, after);
+        return ApiResponse.ok(after);
     }
 
     @GetMapping("/reviews")
@@ -140,14 +167,30 @@ public class PayrollWebController {
         if (repository.findEmployee(review.employeeId()).isEmpty()) {
             throw new PayrollException("员工不存在或已停用：" + review.employeeId());
         }
-        return ApiResponse.ok(repository.saveReview(review));
+        PerformanceReview before = findReview(repository, review.employeeId(), review.period());
+        PerformanceReview after = repository.saveReview(review);
+        auditService.record(
+                "review.save",
+                "review",
+                review.employeeId() + ":" + review.period(),
+                before,
+                after);
+        return ApiResponse.ok(after);
     }
 
     @DeleteMapping("/reviews/{employeeId}/{period}")
     @RequirePermission(Permissions.REVIEW_WRITE)
     public ApiResponse deleteReview(
             @PathVariable String employeeId, @PathVariable String period) {
-        services.repository().deleteReview(employeeId, period);
+        H2PayrollRepository repository = services.repository();
+        PerformanceReview before = findReview(repository, employeeId, period);
+        repository.deleteReview(employeeId, period);
+        auditService.record(
+                "review.delete",
+                "review",
+                employeeId + ":" + period,
+                before,
+                Map.of("deleted", true));
         return ApiResponse.ok(Map.of("deleted", true));
     }
 
@@ -161,7 +204,10 @@ public class PayrollWebController {
     @RequirePermission(Permissions.POLICY_WRITE)
     public ApiResponse savePolicy(
             @PathVariable String city, @RequestBody PayrollPolicy policy) {
-        services.repository().savePolicy(new CityPolicy(city, policy, null));
+        H2PayrollRepository repository = services.repository();
+        PayrollPolicy before = repository.policyFor(city);
+        repository.savePolicy(new CityPolicy(city, policy, null));
+        auditService.record("policy.save", "city_policy", city, before, policy);
         return ApiResponse.ok(Map.of("city", city, "saved", true));
     }
 
@@ -186,7 +232,15 @@ public class PayrollWebController {
         if (repository.findEmployee(attendance.employeeId()).isEmpty()) {
             throw new PayrollException("员工不存在或已停用：" + attendance.employeeId());
         }
-        return ApiResponse.ok(repository.saveAttendance(attendance));
+        AttendanceSummary before =
+                repository.attendanceForPeriod(period).stream()
+                        .filter(item -> item.employeeId().equals(employeeId))
+                        .findFirst()
+                        .orElse(null);
+        AttendanceSummary after = repository.saveAttendance(attendance);
+        auditService.record(
+                "attendance.save", "attendance", employeeId + ":" + period, before, after);
+        return ApiResponse.ok(after);
     }
 
     @PostMapping("/chat")
@@ -227,7 +281,7 @@ public class PayrollWebController {
         log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
         try {
             services.chat()
-                    .stream(message, ChatSse.bridge(channel, reply -> { }));
+                    .stream(message, ChatSse.bridge(channel, reply -> null));
             emitter.complete();
             log.info("[SSE] 对话完成：耗时={}ms", System.currentTimeMillis() - startedAt);
         } catch (PayrollException e) {
@@ -274,8 +328,9 @@ public class PayrollWebController {
         if (bytes.length > MAX_UPLOAD_BYTES) {
             throw new PayrollException("Excel 文件过大，最大支持 10 MB");
         }
-        return ApiResponse.ok(
-                services.excelImportService().importWorkbook(importType, bytes));
+        Object result = services.excelImportService().importWorkbook(importType, bytes);
+        auditService.record("import.excel", "import", importType.key(), null, result);
+        return ApiResponse.ok(result);
     }
 
     @GetMapping("/runs")
@@ -304,8 +359,70 @@ public class PayrollWebController {
     @PostMapping("/runs/{runId}/finalize")
     @RequirePermission(Permissions.PAYROLL_WRITE)
     public ApiResponse finalizeRun(@PathVariable String runId) {
-        return ApiResponse.ok(
-                services.runService().finalizeRun(parseLong(runId, "批次号")));
+        long id = parseLong(runId, "批次号");
+        PayrollRun before = services.runService().detail(id).run();
+        PayrollRunDetail detail = services.runService().finalizeRun(id);
+        auditService.record(
+                "payroll.finalize", "payroll_run", String.valueOf(id), before, detail.run());
+        return ApiResponse.ok(detail);
+    }
+
+    @PostMapping("/runs/{runId}/submit-approval")
+    @RequirePermission(Permissions.PAYROLL_WRITE)
+    public ApiResponse submitApproval(
+            @PathVariable String runId,
+            @RequestBody(required = false) ApprovalCommentRequest request,
+            HttpServletRequest http) {
+        long id = parseLong(runId, "批次号");
+        PayrollRun before = services.runService().detail(id).run();
+        AuthUser actor = authService.currentUser(http);
+        PayrollRunDetail detail =
+                approvalService.submit(id, actor, request == null ? null : request.comment());
+        auditService.record(
+                "payroll.submit_approval",
+                "payroll_run",
+                String.valueOf(id),
+                before,
+                detail.run());
+        return ApiResponse.ok(detail);
+    }
+
+    @PostMapping("/runs/{runId}/approve")
+    @RequirePermission(Permissions.PAYROLL_APPROVE)
+    public ApiResponse approveRun(
+            @PathVariable String runId,
+            @RequestBody(required = false) ApprovalCommentRequest request,
+            HttpServletRequest http) {
+        long id = parseLong(runId, "批次号");
+        PayrollRun before = services.runService().detail(id).run();
+        AuthUser actor = authService.currentUser(http);
+        PayrollRunDetail detail =
+                approvalService.approve(id, actor, request == null ? null : request.comment());
+        auditService.record(
+                "payroll.approve", "payroll_run", String.valueOf(id), before, detail.run());
+        return ApiResponse.ok(detail);
+    }
+
+    @PostMapping("/runs/{runId}/reject")
+    @RequirePermission(Permissions.PAYROLL_APPROVE)
+    public ApiResponse rejectRun(
+            @PathVariable String runId,
+            @RequestBody(required = false) RejectRequest request,
+            HttpServletRequest http) {
+        long id = parseLong(runId, "批次号");
+        PayrollRun before = services.runService().detail(id).run();
+        AuthUser actor = authService.currentUser(http);
+        PayrollRunDetail detail =
+                approvalService.reject(id, actor, request == null ? null : request.reason());
+        auditService.record(
+                "payroll.reject", "payroll_run", String.valueOf(id), before, detail.run());
+        return ApiResponse.ok(detail);
+    }
+
+    @GetMapping("/runs/{runId}/approvals")
+    @RequirePermission(Permissions.PAYROLL_READ)
+    public ApiResponse runApprovals(@PathVariable String runId) {
+        return ApiResponse.ok(approvalService.events(parseLong(runId, "批次号")));
     }
 
     @PostMapping("/runs/{runId}/send")
@@ -314,8 +431,12 @@ public class PayrollWebController {
             @PathVariable String runId,
             @RequestBody(required = false) SendRequest request) {
         boolean confirm = request != null && request.confirm();
-        return ApiResponse.ok(
-                services.runService().sendAll(parseLong(runId, "批次号"), confirm));
+        long id = parseLong(runId, "批次号");
+        PayrollRun before = services.runService().detail(id).run();
+        PayrollEmailReport report = services.runService().sendAll(id, confirm);
+        PayrollRun after = services.runService().detail(id).run();
+        auditService.record("payroll.send", "payroll_run", String.valueOf(id), before, after);
+        return ApiResponse.ok(report);
     }
 
     @GetMapping("/runs/{runId}/excel")
@@ -346,6 +467,14 @@ public class PayrollWebController {
                 .filename(filename, StandardCharsets.UTF_8)
                 .build()
                 .toString();
+    }
+
+    private static PerformanceReview findReview(
+            H2PayrollRepository repository, String employeeId, String period) {
+        return repository.reviews(period).stream()
+                .filter(item -> item.employeeId().equalsIgnoreCase(employeeId))
+                .findFirst()
+                .orElse(null);
     }
 
     private static String requirePeriod(String period) {
@@ -392,6 +521,14 @@ public class PayrollWebController {
 
     /** 发送请求：必须显式 confirm=true。 */
     public record SendRequest(boolean confirm) {
+    }
+
+    /** 提交/审批备注（可空）。 */
+    public record ApprovalCommentRequest(String comment) {
+    }
+
+    /** 驳回原因（必填）。 */
+    public record RejectRequest(String reason) {
     }
 
     /** 对话请求。 */

@@ -4,6 +4,7 @@ import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatSession;
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.memory.MemorySeed;
 import io.agentscope.examples.payroll.memory.MemorySource;
@@ -145,19 +146,36 @@ public final class ChatSessionManager implements AutoCloseable {
         }
     }
 
-    public void complete(long userId, long sessionId, PayrollChat.Reply reply) {
+    /**
+     * 保存助手回答及其工具追溯，返回消息 id；失败时返回 null，SSE 仍会正常结束。
+     */
+    public Long complete(long userId, long sessionId, PayrollChat.Reply reply) {
         try {
-            store.append(
+            ChatMessage saved =
+                    store.appendAssistant(
+                            sessionId,
+                            reply.reply(),
+                            reply.tools(),
+                            reply.model(),
+                            reply.traces());
+            log.info(
+                    "[会话] 回答已保存：sessionId={}，messageId={}，工具追溯={}条",
                     sessionId,
-                    H2ChatStore.ROLE_ASSISTANT,
-                    reply.reply(),
-                    reply.tools(),
-                    reply.model());
+                    saved.id(),
+                    reply.traces() == null ? 0 : reply.traces().size());
+            return saved.id();
         } catch (RuntimeException e) {
             log.error("[会话] 保存回答失败：sessionId={}", sessionId, e);
+            return null;
         } finally {
             busy.remove(sessionId);
         }
+    }
+
+    /** 按消息读取计算依据，先校验会话归属。 */
+    public List<ChatToolTrace> traces(long userId, long sessionId, long messageId) {
+        store.requireOwned(sessionId, userId);
+        return store.traces(sessionId, messageId);
     }
 
     public void fail(long userId, long sessionId, String message) {

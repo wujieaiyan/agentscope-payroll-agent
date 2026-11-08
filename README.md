@@ -44,13 +44,14 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 发薪前校验 | 勾稽关系、社保基数上下限、实发是否为负等 6 项检查 |
 | 考勤核对 | 事假、病假、旷工、工作日/休息日/法定节假日加班 |
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
-| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 17 项权限码；用户、部门、角色均可在管理台维护 |
+| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 20 项权限码；用户、部门、角色均可在管理台维护 |
 | 多用户会话 | 每个登录用户拥有独立会话列表；同一用户可打开多个会话窗口，消息按会话持久化并按用户隔离 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
 | 导入模板 | 管理台一键下载标准表头与填写说明，避免列名不一致 |
 | 对话界面 | “智能问答”页签由三个智能体串行完成：计算 → 验证 → 核算，SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
 | 城市政策 | 每个城市独立维护个税参数、社保公积金比例与基数上下限 |
-| 工资批次 | 预览 → 人工微调 → 出账（服务端重算）→ 确认发送 |
+| 工资批次 | 预览 → 人工微调 → 提交审批 → 审批通过 → 出账（服务端重算）→ 确认发送 |
+| 审批链 | 全局/部门审批链可配置优先级与金额区间；提交人不能自批；金额指纹固定审批快照，审批后数据变化必须重新提交 |
 | Excel 导出 | 工资明细、核算失败、出账说明三个工作表 |
 | 明细入库 | 批次、逐人明细、微调快照、失败原因、邮件投递审计全部落 H2 |
 | 邮件发送 | 仅 dry-run：逐人返回成功/失败状态与失败原因，不真实投递 |
@@ -140,19 +141,30 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
    未维护的城市回落到 `默认` 政策；若 `默认` 也未维护则核算报错。
 4. **考勤**：按 `员工 + 期间` 维护事假、病假、旷工与三类加班小时数。
    目标月份考勤缺失时核算失败关闭，不把缺勤当全勤。支持 Excel 批量导入并覆盖同期间记录。
-5. **工资批次**：选择期间与范围（全员或某部门）预览；有失败员工时不能出账。
+5. **工资批次**：选择期间与范围（全员或某部门）预览；有失败员工时不能提交审批。
    可对个别员工微调绩效奖金或其他补贴（微调值是最终值，不再叠加系数），
-   页面会提示未应用的修改并禁用出账。
-6. **出账**：服务端按微调快照重新核算，写入 `FINALIZED`，生成 `output/payroll-<期间>-run<id>.xlsx`。
-7. **发送**：必须显式确认；发送后展示逐人结果（成功/失败及原因），批次进入 `SENT`，重复发送被拒绝。
-8. **智能问答**：在管理台直接提问，回答只做查询、核算与解释；数据维护仍走对应页签，
-   金额始终来自确定性引擎。左侧“我的会话”可新建多个窗口，每个窗口独立上下文；
-   消息持久化并按登录用户隔离。对话依赖 `PAYROLL_MODEL`；模型不可用时不影响其他管理功能。
+   页面会提示未应用的修改并禁用提交审批。
+6. **提交审批**：批次进入 `PENDING_APPROVAL`，按“部门优先、金额区间、优先级”匹配审批链，
+   并把期间、范围与逐人结果序列化为 SHA-256 金额指纹。
+7. **审批**：具备 `payroll:approve` 的用户可通过或驳回（必须填写原因）；提交人不能审批/驳回
+   自己提交的批次。审批时重新计算指纹，提交后任何明细变化都会返回 409 并要求重新提交。
+8. **出账**：审批通过后服务端按微调快照重新核算并与审批指纹比对，一致才写入 `FINALIZED`，
+   生成 `output/payroll-<期间>-run<id>.xlsx`；不一致同样返回 409。
+9. **发送**：必须显式确认；发送后展示逐人结果（成功/失败及原因），批次进入 `SENT`，重复发送被拒绝。
+10. **审批链配置**：`approval:manage` 用户可在“审批链”页签维护全局/部门流程。同一范围只能有一条
+    生效流程；部门流程优先于全局流程，再按优先级与创建顺序匹配。
+11. **智能问答**：在管理台直接提问，回答只做查询、核算与解释；数据维护仍走对应页签，
+    金额始终来自确定性引擎。左侧“我的会话”可新建多个窗口，每个窗口独立上下文；
+    消息持久化并按登录用户隔离。对话依赖 `PAYROLL_MODEL`；模型不可用时不影响其他管理功能。
 
 批次状态机：
 
 ```
-DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
+DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> FINALIZED --确认发送--> SENT
+                        |      ^
+                    驳回|      |重新提交
+                        v      |
+                     REJECTED --
 ```
 
 ## 登录、用户与权限
@@ -167,12 +179,13 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 
 | 角色 | 说明 | 主要权限 |
 | --- | --- | --- |
-| `ADMIN` | 系统管理员 | 全部 17 项权限，含用户、部门、角色管理 |
-| `HR` | 人事专员 | 员工/考核/考勤/工资批次读写、Excel 导入、智能问答；政策只读 |
+| `ADMIN` | 系统管理员 | 全部 20 项权限，含用户、部门、角色、审计与审批链管理 |
+| `HR` | 人事专员 | 员工/考核/考勤/工资批次读写、审批工资批次、Excel 导入、智能问答；政策只读 |
 | `VIEWER` | 只读访客 | 员工/考核/政策/考勤/工资批次/部门/角色只读 + 智能问答 |
 
 权限码按“查看/维护”成对划分：`employee:*`、`review:*`、`policy:*`、`attendance:*`、`payroll:*`，
-外加 `import:use`、`chat:use`、`department:read|manage`、`role:read|manage`、`user:manage`。
+外加 `payroll:approve`、`approval:manage`、`import:use`、`chat:use`、`department:read|manage`、
+`role:read|manage`、`user:manage`、`audit:read`。
 自定义角色可自由组合权限码；内置角色不可修改或删除。
 
 安全规则：不能停用自己或修改自己的角色；系统始终保留至少一名启用状态的管理员；
@@ -193,17 +206,35 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `thinking` | `{"text":"增量"}` | 追加模型原生思考内容 |
 | `tool_start` | `{"tool_call_id","name"}` | 新增工具步骤 |
 | `tool_args` | `{"tool_call_id","text"}` | 追加工具参数 JSON |
-| `tool_result` | `{"tool_call_id","name","state"}` | 标记成功/失败等状态 |
+| `tool_result` | `{"tool_call_id","name","state","duration_ms","amounts","employees","period","department","truncated"}` | 标记工具状态；`amounts` 为从结果中提取的关键金额 |
 | `agent_text` | `{"agent":"validator","text":"增量"}` | 追加中间智能体的阶段输出（计算记录 / 验证记录） |
 | `agent_end` | `{"agent":"calculator"}` | 标记智能体区块完成 |
 | `text` | `{"text":"增量"}` | 追加回答正文（仅核算智能体） |
-| `done` | `{"reply","tools","model"}` | 收尾：移除光标、显示工具汇总、折叠思考面板 |
+| `done` | `{"reply","tools","model","message_id","trace_count"}` | 收尾：移除光标、显示工具汇总、加载“计算依据”面板 |
 | `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
 
 思考面板默认展开、结束后自动折叠并显示耗时，可手动重新展开；工具调用以步骤形式混排在同一时间线中。
 前端按 `agent_start/agent_end` 将阶段提示、思考与工具调用归入对应智能体区块，最终答复只取 `text` 事件。
 流式接口的校验错误（空消息、超长）同样以 `event:error` 返回，避免 `Accept: text/event-stream`
 下无法序列化 JSON 错误体。
+
+### 计算依据（工具调用级追溯）
+
+每次工具调用都会在工具方法内部记录参数、完整结果（超过 8KB 截断并标记）、耗时，
+并由编排层配对 `tool_call_id` 与所在智能体阶段，写入 `chat_tool_traces`。
+助手消息保存成功后，管理台在答复下方显示可折叠的“计算依据”面板：
+
+- 工具名、结果状态、耗时，以及从结果中提取的金额项数；
+- 金额卡片（应发、实发、社保、公积金、税额、合计等）、关联员工、期间与部门；
+- 参数与结果的格式化 JSON；结果为批量核算时只提取顶层合计，避免逐人明细刷屏。
+
+面板数据实时来自 `done.message_id`，历史消息则在加载时按需查询；接口如下：
+
+```text
+GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
+```
+
+追溯数据只随会话保存，不写入审计日志；查询前校验会话归属，跨用户返回 400。
 
 ## 多智能体编排
 
@@ -277,17 +308,22 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 [多智能体] 计算智能体工具集：[...]
 [多智能体][calculator] 阶段开始：① 计算智能体：理解诉求并调用核算工具
 [多智能体][calculator] 调用工具：calculate_payroll
-[多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，参数={"employee_id":"张伟","period":"2026-10"}
+[多智能体][calculator] 工具结束：calculate_payroll，state=SUCCESS，耗时=42ms，参数={"employee_id":"张伟","period":"2026-10"}，金额={net_pay=21000.50,...}，员工=[EMP001]，期间=2026-10
 [多智能体][calculator] 阶段结束：耗时=20631ms，工具=[calculate_payroll]
 [多智能体] ① 计算完成：耗时=20631ms，核算对象=1，输出=...
 [多智能体][validator] 阶段开始：② 验证智能体：独立复核勾稽关系
 [多智能体] ② 验证完成：输出=...
 [多智能体][accountant] 阶段开始：③ 核算智能体：汇总计算与验证结论
 [上下文] 压缩完成：折叠 3 轮，保留 4 轮，摘要 86 字，耗时=4932ms
+[多智能体] 工具追溯汇总：3 次调用，金额类 2 次
 [多智能体] 完成：总耗时=36771ms，工具=[calculate_payroll, validate_payroll]，答复长度=242，上下文=摘要6轮+最近4轮
+[会话] 回答已保存：sessionId=1，messageId=8，工具追溯=3条
 ```
 
 - 阶段输入 / 输出全文为 DEBUG；INFO 只打印截断预览，避免日志过长。
+- `[多智能体][阶段] 工具结束` 是追溯核对入口：耗时、金额、员工、期间都来自落库前的同一份快照。
+- `[多智能体] 工具追溯汇总` 与 `[会话] 回答已保存` 可确认采集数量与持久化结果。
+- 前端历史追溯加载失败只输出 `[计算依据] 加载失败：...`，不影响正文。
 - `io.agentscope.core.tool.Toolkit` 的注册日志已降到 WARN，工具集改为每角色一行 INFO。
 - Web 侧另有 `[SSE] 对话开始 / 完成 / 失败` 与耗时日志。
 
@@ -349,6 +385,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
+| `PAYROLL_AUDIT_RETENTION_DAYS` | `180` | 审计日志保留天数，启动时清理更早记录 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
 | `PAYROLL_NACOS_SERVER` | 空 | Nacos 地址；设置后启用角色 Skill 外置，例如 `http://127.0.0.1:8848` |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能读取 |
@@ -391,8 +428,15 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | PUT | `/api/attendance/{employeeId}/{period}` | 保存考勤 |
 | GET | `/api/runs` | 批次历史 |
 | POST | `/api/runs/preview` | 创建 DRAFT 批次（期间、范围、微调） |
-| GET | `/api/runs/{id}` | 批次详情（逐人结果、失败、邮箱状态） |
-| POST | `/api/runs/{id}/finalize` | 重算并出账，生成 Excel |
+| GET | `/api/runs/{id}` | 批次详情（逐人结果、失败、邮箱状态、审批轨迹） |
+| POST | `/api/runs/{id}/submit-approval` | 提交审批，body 可选 `{"comment":"..."}`（需 `payroll:write`） |
+| POST | `/api/runs/{id}/approve` | 审批通过，body 可选 `{"comment":"..."}`（需 `payroll:approve`，不能自批） |
+| POST | `/api/runs/{id}/reject` | 驳回，body `{"reason":"..."}`（需 `payroll:approve`，不能自驳） |
+| GET | `/api/runs/{id}/approvals` | 审批轨迹（需 `payroll:read`） |
+| POST | `/api/runs/{id}/finalize` | 校验审批快照后重算并出账，生成 Excel |
+| GET | `/api/approval/flows` | 审批链列表（需 `approval:manage`） |
+| POST | `/api/approval/flows` | 新建审批链，按 `scope_type` 区分 `GLOBAL`/`DEPARTMENT` |
+| PUT/DELETE | `/api/approval/flows/{id}` | 修改 / 删除审批链 |
 | POST | `/api/runs/{id}/send` | 全员 dry-run 发送，需 `{"confirm":true}` |
 | GET | `/api/runs/{id}/excel` | 下载批次 Excel |
 | POST | `/api/chat` | 管理台对话，body `{"message":"..."}`（≤2000 字符），返回回答与调用工具 |
@@ -403,6 +447,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | PUT | `/api/chat/sessions/{id}` | 重命名会话 |
 | DELETE | `/api/chat/sessions/{id}` | 删除会话及其全部消息 |
 | GET | `/api/chat/sessions/{id}/messages` | 会话历史消息（含角色、内容、工具与模型） |
+| GET | `/api/chat/sessions/{id}/messages/{messageId}/traces` | 单条助手消息的工具调用依据（参数、结果、金额、员工） |
 | POST | `/api/chat/sessions/{id}/messages` | 非流式对话，body `{"message":"..."}` |
 | POST | `/api/chat/sessions/{id}/reset` | 清空会话消息并重置智能体上下文 |
 | POST | `/api/chat/sessions/{id}/stream` | 会话 SSE 流式对话（事件协议见上一节） |
@@ -414,15 +459,30 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 | PUT/DELETE | `/api/admin/roles/{code}` | 修改 / 删除自定义角色（内置角色拒绝） |
 | GET/POST | `/api/admin/departments` | 部门列表 / 新建部门 |
 | PUT/DELETE | `/api/admin/departments/{id}` | 修改 / 删除部门（被占用时拒绝删除） |
+| GET | `/api/audit` | 审计日志分页查询，支持 `from`/`to`/`actor`/`action`/`resource_type`/`resource_id`/`result`/`keyword`/`page`/`size`（需 `audit:read`） |
+| GET | `/api/audit/export` | 按相同条件导出 CSV（含 BOM，最多 1 万条，需 `audit:read`） |
 
 导入接口直接读取请求体，不依赖 multipart/form-data；Excel 上传上限 10MB，对话消息上限 2000 字符。
-错误统一返回 `{"status":"ERROR","message":"..."}`：业务校验与请求体格式错误为 400，未知路径为 404，
-未预期异常为 500 并写入服务端日志。`/api/chat/stream` 的校验与运行错误以 SSE `event:error`
-返回（HTTP 200），便于前端统一处理。
+错误统一返回 `{"status":"ERROR","message":"..."}`：业务校验与请求体格式错误为 400，
+状态冲突（审批后数据变化、并发状态变更）为 409，未知路径为 404，未预期异常为 500 并写入服务端日志。
+`/api/chat/stream` 的校验与运行错误以 SSE `event:error` 返回（HTTP 200），便于前端统一处理。
 
 管理台默认绑定 `127.0.0.1` 并启用登录鉴权：每个 `/api/**` 请求都会校验会话与权限码，
-会话数据按 `user_id` 过滤，会话与消息的读写都会校验归属。若需多人远程访问，
-仍建议放在 HTTPS 反向代理之后，并补充操作审计与行级数据权限。
+会话数据按 `user_id` 过滤，会话与消息的读写都会校验归属。所有写请求（POST/PUT/DELETE）
+与登录/退出/改密都会写入 `audit_log`，业务写操作附带变更前后快照；密码、银行卡、证件号、
+令牌等字段统一脱敏为 `***`。若需多人远程访问，仍建议放在 HTTPS 反向代理之后，
+并补充行级数据权限。
+
+### 审计日志
+
+- 覆盖范围：`/api/**` 的 POST/PUT/DELETE，以及登录成功/失败、退出、修改密码。
+- 显式事件：员工、考核、考勤、城市政策、批次审批（提交/通过/驳回）、批次出账/发送、
+  审批链增删改、Excel 导入、用户/角色/部门、向量重建，
+  记录 `before_json`、`after_json`、`actor`、`ip`、`user_agent`、`trace_id`。
+- 兜底事件：控制器未显式记录时，过滤器补记 `post /api/...` 事件并保存脱敏后的 JSON 请求体；
+  401/403 等被拦截的请求同样留痕。
+- 查询与导出：需 `audit:read` 权限；CSV 含 UTF-8 BOM，可直接用 Excel 打开。
+- 保留策略：默认 180 天，启动时清理过期记录，可用 `PAYROLL_AUDIT_RETENTION_DAYS` 调整。
 
 ## 工具清单
 
@@ -508,6 +568,8 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
     保证“先算、再验、后答复”的顺序、超时与可审计性；验证失败时降级并明确告知未完成独立验证。
 11. **按角色裁剪工具集**：计算智能体不能调用 `validate_payroll`，验证智能体不能调用核算工具，
     从工具层面约束职责，降低越权与自证风险。
+12. **审批绑定金额快照**：提交审批时对期间、范围与逐人明细取 SHA-256；审批与出账都重新计算并比对，
+    任何考勤、考核、政策或微调变化都会触发 409，避免“审批的是 A、发放的是 B”。
 
 ## 测试
 
@@ -515,7 +577,7 @@ DRAFT --出账（存在失败则拒绝）--> FINALIZED --确认发送--> SENT
 mvn test
 ```
 
-共 45 个测试，覆盖：
+共 128 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -524,7 +586,12 @@ mvn test
 - 批量合计等于逐人之和，考勤未就绪、入职前月份拒绝核算
 - H2 仓库：种子数据、员工保存/停用、考核系数进入奖金、城市政策封顶
 - 批次服务：预览合计、部门范围、微调、出账生成 Excel、发送需确认、
-  逐人成功/失败原因、重复发送拒绝、失败员工阻断出账
+  逐人成功/失败原因、重复发送拒绝、失败员工阻断出账、未审批批次拒绝出账
+- 审批状态机：提交/通过/驳回/重新提交、提交人自批与自驳被拒绝、审批轨迹与金额指纹、
+  审批前明细变化检测、审批后考勤变化导致出账冲突、部门审批链优先、无匹配流程报错
+- 审批链配置：默认全局流程、同范围唯一生效、金额区间过滤、名称/范围/部门/区间校验
+- 审批 HTTP 权限：HR 提交、管理员审批与出账、HR 不能管理审批链、只读用户不能提交、
+  驳回原因必填、审批轨迹查询
 - Excel 导入：员工部分成功与失败行号、考核系数/非法员工、考勤覆盖与负数拒绝、
   缺必填列拒绝、模板表头与填写说明
 - 管理台对话与导入：回答与工具列表、空消息 400、重置、HTTP 上传 Excel、模板下载、未知类型 400
@@ -535,6 +602,9 @@ mvn test
   批次历史、统一错误结构与 404 处理
 - 登录与权限：未登录 401、首页跳转登录页、管理员建用户、只读角色可查看但写入返回 403
 - 多用户会话：不同用户的会话列表与消息互不可见、同一用户多窗口历史隔离、越权访问会话被拒绝
+- 工具追溯：金额/员工/期间提取、批量只取顶层合计、同名工具按调用顺序配对、
+  超 8KB 结果截断但金额仍从完整结果提取、消息与追溯同事务落库、跨会话与跨用户隔离、
+  SSE `tool_result`/`done` 字段与依据查询接口
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；
@@ -545,9 +615,10 @@ mvn test
 - 用 HR 主数据、考勤、绩效服务替换 H2 仓库，并做行级数据权限
 - 政策参数（税率、基数、比例、生效日期）迁移到配置中心，按社保年度版本化
 - 以 `employee_id + period` 做幂等键，核算结果落库并保留计算快照（已具备雏形）
-- 管理台已具备登录、角色与接口级权限；生产化还需补充操作审计、会话超时策略与行级数据权限
+- 管理台已具备登录、角色、接口级权限与写操作审计；生产化还需补充会话超时策略、行级数据权限与审计日志异地留存
 - 接入真实 SMTP / 邮件服务商，增加重试、退信处理与发送配额
-- 接入审批流、发薪复核与审计日志，敏感字段加密
+- 审批流已支持可配置审批链、自批拦截与金额快照校验；生产化还需支持多级会签、审批人按组织架构解析，
+  并将审计日志对接日志平台、加密敏感字段
 - 批量核算分页与缓存，避免大部门一次拉全量
 - 如需限制敏感操作，可结合 AgentScope 的 Permission / HITL 能力增加人工确认
 - 若要升级到仓库内的 `2.0.3-SNAPSHOT`，修改 `pom.xml` 的 `<agentscope.version>` 即可
@@ -570,11 +641,14 @@ src/main/java/io/agentscope/examples/payroll
 ├── db
 │   ├── PayrollDatabase.java      # H2 连接、建表与首次种子数据
 │   ├── H2PayrollRepository.java  # 主数据/考核/政策/考勤仓库
-│   └── H2PayrollRunStore.java    # 批次、明细、失败与邮件审计
+│   ├── H2PayrollRunStore.java    # 批次、明细、失败与邮件审计
+│   ├── H2ApprovalStore.java      # 审批链、审批状态与轨迹
+│   └── H2AuditStore.java         # 审计日志
 ├── repository                    # 数据访问边界与 JSON 演示实现
 ├── service
 │   ├── PayrollEngine.java        # 唯一金额计算入口
 │   ├── PayrollRunService.java    # 预览/微调/出账/发送状态机
+│   ├── ApprovalService.java      # 提交/审批/驳回与金额快照校验
 │   ├── ExcelExporter.java        # POI 导出
 │   ├── ExcelImportService.java   # 员工/考核/考勤导入与模板
 │   ├── PayrollChat.java          # 对话接口（便于测试替身）
@@ -585,7 +659,8 @@ src/main/java/io/agentscope/examples/payroll
 │   └── PayslipFormatter.java     # 工资条渲染
 ├── web
 │   ├── PayrollWebController.java # REST API（契约与原管理台一致）
-│   ├── ApiExceptionHandler.java  # 统一 400/404/500 错误响应
+│   ├── ApprovalController.java   # 审批链配置接口
+│   ├── ApiExceptionHandler.java  # 统一 400/409/404/500 错误响应
 │   └── ApiResponse.java          # {status,data,message} 响应封装
 └── support/JsonSupport.java      # snake_case JSON（CLI 与测试）
 

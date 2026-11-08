@@ -76,6 +76,15 @@ public class ChatSessionController {
         return ApiResponse.ok(manager.messages(userId(request), sessionId));
     }
 
+    /** 单条助手消息的计算依据：工具名、参数、结果、金额与关联员工。 */
+    @GetMapping("/{sessionId}/messages/{messageId}/traces")
+    public ApiResponse traces(
+            @PathVariable long sessionId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+        return ApiResponse.ok(manager.traces(userId(request), sessionId, messageId));
+    }
+
     @PostMapping("/{sessionId}/messages")
     public ApiResponse send(
             @PathVariable long sessionId,

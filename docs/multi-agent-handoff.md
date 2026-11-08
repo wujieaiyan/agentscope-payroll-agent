@@ -285,3 +285,300 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 2. 模板文件是快照，需随 `RoleSkills` 手动同步。
 3. MCP 工具未纳入技能门禁；如需完全一致的“先加载再调用”，可把 MCP 注册也放进同一工具组。
 4. Nacos v1 OpenAPI 默认无鉴权；生产需开启鉴权并配置 `PAYROLL_NACOS_USERNAME/PASSWORD`。
+
+## 15. 审计日志基础设施（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+已完成“所有写接口 + 登录”审计，审批链与对话金额追溯尚未开始。
+
+### 数据与写入链路
+
+- 表 `audit_log`：`occurred_at`、`actor_id`、`actor_name`、`action`、`resource_type`、
+  `resource_id`、`before_json`、`after_json`、`payload_json`、`ip`、`user_agent`、
+  `result`、`status_code`、`message`、`trace_id`，按时间、操作人、资源建索引。
+  `payload_json` 是对通用请求事件的补充，显式业务事件仍用前后快照。
+- `AuditFilter`（`OncePerRequestFilter`）只处理 `/api/**` 的 POST/PUT/DELETE：
+  建立 `AuditContext`（traceId、actor、IP、UA），缓存 32KB 以内的 JSON 请求体；
+  请求结束后若控制器没有显式记录，就补一条 `post /api/...` 事件。
+- `AuditContext` 是 ThreadLocal；`AuditService.record(...)` 写显式事件并标记 `recorded`，
+  过滤器据此避免重复。`ApiExceptionHandler` 与 `AuthInterceptor` 把 400/401/403 的
+  中文原因写回上下文，失败请求也有可读 `message`。
+- `AuthController` 显式记录 `auth.login`（成功含角色，失败只留尝试用户名与统一提示）、
+  `auth.logout`、`auth.password`；密码永远不进入快照或请求体。
+- 业务显式事件：`employee.save/deactivate`、`review.save/delete`、`attendance.save`、
+  `policy.save`、`payroll.finalize/send`、`import.excel`、`user.*`、`role.*`、
+  `department.*`、`vector.rebuild`。
+- 脱敏：`AuditSanitizer` 递归替换 `password|old_password|new_password|password_hash|
+  bank_account|bank_account_masked|id_card|token|secret|authorization` 为 `***`；
+  非 JSON 请求体不入库。
+- 查询/导出：`GET /api/audit`、`GET /api/audit/export`，均需 `audit:read`；
+  CSV 带 UTF-8 BOM，导出上限 1 万条。
+- 权限：`Permissions.AUDIT_READ` 只进入 ADMIN（`ALL`），HR/VIEWER 不含。
+  内置角色权限在每次启动时按代码定义刷新，旧库无需手工补权限。
+- 保留：`payroll.audit.retention-days`（默认 180），启动时清理更早记录。
+- 关键文件：`web/AuditFilter.java`、`web/AuditController.java`、`service/AuditService.java`、
+  `db/H2AuditStore.java`、`support/AuditContext.java`、`support/AuditSanitizer.java`。
+
+### 测试与限制
+
+- 新增 `AuditServiceTest`（6）、`AuditFilterTest`（4）、`AuditWebTest`（2）；
+  全量 `mvn test` 99 个测试通过。`AuditWebTest` 覆盖失败登录、登录成功、写接口、
+  退出、`result=FAILURE` 筛选与 CSV 导出。
+- 限制：
+  1. 保留期清理只在启动时执行；长驻进程需补定时任务或外部归档。
+  2. 列表为 offset 分页，数据量大时应改为按 `audit_id` 游标。
+  3. 审计写入失败只打 WARN，不阻断业务；生产应对接日志平台并告警。
+  4. `/api/runs/preview` 与 `/api/chat*` 也是 POST，会产生通用事件；
+     若嫌噪声可在 `AuditFilter.shouldNotFilter` 中排除。
+  5. 管理台尚未提供审计查询页面，当前通过 API/CSV 查看。
+- 下一步：任务 #49 可配置审批链与批次状态机。审批动作应直接调用
+  `AuditService.record("payroll.approve", "approval_request", id, before, after)`，
+  并复用 `AuditContext` 的 actor/IP。
+
+## 16. 可配置审批链与批次状态机（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #49 已完成：批次出账前必须走“提交审批 → 审批通过”，审批链可在管理台配置。
+
+### 状态机
+
+```
+DRAFT / REJECTED --submit--> PENDING_APPROVAL --approve--> APPROVED --finalize--> FINALIZED --send--> SENT
+                                     |
+                                  reject
+                                     v
+                                  REJECTED
+```
+
+- `PayrollRunStatus` 定义状态常量与 `isFinal`；出账只接受 `APPROVED`。
+- `REJECTED` 可再次提交；`PENDING_APPROVAL`/`APPROVED` 不能重复提交（并发时由 SQL
+  `WHERE status IN (...)` 兜底，失败抛 `PayrollConflictException` → 409）。
+
+### 数据模型
+
+- `approval_flows`：`name`、`scope_type`（`GLOBAL`/`DEPARTMENT`）、`scope_value`
+  （全局固定 `*`）、`min_amount`、`max_amount`、`priority`、`enabled`、`description`、
+  `created_at`、`updated_at`。同一 `(scope_type, scope_value)` 只允许一条 `enabled` 流程。
+  首次建库插入“默认审批链”（GLOBAL、0 起、无上限、优先级 100）。
+- `payroll_runs` 新增 15 列：`approval_flow_id/name`、`submitted_by_id/name/at`、
+  `submit_comment`、`approved_by_id/name/at`、`approval_comment`、
+  `rejected_by_id/name/at`、`rejection_reason`、`snapshot_hash`。
+  使用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，旧库自动升级。
+- `payroll_approval_events`：追加式轨迹（`SUBMIT`/`APPROVE`/`REJECT`），
+  记录 actor、flow 快照、备注与当次金额指纹。
+
+### 金额指纹与校验
+
+- `ApprovalService.snapshotHash(period, scope, items)`：按工号排序，
+  对 `period|scope` 与每人的 `adjustment_json|result_json` 取 SHA-256。
+- 提交时写入 `snapshot_hash`；审批时用库中明细重算并比对。
+- 出账时 `PayrollRunService` 先调用确定性引擎全员重算，再比对审批指纹；
+  任何考勤、考核、政策、微调变化都会返回 409“核算结果与审批快照不一致”，
+  必须驳回或重新提交审批。
+
+### 权限与接口
+
+- 新增权限：`payroll:approve`（HR、ADMIN）、`approval:manage`（仅 ADMIN）。
+- 批次接口：`POST /api/runs/{id}/submit-approval`（`payroll:write`）、
+  `POST /api/runs/{id}/approve|reject`（`payroll:approve`）、
+  `GET /api/runs/{id}/approvals`（`payroll:read`）。
+- 审批链接口：`GET/POST /api/approval/flows`、`PUT/DELETE /api/approval/flows/{id}`
+  （`approval:manage`），分别记录 `approval_flow.create/update/delete` 审计事件。
+- 提交人不能审批或驳回自己提交的批次；关闭认证（系统账号 id=0）时跳过该检查，
+  便于本地演示与既有测试。
+- 管理台：工资批次面板新增“提交审批/审批通过/驳回”按钮与审批信息/轨迹；
+  新增“审批链”页签，可维护范围、金额区间、优先级与启用状态。
+
+### 关键文件
+
+- `domain/PayrollRunStatus.java`、`PayrollApproval.java`、`PayrollApprovalEvent.java`、
+  `ApprovalFlow.java`、`PayrollConflictException.java`
+- `db/H2ApprovalStore.java`、`db/H2PayrollRunStore.java`、`db/PayrollDatabase.java`
+- `service/ApprovalService.java`、`service/PayrollRunService.java`
+- `web/ApprovalController.java`、`web/PayrollWebController.java`、`web/ApiExceptionHandler.java`
+- `support/Permissions.java`、`static/index.html`、`static/app.js`、`static/style.css`
+
+### 测试
+
+- 新增 `ApprovalServiceTest`（8）、`H2ApprovalStoreTest`（5）、`ApprovalWebTest`（3）；
+  `PayrollRunServiceTest` 与 `PayrollAdminWebTest` 改为先提交/审批再出账。
+  全量 `mvn test` 116 个测试通过。
+- 覆盖：提交/通过/驳回/重新提交、自批与自驳拦截、审批轨迹、
+  提交后明细变化检测、审批后考勤变化导致出账冲突、部门流程优先、无流程报错、
+  同范围唯一生效、金额区间、HTTP 权限与驳回原因必填。
+
+### 已知限制
+
+1. 审批链只按“部门 + 批次总额”匹配，尚未支持多级会签、或签与按组织架构解析审批人。
+2. 一个范围只允许一条生效流程；如需按金额分档，需在同一流程上设置区间或扩展为多级模型。
+3. 提交后预调微调不落库（`preview` 直接生成草稿），重新预览会产生新批次，旧批次需人工清理。
+4. 管理台审批使用 `prompt()` 输入备注/驳回原因，后续可替换为带校验的弹窗。
+5. 微信风格审批卡片、审批超时提醒与催办尚未实现。
+
+### 下一步
+
+- 任务 #50：对话金额工具调用级追溯（把智能体工具结果与会话消息关联）。
+- 任务 #51：回归测试与交接文档整合；任务 #50 完成后再统一跑一次全量回归。
+
+## 17. 对话金额工具调用级追溯（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #50 已完成：每条助手消息都能展开查看“计算依据”，包含工具、参数、结果、
+金额、员工、期间与部门。追溯只随会话保存，不写审计日志。
+
+### 采集方式
+
+- AgentScope 2.0.1 的 `ToolResultEndEvent` 只有 `toolCallId/toolCallName/state`，
+  **没有结果内容**，因此结果必须在工具方法内部采集。
+- `PayrollTools` 的所有内置工具统一走 `execute(toolName, args, supplier)`：
+  记录参数、完整结果与耗时写入 `ToolTraceRecorder`（FIFO，按工具名配对）。
+- 编排层收到 `ToolResultEndEvent` 时调用 `traceRecorder.take(toolName)` 认领最早一条记录，
+  补上 `tool_call_id` 与当前阶段（`calculator/validator/accountant`），形成 `ChatToolTrace`。
+- MCP 等外部工具没有采集记录，退化为“事件参数 + `ToolTraceExtractor`”，结果为空、耗时 0。
+- 每个阶段结束（`finally`）清空 recorder，避免失败/中断调用串到下一阶段。
+- 同名工具并发风险：AgentScope 工具调用按顺序串行执行，FIFO 足以配对；
+  若未来改为并行工具调用，需要在事件里补充结果或改用 tool_call_id 直接关联。
+
+### 金额与证据提取
+
+`ToolTraceExtractor` 从参数与 `result.data` 中提取：
+
+- 金额白名单：`base_salary`、`gross_pay`、`attendance_deduction`、`taxable_gross`、
+  个人/单位社保与公积金、`total_deductions`、`net_pay`、`employer_cost`、
+  `total_gross`、`total_net`、`total_employer_cost`、`cumulative_tax`、`tax_this_month`、`tax`。
+- 员工：对象里的 `employee_id`、数组里的字符串或对象的 `employee_id`，最多 50 个。
+- 期间/部门：优先取参数，其次取结果。
+- 批量结果只取 `totals` 顶层合计；`records` 逐人明细不展开金额，避免重复且无法归属。
+- 结果超过 8KB 时截断并追加“（已截断）”，`truncated=true`；
+  **金额提取始终基于截断前的完整结果**。
+
+### 持久化
+
+- 新表 `chat_tool_traces`：`trace_id`、`message_id`、`session_id`、`tool_call_id`、
+  `tool_name`、`agent`、`args_json`、`result_json`、`truncated`、`result_state`、
+  `duration_ms`、`employees_json`、`period`、`department`、`amounts_json`、`created_at`。
+  索引：`(message_id, trace_id)`、`(session_id)`。
+- `H2ChatStore.appendAssistant(...)` 在同一事务里插入助手消息与全部追溯，
+  避免“有消息无依据”；失败整体回滚并返回 `null`，SSE 仍正常结束。
+- `clear(sessionId)` 与 `delete(sessionId)` 都会删除对应追溯，防止孤立数据。
+- `ChatSessionManager.complete(...)` 返回保存后的 `message_id`，供 `done` 事件携带。
+
+### SSE 与接口
+
+- `tool_result` 新增：`duration_ms`、`amounts`、`employees`、`period`、`department`、`truncated`
+  （空值不下发）。
+- `done` 新增：`message_id`、`trace_count`。
+- 新增 `GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces`
+  （`chat:use`），先用 `requireOwned` 校验会话归属，再按 `session_id + message_id` 查询；
+  跨用户或会话已删除返回 400。
+
+### 前端
+
+- 助手回答下方新增 `<details class="chat-traces">`“计算依据 · N 次工具调用”。
+- 实时回答：`done.message_id` 到达后按需拉取追溯，避免把大段 JSON 挤进 SSE。
+- 历史消息：`appendStoredMessage` 渲染后异步拉取，失败只打 `console.warn`，不影响正文。
+- 每个工具卡片显示：状态、耗时、金额项数、智能体阶段、期间/部门、员工 chips、
+  金额卡片（中文标签 + `¥` 千分位）、参数与结果的格式化 JSON。
+- 样式与“思考过程”面板保持一致的微信风格，金额网格自适应列宽。
+
+### 调试日志
+
+- `[多智能体][stage] 工具结束：tool，state，耗时，参数，金额，员工，期间`：逐次调用证据。
+- `[多智能体] 工具追溯汇总：N 次调用，金额类 M 次`：每轮结束汇总。
+- `[会话] 回答已保存：sessionId，messageId，工具追溯 N 条`：确认持久化成功。
+- 前端 `[计算依据] 加载失败：...`：历史追溯接口失败时保留正文。
+
+### 关键文件
+
+- `support/ToolTraceExtractor.java`、`agent/ToolTraceRecorder.java`、`agent/PayrollTools.java`
+- `domain/ChatToolTrace.java`、`service/PayrollChatService.java`
+- `db/H2ChatStore.java`、`db/PayrollDatabase.java`、`service/ChatSessionManager.java`
+- `web/ChatSse.java`、`web/ChatSessionController.java`
+- `static/app.js`、`static/style.css`
+
+### 测试
+
+- 新增 `ToolTraceExtractorTest`（4）、`ToolTraceRecorderTest`（4）、
+  `H2ChatTraceStoreTest`（3）、`ChatTraceWebTest`（1）。
+- 覆盖：金额/员工/期间提取、批量只取合计、FIFO 配对、未知工具、8KB 截断与金额完整性、
+  消息+追溯同事务、跨会话隔离、清空/删除级联、SSE 字段、依据接口与跨用户 400。
+- 全量 `mvn test` 128 个测试通过。
+
+### 已知限制
+
+1. 追溯依赖工具内部埋点；第三方 MCP 工具只有参数，没有结果内容。
+2. 金额提取基于字段白名单，工具返回结构改名后需要同步维护。
+3. 单条结果最多保存 8KB，超长明细仍需回到工资批次/工资条查看。
+4. 未提供按金额、员工反查追溯的检索接口；当前只能按消息读取。
+5. 管理台未做追溯导出，也未把追溯接入审计日志（按任务决策）。
+
+### 下一步
+
+- 任务 #51：回归测试与交接文档整合（见下一节）。
+- 可选增强：追溯反查（按员工/期间/金额筛选）、Excel/PDF 依据导出、
+  MCP 工具结果采集（若 AgentScope 后续事件暴露结果内容）。
+
+## 18. 全量回归与交接验收（2026-11-07，分支 `feature/payroll-approval-audit-trace`）
+
+任务 #51 完成：审批、审计、追溯三条链路统一回归，测试矩阵与人工验收步骤固化如下。
+
+### 需求覆盖矩阵
+
+| 需求 | 测试 | 关键断言 |
+| --- | --- | --- |
+| 审批状态机 | `ApprovalServiceTest` | 提交→通过→出账；重复提交/非法状态返回冲突；驳回后可重新提交 |
+| 自审拦截 | `ApprovalServiceTest`、`ApprovalWebTest` | 提交人不能审批或驳回自己的批次；关闭认证时跳过 |
+| 金额变化失效 | `ApprovalServiceTest`、`PayrollRunServiceTest` | 提交后改明细拒绝审批；审批后改考勤出账 409；失败员工阻断提交 |
+| 审批链配置 | `ApprovalServiceTest`、`H2ApprovalStoreTest` | 部门优先于全局、金额区间、同范围唯一生效、默认流程 |
+| 审批权限 | `ApprovalWebTest` | HR 可提交不可审批、管理员可审批出账、只读用户 403 |
+| 审计脱敏 | `AuditServiceTest`、`AuditFilterTest` | 密码/银行卡/证件/令牌 → `***`；请求体与前后快照都脱敏 |
+| 审计权限与导出 | `AuditWebTest`、`AuditServiceTest` | 未登录 401、无 `audit:read` 403、筛选分页、CSV 最多 1 万条 |
+| 追溯采集与提取 | `ToolTraceExtractorTest`、`ToolTraceRecorderTest` | 金额/员工/期间；批量只取顶层合计；FIFO 配对；8KB 截断后金额完整 |
+| 追溯持久化 | `H2ChatTraceStoreTest` | 消息+追溯同事务；跨会话隔离；清空/删除级联 |
+| 追溯 SSE 与接口 | `ChatTraceWebTest` | `tool_result` 金额/耗时字段；`done.message_id/trace_count`；跨用户 400 |
+| 会话隔离回归 | `PayrollAuthWebTest`、`ChatTraceWebTest` | 不同用户/窗口会话与消息互不可见；依据接口同样校验归属 |
+
+### 全量回归
+
+```bash
+JAVA_HOME="D:\tools\jdk\jdk-17.0.12" mvn test
+```
+
+- 29 个测试类、128 个测试全部通过（Surefire `Failures: 0, Errors: 0`）。
+- 关键回归类可单独执行：
+
+```bash
+mvn -Dtest=ApprovalServiceTest,ApprovalWebTest,AuditWebTest,\
+AuditServiceTest,AuditFilterTest,PayrollRunServiceTest,\
+ToolTraceExtractorTest,ToolTraceRecorderTest,H2ChatTraceStoreTest,\
+ChatTraceWebTest test
+```
+
+### 人工验收步骤
+
+1. 启动管理台（本地可用内存库，避免污染正式数据）：
+
+   ```bash
+   PAYROLL_AUTH_ENABLED=false PAYROLL_DB_URL="jdbc:h2:mem:verify;DB_CLOSE_DELAY=-1" \
+   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+   ```
+
+2. 打开“智能问答”，提问“张伟 2026-10 的工资是多少”。
+3. 回答完成后展开“计算依据”：应看到 `get_employee_profile` / `calculate_payroll`
+   等工具卡片、¥金额卡片、员工与期间；参数与结果为格式化 JSON。
+4. 刷新页面或切换会话再切回：历史消息下方仍能异步加载同一份依据。
+5. 用另一账号访问同一 `sessionId + messageId`：接口返回 400。
+6. 删除会话后再次查询依据：接口返回 400，库中追溯随会话级联删除。
+7. 服务端日志应出现 `[多智能体][calculator] 工具结束：…金额=…员工=…期间=…`、
+   `[多智能体] 工具追溯汇总：N 次调用，金额类 M 次`、`[会话] 回答已保存：…工具追溯=N条`。
+
+> 内置浏览器在某些环境不提供可见视口（0×0），只能做 DOM 结构断言，无法截图核对像素样式；
+> 本次已确认面板节点、金额卡片与 JSON 区块数量，视觉走查需在常规浏览器完成。
+
+### 交接注意事项
+
+- 提交审批前必须确认批次已生成且无失败员工；审批后任何考勤/考核/政策/微调变化都会使出账冲突。
+- 追溯表不参与审计，不要把它当作合规留痕；合规查询仍走 `/api/audit`。
+- 工具结果字段改名时同步维护 `ToolTraceExtractor` 白名单，否则金额卡片会变空。
+- 新增工具必须走 `PayrollTools.execute(toolName, args, supplier)`，否则结果无法落库。
+- 分支 `feature/payroll-approval-audit-trace` 已包含 #49/#50/#51；PR #1 指向 `main`，
+  后续提交推送前需再次确认。
+
+

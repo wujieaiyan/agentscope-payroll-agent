@@ -3,7 +3,7 @@ package io.agentscope.examples.payroll.domain;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-/** 一次工资批次的表头。 */
+/** 一次工资批次的表头与审批快照。 */
 public record PayrollRun(
         long runId,
         String period,
@@ -16,5 +16,6 @@ public record PayrollRun(
         BigDecimal totalEmployerCost,
         String excelPath,
         LocalDateTime createdAt,
-        LocalDateTime finalizedAt) {
+        LocalDateTime finalizedAt,
+        PayrollApproval approval) {
 }
