@@ -18,6 +18,8 @@ function initFlowsTab() {
       return {
         screenToFlowCoordinate: flow.screenToFlowCoordinate,
         fitView: flow.fitView,
+        zoomIn: flow.zoomIn,
+        zoomOut: flow.zoomOut,
       };
     },
     data() {
@@ -114,7 +116,7 @@ function initFlowsTab() {
           markerEnd: VueFlowCore.MarkerType.ArrowClosed,
         }));
         this.$nextTick(() => {
-          if (this.fitView) this.fitView({ padding: 0.2 });
+          if (this.fitView) this.fitView({ padding: 0.08 });
         });
       },
       newFlow() {
@@ -405,6 +407,9 @@ function initFlowsTab() {
                     :disabled="!meta.writable || !flow.id || flow.id === activeFlowId || activating">
               {{ flow.id === activeFlowId ? '当前默认' : '设为默认' }}
             </button>
+            <button type="button" @click="zoomOut">－</button>
+            <button type="button" @click="zoomIn">＋</button>
+            <button type="button" @click="fitView({ padding: 0.08 })">适应画布</button>
             <button type="button" class="danger" @click="removeFlow"
                     :disabled="!meta.writable || !flow.id">删除</button>
           </div>

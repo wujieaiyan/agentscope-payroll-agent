@@ -294,10 +294,12 @@ public final class AgentFlowExecutor {
     }
 
     /**
-     * 拼接节点输入：基础问题 + 所有经选中路径可达的上游输出。
+     * 拼接节点输入：用户问题 + 所有经选中路径可达的上游记录。
      *
      * <p>不只取直接上游，是为了让“验证 → 核算”这类串联节点仍能看到计算记录；
-     * 兄弟分支的输出不会被带进来，避免并行分支互相污染。
+     * 兄弟分支的输出不会被带进来，避免并行分支互相污染。段落标题去掉“①②”编号，
+     * 与角色技能里“【计算智能体记录】/【验证智能体记录】”的引用保持一致；
+     * 无输出的已执行节点保留占位，让下游知道该环节没有结论。
      */
     private static String buildInput(
             FlowNode node,
@@ -321,8 +323,7 @@ public final class AgentFlowExecutor {
                     continue;
                 }
                 String source = edge.source();
-                NodeResult result = results.get(source);
-                if (result != null && !result.text().isBlank()) {
+                if (results.containsKey(source)) {
                     upstream.add(source);
                 }
                 stack.push(source);
@@ -331,23 +332,46 @@ public final class AgentFlowExecutor {
         if (upstream.isEmpty()) {
             return baseInput == null ? "" : baseInput;
         }
-        StringBuilder input = new StringBuilder(baseInput == null ? "" : baseInput);
+        StringBuilder input = new StringBuilder("【用户问题】\n");
+        input.append(baseInput == null ? "" : baseInput);
         List<String> ordered = upstream.stream()
                 .sorted(Comparator.comparingInt((String id) -> ranks.getOrDefault(id, 0))
                         .thenComparing(id -> id))
                 .toList();
+        LinkedHashSet<String> targetLines = new LinkedHashSet<>();
         for (String id : ordered) {
             NodeResult result = results.get(id);
-            if (result == null || result.text().isBlank()) {
+            if (result == null) {
                 continue;
             }
             FlowNode source = nodes.get(id);
-            input.append("\n\n## 上游节点：")
-                    .append(source == null ? id : source.label())
-                    .append("\n")
-                    .append(result.text().trim());
+            input.append("\n\n【")
+                    .append(recordTitle(source, id))
+                    .append("记录】\n")
+                    .append(result.text().isBlank() ? "（本节点未返回内容）" : result.text().trim());
+            for (CalcTarget target : result.targets()) {
+                targetLines.add("- " + target.employeeId() + " | " + target.period());
+            }
         }
+        if (!targetLines.isEmpty()) {
+            input.append("\n\n【上游核算对象（最多处理前 3 个）】\n");
+            int limit = 0;
+            for (String line : targetLines) {
+                if (limit++ == 3) {
+                    break;
+                }
+                input.append(line).append("\n");
+            }
+        }
+        input.append("\n\n请按你的角色职责处理以上记录。");
         return input.toString();
+    }
+
+    /** 去掉节点名称里的“① ②”等装饰前缀，便于角色技能按固定标题引用。 */
+    private static String recordTitle(FlowNode node, String fallbackId) {
+        String label = node == null ? "" : node.label();
+        String title = label.replaceFirst("^[\\s①-⑳]+", "").trim();
+        return title.isEmpty() ? fallbackId : title;
     }
 
     private static boolean evaluate(

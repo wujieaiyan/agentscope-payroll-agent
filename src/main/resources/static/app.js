@@ -167,7 +167,8 @@ async function loadHealth() {
   try {
     const health = await api('/api/health');
     state.dataThrough = health.data_through_period;
-    badge.textContent = `数据库已连接 · 考勤至 ${health.data_through_period} · 邮件 ${health.email_mode}`;
+    badge.textContent = `数据至 ${health.data_through_period}`;
+    badge.title = `数据库已连接 · 考勤至 ${health.data_through_period} · 邮件 ${health.email_mode}`;
     badge.className = 'badge ok';
     const chatModel = $('#chat-model');
     if (chatModel) chatModel.textContent = '模型 ' + (health.chat_model || '未配置');
@@ -186,9 +187,13 @@ async function loadMe() {
   state.me = data.user;
   state.authEnabled = Boolean(data.auth_enabled);
   state.permissions = new Set(data.user.permissions || []);
-  const department = data.user.department_name ? ' · ' + data.user.department_name : '';
-  $('#current-user').textContent =
-    `${data.user.display_name} · ${data.user.role_name}${department}`;
+  const displayName = data.user.display_name || data.user.username || '未登录';
+  $('#current-user').textContent = displayName;
+  $('#current-user-meta').textContent =
+    [data.user.username ? '@' + data.user.username : '', data.user.role_name]
+      .filter(Boolean)
+      .join(' · ') || '未分配部门';
+  $('#user-avatar').textContent = displayName.slice(0, 1);
   $('#logout').classList.toggle('hidden', !state.authEnabled);
   $('#change-password').classList.toggle('hidden', !state.authEnabled);
   applyPermissions();
@@ -210,7 +215,69 @@ function openPasswordDialog() {
   dialog.showModal();
 }
 
+const TAB_META = {
+  employees: {
+    group: '人事运营', eyebrow: 'PEOPLE OPS', title: '员工档案',
+    subtitle: '维护员工基础信息、薪酬参数与在职状态；停用员工不参与核算与批量出账。',
+  },
+  reviews: {
+    group: '人事运营', eyebrow: 'PEOPLE OPS', title: '绩效考核',
+    subtitle: '按期间维护考核分数与绩效系数，系数 0–2 直接影响绩效奖金。',
+  },
+  attendance: {
+    group: '人事运营', eyebrow: 'PEOPLE OPS', title: '考勤管理',
+    subtitle: '事假、病假、旷工与加班数据由 HR 录入，缺失时核算会给出明确原因。',
+  },
+  policies: {
+    group: '人事运营', eyebrow: 'POLICY', title: '城市政策',
+    subtitle: '维护社保基数上下限与缴费比例，个税沿用全国累计预扣口径。',
+  },
+  payroll: {
+    group: '人事运营', eyebrow: 'PAYROLL', title: '工资批次',
+    subtitle: '预览、微调、审批与出账；金额由确定性引擎重新核算并留痕。',
+  },
+  approval: {
+    group: '人事运营', eyebrow: 'APPROVAL', title: '审批链',
+    subtitle: '按部门与实发金额配置审批链，部门专属规则优先于全局规则。',
+  },
+  chat: {
+    group: '智能体', eyebrow: 'AGENT', title: '智能问答',
+    subtitle: '多会话上下文隔离；查询、核算与解释均以确定性引擎结果为准。',
+  },
+  agents: {
+    group: '智能体', eyebrow: 'AGENT', title: 'Agent 管理',
+    subtitle: '维护智能体开关、模型、角色提示词与工具技能。',
+  },
+  flows: {
+    group: '智能体', eyebrow: 'AGENT', title: '流程编排',
+    subtitle: '用画布把智能体与条件节点编成 DAG，设为默认后下一轮对话生效。',
+  },
+  users: {
+    group: '系统管理', eyebrow: 'SYSTEM', title: '用户',
+    subtitle: '维护登录账号、角色与部门归属；至少保留一名启用管理员。',
+  },
+  departments: {
+    group: '系统管理', eyebrow: 'SYSTEM', title: '部门',
+    subtitle: '部门用于员工档案与用户归属，被占用时不能删除。',
+  },
+  roles: {
+    group: '系统管理', eyebrow: 'SYSTEM', title: '角色权限',
+    subtitle: '内置角色随代码重同步；自定义角色按权限码组合。',
+  },
+};
+
+function updatePageHead(name) {
+  const meta = TAB_META[name];
+  if (!meta) return;
+  $('#crumb-group').textContent = meta.group;
+  $('#crumb-page').textContent = meta.title;
+  $('#page-eyebrow').textContent = meta.eyebrow;
+  $('#page-title').textContent = meta.title;
+  $('#page-subtitle').textContent = meta.subtitle;
+}
+
 function showTab(name) {
+  updatePageHead(name);
   $$('#tabs button').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === name);
   });

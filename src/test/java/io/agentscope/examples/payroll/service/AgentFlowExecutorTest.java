@@ -43,7 +43,13 @@ class AgentFlowExecutorTest {
                                     node.id().toUpperCase(), List.of(), false);
                         });
 
-        assertEquals(List.of("a|" + QUESTION, "b|" + QUESTION + "\n\n## 上游节点：A\nA"), inputs);
+        assertEquals(
+                List.of(
+                        "a|" + QUESTION,
+                        "b|【用户问题】\n" + QUESTION
+                                + "\n\n【A记录】\nA"
+                                + "\n\n请按你的角色职责处理以上记录。"),
+                inputs);
         assertEquals("B", outcome.reply());
         assertTrue(outcome.nodeResults().containsKey("a"));
         assertTrue(outcome.nodeResults().containsKey("b"));
@@ -196,11 +202,50 @@ class AgentFlowExecutorTest {
                 });
 
         String input = joinInputs.get(0);
-        assertTrue(input.startsWith(QUESTION), input);
-        assertTrue(input.contains("## 上游节点：CALC\nCALC"), input);
-        assertTrue(input.contains("## 上游节点：A\nA"), input);
-        assertTrue(input.contains("## 上游节点：B\nB"), input);
+        assertTrue(input.startsWith("【用户问题】\n" + QUESTION), input);
+        assertTrue(input.contains("【CALC记录】\nCALC"), input);
+        assertTrue(input.contains("【A记录】\nA"), input);
+        assertTrue(input.contains("【B记录】\nB"), input);
         assertTrue(input.indexOf("CALC") < input.indexOf("A"), input);
+    }
+
+    @Test
+    @DisplayName("下游输入保留空输出的上游占位，并附带核算对象清单")
+    void includesPlaceholdersAndTargets() {
+        List<String> inputs = Collections.synchronizedList(new ArrayList<>());
+        FlowDefinition flow =
+                flow(List.of(start(), agent("calc", "① 计算智能体"),
+                                agent("validator", "② 验证智能体"), end()),
+                        List.of(edge("e1", "start", "calc"), edge("e2", "calc", "validator"),
+                                edge("e3", "validator", "end")));
+
+        AgentFlowExecutor.execute(
+                flow,
+                QUESTION,
+                ChatStreamListener.NOOP,
+                (node, input, listener) -> {
+                    if ("validator".equals(node.id())) {
+                        inputs.add(input);
+                    }
+                    return new AgentFlowExecutor.NodeResult(
+                            "calc".equals(node.id()) ? "" : "验证完成",
+                            "calc".equals(node.id())
+                                    ? List.of(
+                                            new CalcTarget("EMP001", "2026-10"),
+                                            new CalcTarget("EMP002", "2026-10"),
+                                            new CalcTarget("EMP003", "2026-10"),
+                                            new CalcTarget("EMP004", "2026-10"))
+                                    : List.of(),
+                            false);
+                });
+
+        String input = inputs.get(0);
+        assertTrue(input.contains("【计算智能体记录】\n（本节点未返回内容）"), input);
+        assertTrue(input.contains("【上游核算对象（最多处理前 3 个）】"), input);
+        assertTrue(input.contains("- EMP001 | 2026-10"), input);
+        assertTrue(input.contains("- EMP003 | 2026-10"), input);
+        assertFalse(input.contains("EMP004"), input);
+        assertTrue(input.endsWith("请按你的角色职责处理以上记录。"), input);
     }
 
     @Test
