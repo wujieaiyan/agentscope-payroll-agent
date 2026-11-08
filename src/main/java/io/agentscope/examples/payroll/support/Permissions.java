@@ -29,6 +29,7 @@ public final class Permissions {
     public static final String ROLE_MANAGE = "role:manage";
     public static final String USER_MANAGE = "user:manage";
     public static final String AUDIT_READ = "audit:read";
+    public static final String AGENT_MANAGE = "agent:manage";
 
     public static final String ROLE_ADMIN = "ADMIN";
     public static final String ROLE_HR = "HR";
@@ -94,6 +95,7 @@ public final class Permissions {
         labels.put(ROLE_MANAGE, "管理角色");
         labels.put(USER_MANAGE, "管理用户");
         labels.put(AUDIT_READ, "查看审计日志");
+        labels.put(AGENT_MANAGE, "管理智能体");
         return labels;
     }
 

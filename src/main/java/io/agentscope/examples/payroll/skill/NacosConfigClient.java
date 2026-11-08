@@ -82,6 +82,76 @@ final class NacosConfigClient {
         }
     }
 
+    boolean publish(String dataId, String content) {
+        Map<String, String> params = baseParams(dataId);
+        params.put("content", content);
+        params.put("type", "json");
+        return write("发布", "POST", dataId, params);
+    }
+
+    boolean remove(String dataId) {
+        return write("删除", "DELETE", dataId, baseParams(dataId));
+    }
+
+    private Map<String, String> baseParams(String dataId) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("dataId", dataId);
+        params.put("group", settings.group());
+        if (!settings.namespace().isBlank()) {
+            params.put("tenant", settings.namespace());
+        }
+        return params;
+    }
+
+    private boolean write(String action, String method, String dataId, Map<String, String> params) {
+        try {
+            ensureToken();
+            if (accessToken != null && !accessToken.isBlank()) {
+                params.put("accessToken", accessToken);
+            }
+            HttpRequest.Builder builder =
+                    HttpRequest.newBuilder(
+                                    "DELETE".equals(method)
+                                            ? uri("/nacos/v1/cs/configs", params)
+                                            : URI.create(settings.server() + "/nacos/v1/cs/configs"))
+                            .timeout(settings.timeout());
+            HttpRequest request =
+                    "DELETE".equals(method)
+                            ? builder.DELETE().build()
+                            : builder.header("Content-Type", "application/x-www-form-urlencoded")
+                                    .POST(formBody(params))
+                                    .build();
+            HttpResponse<String> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() == 200 && "true".equalsIgnoreCase(response.body().trim())) {
+                return true;
+            }
+            if (response.statusCode() == 403) {
+                accessToken = null;
+                tokenExpiresAt = 0;
+            }
+            warnOnce(action + "配置 " + dataId + " 失败：HTTP " + response.statusCode());
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException | RuntimeException e) {
+            warnOnce(action + " Nacos 配置 " + dataId + " 失败：" + rootMessage(e));
+            return false;
+        }
+    }
+
+    private static HttpRequest.BodyPublisher formBody(Map<String, String> params) {
+        StringBuilder form = new StringBuilder();
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+            if (form.length() > 0) {
+                form.append('&');
+            }
+            form.append(encode(entry.getKey())).append('=').append(encode(entry.getValue()));
+        }
+        return HttpRequest.BodyPublishers.ofString(form.toString());
+    }
+
     private void ensureToken() {
         if (settings.username().isBlank()) {
             return;
