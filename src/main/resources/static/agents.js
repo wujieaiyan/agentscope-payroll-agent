@@ -177,6 +177,14 @@ function initAgentsTab() {
       formatTime(value) {
         return value ? String(value).replace('T', ' ').slice(0, 16) : '';
       },
+      avatarMarkup(value) {
+        return window.payrollAvatarMarkup
+          ? window.payrollAvatarMarkup(value)
+          : (value || '🤖');
+      },
+      avatarOptions() {
+        return window.PAYROLL_AVATAR_OPTIONS || [];
+      },
     },
     template: `
       <div class="card">
@@ -218,7 +226,7 @@ function initAgentsTab() {
         <div class="agent-grid">
           <div v-for="agent in filteredAgents" :key="agent.id" class="agent-card">
             <div class="agent-card-head">
-              <span class="agent-avatar">{{ agent.avatar || '🤖' }}</span>
+              <span class="agent-avatar" v-html="avatarMarkup(agent.avatar)"></span>
               <div class="agent-title">
                 <strong>{{ agent.name }}</strong>
                 <span class="hint">{{ visibilityText(agent.visibility) }} · {{ statusText(agent.status) }}</span>
@@ -247,7 +255,23 @@ function initAgentsTab() {
           <h2>{{ dialogTitle }}</h2>
           <div class="grid">
             <label>名称<input v-model="form.name" maxlength="30" required></label>
-            <label>头像（Emoji）<input v-model="form.avatar" maxlength="8"></label>
+            <div class="span-2 avatar-field">
+              <span class="field-label">头像</span>
+              <div class="avatar-preview-row">
+                <span class="agent-avatar avatar-preview" v-html="avatarMarkup(form.avatar)"></span>
+                <div class="avatar-custom">
+                  <input v-model="form.avatar" maxlength="40" placeholder="自定义 Emoji，或从下方图标中选择">
+                  <span class="hint">内置 Ant Design 图标，离线可用</span>
+                </div>
+              </div>
+              <div class="avatar-grid">
+                <button v-for="item in avatarOptions()" :key="item.value" type="button"
+                  class="avatar-option" :class="{ active: form.avatar === item.value }"
+                  :title="item.label" @click="form.avatar = item.value">
+                  <span class="agent-avatar" v-html="item.svg"></span>
+                </button>
+              </div>
+            </div>
             <label>可见范围
               <select v-model="form.visibility">
                 <option value="PUBLIC">公开</option>

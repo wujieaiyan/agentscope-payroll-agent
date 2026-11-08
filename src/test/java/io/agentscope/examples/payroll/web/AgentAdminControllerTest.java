@@ -151,7 +151,7 @@ class AgentAdminControllerTest {
 
         AgentDefinition longAvatar =
                 new AgentDefinition(
-                        null, "顾问", "x".repeat(9), "", List.of(), List.of(),
+                        null, "顾问", "x".repeat(41), "", List.of(), List.of(),
                         "PUBLIC", "ONLINE", null, null, null);
         assertThrows(PayrollException.class, () -> controller.create(longAvatar, request));
 

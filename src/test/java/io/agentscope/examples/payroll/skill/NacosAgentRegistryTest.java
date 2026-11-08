@@ -289,7 +289,33 @@ class NacosAgentRegistryTest {
         assertTrue(error.getMessage().contains("Nacos 未启用"), error.getMessage());
     }
 
+    @Test
+    @DisplayName("Nacos 读取抖动时沿用上次智能体目录，不退回内置薪酬智能体")
+    void keepsLastKnownGoodWhenReadFails() throws Exception {
+        nacos = new FakeNacos();
+        NacosAgentRegistry seeder = registry(true);
+        AgentDefinition saved = seeder.save(newAgent(null, "情感专家"), "admin");
+
+        NacosAgentRegistry registry = registry(true, Duration.ofMillis(1));
+        assertTrue(
+                registry.list().stream().anyMatch(agent -> agent.id().equals(saved.id())),
+                registry.list().toString());
+
+        nacos.failReads = true;
+        Thread.sleep(5);
+
+        List<AgentDefinition> cached = registry.list();
+        assertTrue(
+                cached.stream().anyMatch(agent -> agent.id().equals(saved.id())),
+                "读取失败时应沿用上次成功加载的智能体：" + cached);
+        assertEquals(RoleSkills.ids().size() + 1, cached.size());
+    }
+
     private NacosAgentRegistry registry(boolean enabled) {
+        return registry(enabled, Duration.ofSeconds(60));
+    }
+
+    private NacosAgentRegistry registry(boolean enabled, Duration ttl) {
         NacosSkillSettings settings =
                 new NacosSkillSettings(
                         enabled,
@@ -299,7 +325,7 @@ class NacosAgentRegistryTest {
                         "",
                         "",
                         Duration.ofSeconds(2),
-                        Duration.ofSeconds(60));
+                        ttl);
         return new NacosAgentRegistry(settings);
     }
 
@@ -330,6 +356,7 @@ class NacosAgentRegistryTest {
         private final AtomicInteger reads = new AtomicInteger();
         private final AtomicInteger writes = new AtomicInteger();
         private volatile boolean failWrites;
+        private volatile boolean failReads;
 
         private FakeNacos() throws IOException {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -341,6 +368,10 @@ class NacosAgentRegistryTest {
             String method = exchange.getRequestMethod();
             if ("GET".equals(method)) {
                 reads.incrementAndGet();
+                if (failReads) {
+                    respond(exchange, 500, "boom");
+                    return;
+                }
                 String dataId = query(exchange).get("dataId");
                 String body = dataId == null ? null : configs.get(dataId);
                 if (body == null) {

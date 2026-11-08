@@ -350,7 +350,9 @@ public final class H2PayrollRunStore {
                         rs.getString("rejected_by_name"),
                         rs.getObject("rejected_at", LocalDateTime.class),
                         rs.getString("rejection_reason"),
-                        rs.getString("snapshot_hash")));
+                        rs.getString("snapshot_hash"),
+                        H2ApprovalStore.parseSteps(rs.getString("workflow_steps_json")),
+                        rs.getInt("current_step")));
     }
 
     private static Long nullableLong(ResultSet rs, String column) throws SQLException {

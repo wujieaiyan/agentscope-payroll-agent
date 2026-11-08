@@ -90,6 +90,16 @@ public final class PayrollAgentFactory {
             仍失败才只执行下方绝对规则，并在回答开头说明“角色技能未加载”。
             """;
 
+    /** 自定义技能智能体的通用规则：不复用薪酬口径，避免把非薪酬角色拉回核算场景。 */
+    private static final String GENERAL_RULES =
+            """
+            ## 绝对规则
+            1. 所有事实、数据和工具结果必须来自已加载技能或工具返回；禁止编造、臆测或改写。
+            2. 需要外部数据或执行操作时调用可用工具，核对返回结果后再作答；工具报错时按提示修正参数重试一次。
+            3. 信息不足时明确追问，不得用假设内容继续。
+            4. 不得虚构或泄露用户隐私数据。
+            """;
+
     private static String calculatorPrompt(String skillId) {
         return COMMON_RULES
                 + "\n"
@@ -389,7 +399,7 @@ public final class PayrollAgentFactory {
         return new Team(agent, null, null, summarizer, mcpClients, activeAgent, false);
     }
 
-    private static List<AgentSkill> boundSkills(
+    static List<AgentSkill> boundSkills(
             AgentSkillRepository repository, AgentDefinition activeAgent) {
         List<AgentSkill> skills = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -402,12 +412,19 @@ public final class PayrollAgentFactory {
             }
         }
         if (skills.isEmpty()) {
-            skills.add(SkillRepositories.activeSkill(repository, RoleSkills.CALCULATOR));
+            if (activeAgent.skillIds() == null || activeAgent.skillIds().isEmpty()) {
+                throw new PayrollException(
+                        "智能体「" + activeAgent.name() + "」未绑定技能，无法启动；请先为其绑定角色技能");
+            }
+            throw new PayrollException(
+                    "智能体「" + activeAgent.name() + "」绑定的技能不存在："
+                            + activeAgent.skillIds()
+                            + "；请先在技能管理中创建或修复，已阻止回退为薪酬计算技能");
         }
         return skills;
     }
 
-    private static Set<String> allowedTools(List<String> skillIds) {
+    static Set<String> allowedTools(List<String> skillIds) {
         Set<String> allowed = new LinkedHashSet<>();
         for (String skillId : skillIds) {
             if (RoleSkills.CALCULATOR.equals(skillId)) {
@@ -416,7 +433,7 @@ public final class PayrollAgentFactory {
                 allowed.addAll(VALIDATOR_TOOLS);
             }
         }
-        if (allowed.isEmpty()) {
+        if (allowed.isEmpty() && (skillIds == null || skillIds.isEmpty())) {
             allowed.addAll(CALCULATOR_TOOLS);
         }
         return allowed;
@@ -450,16 +467,20 @@ public final class PayrollAgentFactory {
         return activeAgentPrompt(agent, skillId);
     }
 
-    private static String activeAgentPrompt(AgentDefinition agent, String skillId) {
+    /**
+     * 自定义技能智能体的提示词：角色由管理员填写的名称、描述与已加载技能定义，
+     * 不注入薪酬核算规则，避免 ai-coding 等非薪酬角色被拉回薪酬场景。
+     */
+    static String activeAgentPrompt(AgentDefinition agent, String skillId) {
         String description = agent.description() == null ? "" : agent.description();
-        return COMMON_RULES
+        return GENERAL_RULES
                 + "\n"
                 + SKILL_BOOT_RULE.formatted(skillId)
                 + """
                 ## 基本职责
-                你是「%s」，管理员已指定你负责本轮会话的薪酬核算。%s
-                严格按已加载的技能处理用户诉求：需要核算时调用工具，核对工具结果后再给出最终 HR 答复；
-                缺少员工、期间或政策信息时明确追问，不得编造任何金额、考勤或员工数据。
+                你是「%s」。%s
+                严格按已加载的技能处理用户诉求；技能未覆盖的问题不要自行补全数据或流程，
+                超出职责范围时直接说明并请用户提出对应问题。
                 """
                         .formatted(agent.name(), description);
     }
@@ -525,7 +546,7 @@ public final class PayrollAgentFactory {
                         .toolkit(toolkit)
                         .maxIters(maxIters);
         if (skillRepository != null && !skillIds.isEmpty()) {
-            builder.skillRepository(skillRepository)
+            builder.skillRepository(SkillRepositories.scoped(skillRepository, skillIds))
                     .skillFilter(SkillRepositories.filterFor(skillIds))
                     .dynamicSkillsEnabled(true);
         }

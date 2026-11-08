@@ -108,6 +108,58 @@ class NacosSkillRepositoryTest {
     }
 
     @Test
+    @DisplayName("发现内置之外的 Nacos 技能，供智能体绑定")
+    void discoversAdditionalNacosSkills() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        String custom =
+                """
+                ---
+                name: payroll-auditor
+                description: 薪酬审计角色
+                ---
+                ## 职责
+                独立审计工资数据。
+                """;
+        configs.put("payroll-auditor.md", custom);
+        NacosSkillSettings settings = settings(ttl());
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings,
+                        dataId -> Optional.ofNullable(configs.get(dataId)),
+                        pattern -> configs.entrySet().stream()
+                                .map(entry -> new NacosConfigClient.ConfigEntry(
+                                        entry.getKey(), entry.getValue(), 1L))
+                                .toList(),
+                        clock()::get);
+
+        List<String> names = repository.getAllSkillNames();
+        assertTrue(names.contains("payroll-auditor"), names.toString());
+
+        AgentSkill skill = repository.getSkill("payroll-auditor");
+        assertNotNull(skill);
+        assertEquals("薪酬审计角色", skill.getDescription());
+        assertTrue(skill.getSkillContent().contains("独立审计工资数据"));
+        assertEquals(NacosSkillRepository.SOURCE, skill.getSource());
+    }
+
+    @Test
+    @DisplayName("技能列表读取失败时仅保留内置技能")
+    void listFailureFallsBackToBuiltins() {
+        Map<String, String> configs = allConfigs();
+        NacosSkillSettings settings = settings(ttl());
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings,
+                        dataId -> Optional.ofNullable(configs.get(dataId)),
+                        pattern -> {
+                            throw new IllegalStateException("nacos down");
+                        },
+                        clock()::get);
+
+        assertEquals(RoleSkills.ids(), repository.getAllSkillNames());
+    }
+
+    @Test
     @DisplayName("只读仓库不提供写入能力")
     void isReadOnly() {
         NacosSkillRepository repository = repository(allConfigs(), clock());
@@ -138,22 +190,25 @@ class NacosSkillRepositoryTest {
             java.util.function.LongSupplier clock,
             Duration ttl,
             AtomicInteger calls) {
-        NacosSkillSettings settings =
-                new NacosSkillSettings(
-                        true,
-                        "http://127.0.0.1:8848",
-                        "payroll-agent",
-                        "",
-                        "",
-                        "",
-                        Duration.ofSeconds(1),
-                        ttl);
+        NacosSkillSettings settings = settings(ttl);
         NacosSkillRepository.ConfigFetcher fetcher =
                 dataId -> {
                     calls.incrementAndGet();
                     return Optional.ofNullable(configs.get(dataId));
                 };
         return new NacosSkillRepository(settings, fetcher, clock);
+    }
+
+    private static NacosSkillSettings settings(Duration ttl) {
+        return new NacosSkillSettings(
+                true,
+                "http://127.0.0.1:8848",
+                "payroll-agent",
+                "",
+                "",
+                "",
+                Duration.ofSeconds(1),
+                ttl);
     }
 
     private static Duration ttl() {

@@ -1,8 +1,9 @@
 package io.agentscope.examples.payroll.domain;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
-/** 批次的审批快照：提交人、审批人、驳回原因与提交时的金额指纹。 */
+/** 批次的审批快照：提交人、审批人、驳回原因、金额指纹与提交时的节点快照。 */
 public record PayrollApproval(
         Long flowId,
         String flowName,
@@ -18,11 +19,17 @@ public record PayrollApproval(
         String rejectedByName,
         LocalDateTime rejectedAt,
         String rejectionReason,
-        String snapshotHash) {
+        String snapshotHash,
+        List<ApprovalStep> workflowSteps,
+        int currentStep) {
+
+    public PayrollApproval {
+        workflowSteps = workflowSteps == null ? List.of() : List.copyOf(workflowSteps);
+    }
 
     public static PayrollApproval empty() {
         return new PayrollApproval(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null);
+                null, List.of(), 0);
     }
 }

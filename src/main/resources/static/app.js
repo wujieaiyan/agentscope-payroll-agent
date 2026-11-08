@@ -14,6 +14,8 @@ const state = {
   runs: [],
   currentApprovals: [],
   approvalFlows: [],
+  approvalTasks: [],
+  approverOptions: null,
   selectedFlowId: null,
   dataThrough: null,
   me: null,
@@ -74,6 +76,84 @@ function applyPermissions() {
   $$('[data-permission]').forEach((element) => {
     element.classList.toggle('hidden', !can(element.dataset.permission));
   });
+  $$('#tabs .nav-group').forEach((group) => {
+    const hasVisibleChild = $$('.nav-item', group).some(
+      (item) => !item.classList.contains('hidden')
+    );
+    group.classList.toggle('hidden', !hasVisibleChild);
+  });
+}
+
+const NAV_COLLAPSED_KEY = 'payroll.nav.collapsed';
+const SIDEBAR_COLLAPSED_KEY = 'payroll.sidebar.collapsed';
+
+function readCollapsedGroups() {
+  try {
+    return JSON.parse(localStorage.getItem(NAV_COLLAPSED_KEY) || '{}') || {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function setNavGroupCollapsed(group, collapsed) {
+  if (!group) return;
+  group.classList.toggle('collapsed', collapsed);
+  const title = $('.nav-group-title', group);
+  if (title) title.setAttribute('aria-expanded', String(!collapsed));
+  const collapsedGroups = readCollapsedGroups();
+  collapsedGroups[group.dataset.navGroup] = collapsed;
+  try {
+    localStorage.setItem(NAV_COLLAPSED_KEY, JSON.stringify(collapsedGroups));
+  } catch (error) {
+    console.warn('无法保存菜单折叠状态', error);
+  }
+}
+
+function toggleNavGroup(group) {
+  setNavGroupCollapsed(group, !group.classList.contains('collapsed'));
+}
+
+function setSidebarCollapsed(collapsed) {
+  const layout = $('.app-layout');
+  layout.classList.toggle('sidebar-collapsed', collapsed);
+  const toggle = $('#sidebar-toggle');
+  if (toggle) {
+    const label = collapsed ? '展开菜单' : '折叠菜单';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  }
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch (error) {
+    console.warn('无法保存侧边栏折叠状态', error);
+  }
+}
+
+/** 菜单图标复用内置 Ant Design 图标，避免用单字充当图标。 */
+function renderNavIcons() {
+  if (typeof window.payrollAvatarMarkup !== 'function') return;
+  $$('#tabs .nav-icon[data-icon]').forEach((icon) => {
+    icon.innerHTML = window.payrollAvatarMarkup(icon.dataset.icon);
+  });
+}
+
+function initSidebar() {
+  renderNavIcons();
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch (error) {
+    collapsed = false;
+  }
+  setSidebarCollapsed(collapsed);
+  const collapsedGroups = readCollapsedGroups();
+  $$('#tabs .nav-group').forEach((group) => {
+    const isCollapsed = Boolean(collapsedGroups[group.dataset.navGroup]);
+    group.classList.toggle('collapsed', isCollapsed);
+    const title = $('.nav-group-title', group);
+    if (title) title.setAttribute('aria-expanded', String(!isCollapsed));
+  });
 }
 
 function money(value) {
@@ -100,7 +180,26 @@ function runStatusLabel(status) {
 }
 
 function approvalActionLabel(action) {
-  return { SUBMIT: '提交审批', APPROVE: '审批通过', REJECT: '驳回' }[action] || action || '—';
+  return {
+    SUBMIT: '提交审批',
+    STEP_APPROVE: '节点通过',
+    APPROVE: '审批通过',
+    REJECT: '驳回',
+  }[action] || action || '—';
+}
+
+function approverLabel(type, value) {
+  if (type === 'USER') return '用户 ' + value;
+  if (type === 'PERMISSION') return '权限 ' + value;
+  return '角色 ' + value;
+}
+
+function matchesApprovalStep(step) {
+  if (!step || !step.approver_type) return true;
+  if (!state.authEnabled || !state.me) return true;
+  if (step.approver_type === 'USER') return state.me.username === step.approver_value;
+  if (step.approver_type === 'ROLE') return state.me.role_code === step.approver_value;
+  return true;
 }
 
 function emailStatusLabel(status) {
@@ -236,9 +335,13 @@ const TAB_META = {
     group: '人事运营', eyebrow: 'PAYROLL', title: '工资批次',
     subtitle: '预览、微调、审批与出账；金额由确定性引擎重新核算并留痕。',
   },
+  tasks: {
+    group: '人事运营', eyebrow: 'APPROVAL', title: '我的待办',
+    subtitle: '当前审批节点由你处理的工资批次；可直接查看明细、通过或驳回。',
+  },
   approval: {
-    group: '人事运营', eyebrow: 'APPROVAL', title: '审批链',
-    subtitle: '按部门与实发金额配置审批链，部门专属规则优先于全局规则。',
+    group: '人事运营', eyebrow: 'APPROVAL', title: '审批工作流',
+    subtitle: '按部门与实发金额配置审批工作流，节点按顺序执行并支持角色/指定用户审批。',
   },
   chat: {
     group: '智能体', eyebrow: 'AGENT', title: '智能问答',
@@ -247,6 +350,10 @@ const TAB_META = {
   agents: {
     group: '智能体', eyebrow: 'AGENT', title: 'Agent 管理',
     subtitle: '维护智能体开关、模型、角色提示词与工具技能。',
+  },
+  skills: {
+    group: '智能体', eyebrow: 'SKILL', title: '技能管理',
+    subtitle: '技能存储于 Nacos 的 payroll-agent 分组；编辑 <id>.md 即可调整角色提示词。',
   },
   flows: {
     group: '智能体', eyebrow: 'AGENT', title: '流程编排',
@@ -278,9 +385,11 @@ function updatePageHead(name) {
 
 function showTab(name) {
   updatePageHead(name);
-  $$('#tabs button').forEach((button) => {
+  $$('#tabs .nav-item').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === name);
   });
+  const activeButton = name ? $(`#tabs .nav-item[data-tab="${name}"]`) : null;
+  if (activeButton) setNavGroupCollapsed(activeButton.closest('.nav-group'), false);
   $$('.tab').forEach((tab) => {
     tab.classList.toggle('active', tab.id === 'tab-' + name);
   });
@@ -289,6 +398,7 @@ function showTab(name) {
   if (name === 'policies') loadPolicies().catch(showError);
   if (name === 'attendance') loadAttendance().catch(showError);
   if (name === 'payroll') loadRuns().catch(showError);
+  if (name === 'tasks') loadTasks().catch(showError);
   if (name === 'approval') loadApprovalTab().catch(showError);
   if (name === 'chat') {
     initChat().catch(showError);
@@ -298,6 +408,7 @@ function showTab(name) {
   if (name === 'departments') loadDepartments(true).catch(showError);
   if (name === 'roles') loadRolesTab().catch(showError);
   if (name === 'agents') initAgentsTab();
+  if (name === 'skills') initSkillsTab();
   if (name === 'flows') initFlowsTab();
 }
 
@@ -648,8 +759,15 @@ function renderRunDetail() {
     can('payroll:write') &&
     !state.previewDirty &&
     failures.length === 0;
+  const steps = approval.workflow_steps || [];
+  const currentStep = steps.length
+    ? steps[Math.min(Number(approval.current_step || 0), steps.length - 1)]
+    : null;
   const canApprove =
-    run.status === 'PENDING_APPROVAL' && can('payroll:approve') && !isSubmitter;
+    run.status === 'PENDING_APPROVAL' &&
+    can('payroll:approve') &&
+    !isSubmitter &&
+    matchesApprovalStep(currentStep);
   $('#run-submit').classList.toggle('hidden', !canSubmit);
   $('#run-approve').classList.toggle('hidden', !canApprove);
   $('#run-reject').classList.toggle('hidden', !canApprove);
@@ -846,7 +964,34 @@ function renderRunApproval(run) {
     box.innerHTML = '';
     return;
   }
-  const lines = [`<div><strong>审批链：</strong>${esc(approval.flow_name || '—')}</div>`];
+  const lines = [`<div><strong>审批工作流：</strong>${esc(approval.flow_name || '—')}</div>`];
+  const steps = approval.workflow_steps || [];
+  const current = Number(approval.current_step || 0);
+  const finished = ['APPROVED', 'FINALIZED', 'SENT'].includes(run.status);
+  const rejected = run.status === 'REJECTED';
+  if (steps.length) {
+    lines.push(
+      '<div class="wf-track">' +
+        steps
+          .map((step, index) => {
+            const stateClass = rejected
+              ? ''
+              : finished || index < current
+                ? 'done'
+                : index === current
+                  ? 'active'
+                  : '';
+            return (
+              `<span class="wf-step ${stateClass}">` +
+              `<b>${index + 1}. ${esc(step.name)}</b>` +
+              `<small>${esc(approverLabel(step.approver_type, step.approver_value))}</small>` +
+              '</span>'
+            );
+          })
+          .join('<span class="wf-arrow">→</span>') +
+        '</div>'
+    );
+  }
   if (approval.submitted_by_name) {
     lines.push(
       `<div>提交：${esc(approval.submitted_by_name)} · ${formatDateTime(approval.submitted_at)}` +
@@ -882,7 +1027,9 @@ function renderApprovalHistory() {
     state.currentApprovals
       .map(
         (event) =>
-          `${approvalActionLabel(event.action)} · ${esc(event.actor_name || '系统')} · ` +
+          `${approvalActionLabel(event.action)}${
+            event.step_name ? '「' + esc(event.step_name) + '」' : ''
+          } · ${esc(event.actor_name || '系统')} · ` +
           `${formatDateTime(event.created_at)}${event.comment ? ' · ' + esc(event.comment) : ''}`
       )
       .join(' ｜ ');
@@ -927,7 +1074,13 @@ async function approveRun() {
     });
     showRunDetail(detail);
     await loadRuns();
-    toast('审批已通过，可以出账', 'success');
+    const approval = detail.run.approval || {};
+    const stepCount = (approval.workflow_steps || []).length;
+    if (detail.run.status === 'PENDING_APPROVAL' && stepCount > 1) {
+      toast(`已通过当前节点，进入第 ${Number(approval.current_step || 0) + 1}/${stepCount} 级审批`, 'success');
+    } else {
+      toast('审批已通过，可以出账', 'success');
+    }
   } catch (error) {
     showError(error);
   }
@@ -1083,11 +1236,87 @@ async function importWorkbook(type, input) {
   }
 }
 
-// ---------------------------------------------------------------- 审批链
+// ---------------------------------------------------------------- 我的待办
+
+async function loadTasks() {
+  state.approvalTasks = await api('/api/approval/tasks');
+  renderTasks();
+}
+
+function renderTasks() {
+  const body = $('#task-rows');
+  if (!body) return;
+  if (!state.approvalTasks.length) {
+    body.innerHTML = '<tr><td colspan="9" class="hint">当前没有需要你处理的审批任务。</td></tr>';
+    return;
+  }
+  body.innerHTML = state.approvalTasks
+    .map((task) => {
+      const step = task.step || {};
+      return `
+      <tr>
+        <td>#${task.run_id}</td>
+        <td>${esc(task.period)}</td>
+        <td>${esc(task.scope)}</td>
+        <td class="num">${money(task.total_net)}</td>
+        <td><strong>${esc(step.name)}</strong><br>
+          <small class="hint">${esc(approverLabel(step.approver_type, step.approver_value))}</small></td>
+        <td><span class="badge">${Number(task.current_step || 0) + 1}/${task.step_count}</span></td>
+        <td>${esc(task.submitted_by_name) || '—'}</td>
+        <td>${formatDateTime(task.submitted_at)}</td>
+        <td class="actions-cell">
+          <button class="link" data-task-view="${task.run_id}">查看</button>
+          <button class="link" data-task-approve="${task.run_id}">通过</button>
+          <button class="link danger-text" data-task-reject="${task.run_id}">驳回</button>
+        </td>
+      </tr>`;
+    })
+    .join('');
+}
+
+async function viewTaskRun(runId) {
+  const detail = await api('/api/runs/' + encodeURIComponent(runId));
+  showTab('payroll');
+  state.lastEmailReport = null;
+  showRunDetail(detail);
+  $('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function actOnTask(runId, action) {
+  const approved = action === 'approve';
+  const promptText = approved ? '审批意见（可选）' : '请填写驳回原因（必填）';
+  const text = prompt(promptText);
+  if (text === null) return;
+  if (!approved && !text.trim()) {
+    toast('驳回原因不能为空', 'error');
+    return;
+  }
+  try {
+    const detail = await api(`/api/runs/${runId}/${approved ? 'approve' : 'reject'}`, {
+      method: 'POST',
+      body: approved ? { comment: text } : { reason: text },
+    });
+    await loadTasks();
+    await loadRuns();
+    if (!approved) {
+      toast('已驳回批次', 'success');
+    } else {
+      const pending = detail.run && detail.run.status === 'PENDING_APPROVAL';
+      toast(pending ? '已通过当前节点' : '审批已通过，可以出账', 'success');
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+// ---------------------------------------------------------------- 审批工作流
 
 async function loadApprovalTab() {
   if (!state.departments.length) await loadDepartments(true);
   fillFlowDepartmentSelect();
+  if (!state.approverOptions) {
+    state.approverOptions = await api('/api/approval/approvers');
+  }
   await loadApprovalFlows();
 }
 
@@ -1100,7 +1329,7 @@ function renderApprovalFlows() {
   const body = $('#flow-rows');
   if (!body) return;
   if (!state.approvalFlows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="hint">暂无审批链</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="hint">暂无审批工作流</td></tr>';
     return;
   }
   body.innerHTML = state.approvalFlows
@@ -1113,6 +1342,13 @@ function renderApprovalFlows() {
           flow.max_amount === null || flow.max_amount === undefined
             ? ' 起'
             : ' ~ ' + Number(flow.max_amount).toFixed(2)
+        }</td>
+        <td>${
+          (flow.steps || []).length
+            ? (flow.steps || [])
+                .map((step, index) => `${index + 1}. ${esc(step.name)}`)
+                .join(' → ')
+            : '<span class="hint">单级（审批权限）</span>'
         }</td>
         <td class="num">${flow.priority}</td>
         <td><span class="status ${flow.enabled ? 'SENT' : 'FAILED'}">${flow.enabled ? '启用' : '停用'}</span></td>
@@ -1142,11 +1378,94 @@ function fillFlowDepartmentSelect() {
   if (previous) select.value = previous;
 }
 
+function renumberFlowSteps() {
+  $$('#flow-steps .step-row').forEach((row, index) => {
+    const order = row.querySelector('.step-order');
+    if (order) order.textContent = String(index + 1);
+  });
+}
+
+function fillStepApproverSelect(row, selected) {
+  const type = row.querySelector('[data-step-field="approver_type"]').value;
+  const select = row.querySelector('[data-step-field="approver_value"]');
+  if (!select) return;
+  const options = state.approverOptions || { roles: [], users: [] };
+  const list =
+    type === 'USER'
+      ? (options.users || []).map((user) => ({
+          value: user.username,
+          label: `${user.display_name || user.username} @${user.username}`,
+        }))
+      : (options.roles || []).map((role) => ({
+          value: role.code,
+          label: `${role.name || role.code} (${role.code})`,
+        }));
+  if (selected && !list.some((option) => option.value === selected)) {
+    list.unshift({ value: selected, label: selected + '（当前配置）' });
+  }
+  select.innerHTML =
+    list
+      .map((option) => `<option value="${esc(option.value)}">${esc(option.label)}</option>`)
+      .join('') || '<option value="">暂无可选项</option>';
+  if (selected) select.value = selected;
+}
+
+function addFlowStep(step = {}) {
+  const list = $('#flow-steps');
+  if (!list) return;
+  const row = document.createElement('div');
+  row.className = 'step-row';
+  row.innerHTML = `
+    <div class="step-order"></div>
+    <input data-step-field="name" maxlength="64" placeholder="节点名称，如 财务复核"
+      value="${esc(step.name || '')}">
+    <select data-step-field="approver_type">
+      <option value="ROLE">按角色</option>
+      <option value="USER">指定用户</option>
+    </select>
+    <select data-step-field="approver_value"></select>
+    <input data-step-field="min_amount" type="number" step="0.01" min="0" placeholder="金额下限（可空）">
+    <input data-step-field="max_amount" type="number" step="0.01" min="0" placeholder="金额上限（可空）">
+    <button type="button" class="link danger-text" data-remove-step>删除</button>`;
+  list.append(row);
+  row.querySelector('[data-step-field="approver_type"]').value =
+    step.approver_type || 'ROLE';
+  row.querySelector('[data-step-field="min_amount"]').value =
+    step.min_amount === null || step.min_amount === undefined ? '' : step.min_amount;
+  row.querySelector('[data-step-field="max_amount"]').value =
+    step.max_amount === null || step.max_amount === undefined ? '' : step.max_amount;
+  fillStepApproverSelect(row, step.approver_value);
+  renumberFlowSteps();
+}
+
+function collectFlowSteps() {
+  return $$('#flow-steps .step-row')
+    .map((row) => {
+      const field = (name) => row.querySelector(`[data-step-field="${name}"]`);
+      return {
+        name: field('name').value.trim(),
+        approver_type: field('approver_type').value,
+        approver_value: field('approver_value').value,
+        min_amount: num(field('min_amount').value),
+        max_amount: num(field('max_amount').value),
+      };
+    })
+    .filter(
+      (step) =>
+        step.name ||
+        step.approver_value ||
+        step.min_amount !== null ||
+        step.max_amount !== null
+    );
+}
+
 function showApprovalFlowForm(flow) {
   const form = $('#flow-form');
   form.reset();
   form.dataset.flowId = flow ? flow.flow_id : '';
-  $('#flow-form-title').textContent = flow ? `编辑审批链 · ${flow.name}` : '新增审批链';
+  $('#flow-form-title').textContent = flow
+    ? `编辑审批工作流 · ${flow.name}`
+    : '新增审批工作流';
   form.elements.name.value = flow ? flow.name : '';
   form.elements.scope_type.value = flow ? flow.scope_type : 'GLOBAL';
   fillFlowDepartmentSelect();
@@ -1159,6 +1478,11 @@ function showApprovalFlowForm(flow) {
   form.elements.priority.value = flow ? flow.priority : 100;
   form.elements.enabled.checked = flow ? flow.enabled : true;
   form.elements.description.value = flow ? flow.description || '' : '';
+  const stepList = $('#flow-steps');
+  if (stepList) {
+    stepList.innerHTML = '';
+    (flow && flow.steps ? flow.steps : []).forEach(addFlowStep);
+  }
   toggleFlowDepartmentField();
   form.classList.remove('hidden');
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2316,9 +2640,18 @@ async function resetChat() {
 }
 
 function bindEvents() {
-  $$('#tabs button').forEach((button) => {
+  $$('#tabs .nav-item').forEach((button) => {
     button.addEventListener('click', () => showTab(button.dataset.tab));
   });
+  $$('#tabs .nav-group-title').forEach((title) => {
+    title.addEventListener('click', () => toggleNavGroup(title.closest('.nav-group')));
+  });
+  const sidebarToggle = $('#sidebar-toggle');
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener('click', () => {
+      setSidebarCollapsed(!$('.app-layout').classList.contains('sidebar-collapsed'));
+    });
+  }
 
   $('#employee-import').addEventListener('change', (event) =>
     importWorkbook('employees', event.target)
@@ -2777,6 +3110,17 @@ function bindEvents() {
   $('#flow-new').addEventListener('click', () => showApprovalFlowForm(null));
   $('#flow-cancel').addEventListener('click', () => $('#flow-form').classList.add('hidden'));
   $('#flow-scope-type').addEventListener('change', toggleFlowDepartmentField);
+  $('#flow-add-step').addEventListener('click', () => addFlowStep());
+  $('#flow-steps').addEventListener('click', (event) => {
+    if (!event.target.hasAttribute('data-remove-step')) return;
+    const row = event.target.closest('.step-row');
+    if (row) row.remove();
+    renumberFlowSteps();
+  });
+  $('#flow-steps').addEventListener('change', (event) => {
+    if (event.target.dataset.stepField !== 'approver_type') return;
+    fillStepApproverSelect(event.target.closest('.step-row'));
+  });
   $('#flow-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -2790,6 +3134,7 @@ function bindEvents() {
       priority: num(form.elements.priority.value) ?? 100,
       enabled: form.elements.enabled.checked,
       description: form.elements.description.value.trim(),
+      steps: collectFlowSteps(),
     };
     try {
       const flowId = form.dataset.flowId;
@@ -2799,7 +3144,7 @@ function bindEvents() {
       });
       form.classList.add('hidden');
       await loadApprovalFlows();
-      toast('审批链已保存', 'success');
+      toast('审批工作流已保存', 'success');
     } catch (error) {
       showError(error);
     }
@@ -2813,11 +3158,11 @@ function bindEvents() {
     }
     const deleteId = event.target.dataset.deleteFlow;
     if (!deleteId) return;
-    if (!confirm('确认删除该审批链？已提交的批次仍保留审批链名称快照。')) return;
+    if (!confirm('确认删除该审批工作流？已提交的批次仍保留节点快照与审批轨迹。')) return;
     try {
       await api(`/api/approval/flows/${deleteId}`, { method: 'DELETE' });
       await loadApprovalFlows();
-      toast('审批链已删除', 'success');
+      toast('审批工作流已删除', 'success');
     } catch (error) {
       showError(error);
     }
@@ -2831,6 +3176,25 @@ function bindEvents() {
   $('#run-finalize').addEventListener('click', finalizeRun);
   $('#run-send').addEventListener('click', sendRun);
   $('#runs-refresh').addEventListener('click', () => loadRuns().catch(showError));
+  $('#tasks-refresh').addEventListener('click', () => loadTasks().catch(showError));
+  $('#task-rows').addEventListener('click', async (event) => {
+    const viewId = event.target.dataset.taskView;
+    if (viewId) {
+      try {
+        await viewTaskRun(viewId);
+      } catch (error) {
+        showError(error);
+      }
+      return;
+    }
+    const approveId = event.target.dataset.taskApprove;
+    if (approveId) {
+      await actOnTask(approveId, 'approve');
+      return;
+    }
+    const rejectId = event.target.dataset.taskReject;
+    if (rejectId) await actOnTask(rejectId, 'reject');
+  });
   $('#run-rows').addEventListener('input', (event) => {
     if (!event.target.dataset.field) return;
     state.previewDirty = true;
@@ -2855,6 +3219,7 @@ function bindEvents() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindEvents();
+  initSidebar();
   try {
     await loadMe();
     await loadHealth();

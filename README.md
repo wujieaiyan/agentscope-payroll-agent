@@ -44,8 +44,10 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 发薪前校验 | 勾稽关系、社保基数上下限、实发是否为负等 6 项检查 |
 | 考勤核对 | 事假、病假、旷工、工作日/休息日/法定节假日加班 |
 | 主数据维护 | 管理台中新增/修改员工、停用员工、维护月度考核与绩效系数 |
-| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 22 项权限码；用户、部门、角色均可在管理台维护 |
-| Agent 管理 | 专家智能体定义（名称、头像、标签、绑定技能、上下架、公开/私有）存储于 Nacos，支持搜索筛选与增删改；未启用 Nacos 时只读回退三个内置智能体 |
+| 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 23 项权限码；用户、部门、角色均可在管理台维护 |
+| 管理台导航 | 侧边栏为树状分组菜单：分组可折叠，宽屏可整体收起为图标栏，折叠状态保存在浏览器本地 |
+| Agent 管理 | 专家智能体定义（名称、头像、标签、绑定技能、上下架、公开/私有）存储于 Nacos，支持搜索筛选与增删改；头像可选内置 Ant Design 图标或 Emoji；未启用 Nacos 时只读回退三个内置智能体 |
+| 技能管理 | 以 `<技能ID>.md` 形式维护 Nacos 中的技能提示词，支持新增、编辑、删除；内置技能可被 Nacos 版本覆盖，删除覆盖后回退内置；被智能体引用的自定义技能禁止删除 |
 | 流程编排 | 拖拽画布把已注册智能体与条件判断组成 DAG：分支、汇合、同层并行；可保存多条流程并指定全局默认，下一轮对话生效；未设置时沿用原流水线 |
 | 多用户会话 | 每个登录用户拥有独立会话列表；同一用户可打开多个会话窗口，消息按会话持久化并按用户隔离 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
@@ -53,7 +55,7 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 对话界面 | “智能问答”页签默认由三个智能体串行完成：计算 → 验证 → 核算；激活全局默认流程后按 DAG 执行。SSE 流式输出各智能体阶段、工具时间线与模型思考过程 |
 | 城市政策 | 每个城市独立维护个税参数、社保公积金比例与基数上下限 |
 | 工资批次 | 预览 → 人工微调 → 提交审批 → 审批通过 → 出账（服务端重算）→ 确认发送 |
-| 审批链 | 全局/部门审批链可配置优先级与金额区间；提交人不能自批；金额指纹固定审批快照，审批后数据变化必须重新提交 |
+| 审批工作流 | 全局/部门审批工作流可配置优先级与金额区间；节点按顺序多级审批，审批人可按角色或指定用户；「我的待办」只显示当前节点由自己处理、且不是自己提交的批次；提交人不能自批；金额指纹固定审批快照，审批后数据变化必须重新提交 |
 | Excel 导出 | 工资明细、核算失败、出账说明三个工作表 |
 | 明细入库 | 批次、逐人明细、微调快照、失败原因、邮件投递审计全部落 H2 |
 | 邮件发送 | 仅 dry-run：逐人返回成功/失败状态与失败原因，不真实投递 |
@@ -134,9 +136,10 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 ## 管理台界面
 
 采用与 `knowledge-base-console` 一致的暖纸底色 + 墨绿主色 + 黄铜强调色：左侧 236px 深色导航按
-“人事运营 / 智能体 / 系统管理”分组，顶栏展示面包屑、数据连接状态与当前账号，页面统一为
-eyebrow + 标题 + 说明。智能问答保留微信式左右气泡。页签的标题、副标题与面包屑由
-`static/app.js` 的 `TAB_META` 统一维护；新增页签时需同时补充 `TAB_META` 与
+“人事运营 / 智能体 / 系统管理”分组，分组标题可点击折叠，顶栏菜单按钮可把侧边栏整体收起为
+64px 图标栏；两种折叠状态都写入 `localStorage`，刷新后保持。顶栏展示面包屑、数据连接状态与
+当前账号，页面统一为 eyebrow + 标题 + 说明。智能问答保留微信式左右气泡。页签的标题、副标题与
+面包屑由 `static/app.js` 的 `TAB_META` 统一维护；新增页签时需同时补充 `TAB_META` 与
 `data-permission`，否则导航或页头不会更新。
 
 ## 管理台使用流程
@@ -154,15 +157,19 @@ eyebrow + 标题 + 说明。智能问答保留微信式左右气泡。页签的�
 5. **工资批次**：选择期间与范围（全员或某部门）预览；有失败员工时不能提交审批。
    可对个别员工微调绩效奖金或其他补贴（微调值是最终值，不再叠加系数），
    页面会提示未应用的修改并禁用提交审批。
-6. **提交审批**：批次进入 `PENDING_APPROVAL`，按“部门优先、金额区间、优先级”匹配审批链，
-   并把期间、范围与逐人结果序列化为 SHA-256 金额指纹。
+6. **提交审批**：批次进入 `PENDING_APPROVAL`，按“部门优先、金额区间、优先级”匹配审批工作流，
+   并把期间、范围与逐人结果序列化为 SHA-256 金额指纹；同时冻结工作流节点快照，
+   之后修改流程配置不会影响在途批次。
 7. **审批**：具备 `payroll:approve` 的用户可通过或驳回（必须填写原因）；提交人不能审批/驳回
-   自己提交的批次。审批时重新计算指纹，提交后任何明细变化都会返回 409 并要求重新提交。
+   自己提交的批次。工作流节点按顺序执行，审批人按角色或指定用户匹配，只有当前节点审批人
+   能在「我的待办」中处理；中间节点通过记录“节点通过”事件，最后节点通过才进入 `APPROVED`。
+   审批时重新计算指纹，提交后任何明细变化都会返回 409 并要求重新提交。
 8. **出账**：审批通过后服务端按微调快照重新核算并与审批指纹比对，一致才写入 `FINALIZED`，
    生成 `output/payroll-<期间>-run<id>.xlsx`；不一致同样返回 409。
 9. **发送**：必须显式确认；发送后展示逐人结果（成功/失败及原因），批次进入 `SENT`，重复发送被拒绝。
-10. **审批链配置**：`approval:manage` 用户可在“审批链”页签维护全局/部门流程。同一范围只能有一条
-    生效流程；部门流程优先于全局流程，再按优先级与创建顺序匹配。
+10. **审批工作流配置**：`approval:manage` 用户可在“审批工作流”页签维护全局/部门流程。同一范围只能有一条
+    生效流程；部门流程优先于全局流程，再按优先级与创建顺序匹配。节点可设置金额区间，
+    为空表示不限制；不配置节点时沿用单级审批（任何拥有审批权限的用户）。
 11. **智能问答**：在管理台直接提问，回答只做查询、核算与解释；数据维护仍走对应页签，
     金额始终来自确定性引擎。左侧“我的会话”可新建多个窗口，每个窗口独立上下文；
     消息持久化并按登录用户隔离。对话依赖 `PAYROLL_MODEL`；模型不可用时不影响其他管理功能。
@@ -189,14 +196,15 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 
 | 角色 | 说明 | 主要权限 |
 | --- | --- | --- |
-| `ADMIN` | 系统管理员 | 全部 22 项权限，含用户、部门、角色、审计、审批链、Agent 管理与流程编排 |
+| `ADMIN` | 系统管理员 | 全部 23 项权限，含用户、部门、角色、审计、审批链、Agent 管理、技能管理与流程编排 |
 | `HR` | 人事专员 | 员工/考核/考勤/工资批次读写、审批工资批次、Excel 导入、智能问答；政策只读 |
 | `VIEWER` | 只读访客 | 员工/考核/政策/考勤/工资批次/部门/角色只读 + 智能问答 |
 
 权限码按“查看/维护”成对划分：`employee:*`、`review:*`、`policy:*`、`attendance:*`、`payroll:*`，
 外加 `payroll:approve`、`approval:manage`、`import:use`、`chat:use`、`department:read|manage`、
-`role:read|manage`、`user:manage`、`audit:read`、`agent:manage`、`flow:manage`。
-`agent:manage` 与 `flow:manage` 仅内置管理员拥有，分别用于 Agent 管理页签与流程编排页签。
+`role:read|manage`、`user:manage`、`audit:read`、`agent:manage`、`skill:manage`、`flow:manage`。
+`agent:manage`、`skill:manage` 与 `flow:manage` 仅内置管理员拥有，分别用于 Agent 管理、
+技能管理与流程编排页签。
 自定义角色可自由组合权限码；内置角色不可修改或删除。
 
 安全规则：不能停用自己或修改自己的角色；系统始终保留至少一名启用状态的管理员；
@@ -205,21 +213,30 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 
 ## Agent 管理（Nacos）
 
-管理台“Agent 管理”页签用于维护专家智能体定义：名称、Emoji 头像、描述、标签、绑定技能、
-可见范围（公开/私有）与上下架状态。整个列表作为一个 JSON 配置保存在 Nacos
+管理台“Agent 管理”页签用于维护专家智能体定义：名称、头像、描述、标签、绑定技能、
+可见范围（公开/私有）与上下架状态。头像可从内置的 26 个 Ant Design 图标中选择，
+也可直接填写 Emoji；图标以 `ant:<name>`（如 `ant:robot`）随定义持久化，前端本地渲染，
+不依赖外部 CDN。整个列表作为一个 JSON 配置保存在 Nacos
 （dataId `payroll-agents.json`，group 默认 `payroll-agent`），读路径带 TTL 缓存，
 写路径直接调用 Nacos v1 OpenAPI。
 
-- 启用条件：设置 `PAYROLL_NACOS_SERVER`。未启用或配置缺失时，列表回退到由三个角色技能生成的
-  内置智能体（计算/复核/入账专家），页面只读并禁用保存。
+- 启用条件：默认连接本机 `http://127.0.0.1:8848`，可用 `PAYROLL_NACOS_SERVER` 指向其他实例
+  （可带 `/nacos` 上下文路径，客户端会自动去除），`PAYROLL_NACOS_ENABLED=false` 显式关闭。
+  未启用或配置缺失时，列表回退到由三个角色技能生成的内置智能体（计算/复核/入账专家），页面只读并禁用保存。
 - 首次保存会把当前完整列表（含内置默认项）写入 Nacos；之后按 `id` 做新建或更新。
 - 更新保留原 `createdBy`/`createdAt`，只刷新内容和 `updatedAt`；删除直接重写列表。
-- 校验：名称 ≤30 字、描述 ≤200 字、头像 ≤8 字符、标签 ≤6 个且单个 ≤12 字、
+- 校验：名称 ≤30 字、描述 ≤200 字、头像 ≤40 字符（容纳 `ant:<name>`）、标签 ≤6 个且单个 ≤12 字、
   技能必须存在于当前技能仓库、状态/可见范围必须为枚举值。
+- 角色隔离：流程节点和自定义技能智能体只注册其绑定的技能（AgentScope 默认会把仓库内全部技能
+  注册进加载工具，仅靠 SkillFilter 不足以阻止模型加载未绑定技能）；自定义技能也不会继承薪酬
+  口径提示词与薪酬工具白名单，确保“java工程师 + ai-coding”这类角色不会被拉回薪酬核算。
+  每个会话持久化当前角色（`chat_sessions.persona_key`），切换默认流程/智能体时清空上一角色的
+  会话上下文与向量记忆，事件流输出“检测到智能体切换，已隔离上一角色的会话上下文”。
 - 审计：新增/修改/删除分别记录 `agent.create`、`agent.update`、`agent.delete`，
   修改与删除附带变更前快照。
 - 智能体定义可直接被“流程编排”的 `AGENT` 节点引用；未设置全局默认流程时，对话仍固定使用
-  计算 → 验证 → 核算三阶段流水线。
+  计算 → 验证 → 核算三阶段流水线。已设置但无法解析（Nacos 抖动、流程不存在、引用智能体下架）
+  时直接报错，不会静默回退薪酬链路；Nacos 读取抖动期间沿用上次成功加载的流程与智能体列表。
 - 流程本身也存储在 Nacos：`payroll-flows.json` 保存流程数组，`payroll-flow-settings.json`
   保存 `activeFlowId`。画布与执行语义详见 [docs/agent-orchestration.md](docs/agent-orchestration.md)，
   配置模板见 `docs/nacos-skills/payroll-flows.json`。
@@ -246,6 +263,28 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 
 Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口需要该账号拥有配置发布权限。
 多个实例同时编辑时按“最后一次写入”覆盖，暂未做版本号或乐观锁。
+
+## 技能管理（Nacos）
+
+管理台“技能管理”页签维护技能提示词，存储为 Nacos 配置 `<技能ID>.md`
+（group 默认 `payroll-agent`，类型 `markdown`），列表通过 Nacos 搜索接口发现。
+这与 Agent 管理共用 `PAYROLL_NACOS_SERVER` 与账号配置。
+
+- 内容格式：正文为技能提示词，保存时自动写入 YAML frontmatter 的 `name` 与 `description`；
+  详情接口返回去掉 frontmatter 的正文，便于表单直接编辑。
+- 内置覆盖：三个内置角色技能（`payroll-calculator`、`payroll-validator`、`payroll-accountant`）
+  在没有 Nacos 配置时使用代码内置版本；在页面编辑内置技能并保存即形成覆盖，列表标记“覆盖内置”。
+  删除覆盖配置后自动回退内置版本。
+- 自定义技能：ID 规则 `^[a-z][a-z0-9-]{1,63}$`；创建后立即出现在 Agent 管理的可绑定技能清单中，
+  技能仓库按 TTL 缓存刷新发现结果。
+- 删除保护：自定义技能仍被任一智能体引用时拒绝删除，并返回引用者名称；需先在 Agent 管理解绑。
+  内置技能若没有 Nacos 覆盖版本，同样拒绝删除。
+- 校验：描述 ≤200 字、正文非空且 ≤200000 字符、ID 不能与已有技能（含内置技能）重名；
+  覆盖内置技能需使用编辑而非新建。
+- 审计：新增/修改/删除分别记录 `skill.create`、`skill.update`、`skill.delete`；
+  审计元数据只含 ID、描述、来源、是否内置与正文长度，不保存提示词正文。
+- 只读回退：`PAYROLL_NACOS_ENABLED=false` 时页面只读，仍可查看内置技能内容；
+  已启用但 Nacos 连接失败时列表回退内置技能，保存会提示写入失败。
 
 ## 流式对话（SSE）
 
@@ -315,7 +354,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 - **查询类问题快速返回**：计算记录中没有工资核算对象时（员工清单、档案、政策、考勤），直接返回计算记录，
   不再交给核算智能体改写，避免小模型编造工资合计或“验证不通过”。
 - **向量记忆（可选）**：开启后把用户问题与压缩摘要写入 Elasticsearch `payroll-chat-memory`，
-  按 `user_id` 隔离召回相关历史片段，帮助解析“他”“上次那个部门”等指代。
+  默认只召回**当前会话**的历史片段，避免不同角色/话题的消息串线；
+  `PAYROLL_MEMORY_CROSS_SESSION=true` 才按 `user_id` 跨会话召回，帮助解析“他”“上次那个部门”等指代。
   助手答复不入索引；金额与比例在写入前替换为占位符，注入前再清洗一次，所有数值仍必须重新调用工具获取。
   默认关闭，开启步骤：
 
@@ -340,9 +380,11 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 - **角色 Skill 外置（可选）**：三个角色的提示词已拆成 AgentScope 动态技能，系统提示只保留
   金额安全规则与“第一步加载技能”的指令，模型通过 `load_skill_through_path` 按需读取角色说明。
-  默认使用代码内置版本；设置 `PAYROLL_NACOS_SERVER` 后按 `payroll-calculator.md`、
+  默认从本机 Nacos 读取；可用 `PAYROLL_NACOS_ENABLED=false` 回到纯代码内置版本，
+  或用 `PAYROLL_NACOS_SERVER` 指向其他实例。设置后按 `payroll-calculator.md`、
   `payroll-validator.md`、`payroll-accountant.md`（group 默认 `payroll-agent`）从 Nacos 读取，
-  缺失或连接失败时逐个技能回退内置版本。发布模板与命令见
+  缺失或连接失败时逐个技能回退内置版本。自定义技能同样以 `<技能ID>.md` 存放在该 group，
+  由管理台“技能管理”维护并自动纳入技能仓库发现。发布模板与命令见
   [`docs/nacos-skills/README.md`](docs/nacos-skills/README.md)。
   业务工具挂在未激活的技能工具组中，技能加载成功后才会出现在模型工具列表，
   因此“先加载技能再核算”由工具可见性强制，而不是只靠提示词约束。
@@ -442,7 +484,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
 | `PAYROLL_AUDIT_RETENTION_DAYS` | `180` | 审计日志保留天数，启动时清理更早记录 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
-| `PAYROLL_NACOS_SERVER` | 空 | Nacos 地址；设置后启用角色 Skill 与 Agent 定义外置，例如 `http://127.0.0.1:8848` |
+| `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |
 | `PAYROLL_NACOS_GROUP` | `payroll-agent` | 技能与 Agent 配置所在分组 |
 | `PAYROLL_NACOS_NAMESPACE` | 空 | 命名空间（Nacos 的 tenant） |
@@ -489,9 +531,11 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | POST | `/api/runs/{id}/reject` | 驳回，body `{"reason":"..."}`（需 `payroll:approve`，不能自驳） |
 | GET | `/api/runs/{id}/approvals` | 审批轨迹（需 `payroll:read`） |
 | POST | `/api/runs/{id}/finalize` | 校验审批快照后重算并出账，生成 Excel |
-| GET | `/api/approval/flows` | 审批链列表（需 `approval:manage`） |
-| POST | `/api/approval/flows` | 新建审批链，按 `scope_type` 区分 `GLOBAL`/`DEPARTMENT` |
-| PUT/DELETE | `/api/approval/flows/{id}` | 修改 / 删除审批链 |
+| GET | `/api/approval/flows` | 审批工作流列表（需 `approval:manage`） |
+| POST | `/api/approval/flows` | 新建审批工作流，按 `scope_type` 区分 `GLOBAL`/`DEPARTMENT`，`steps` 为有序节点数组 |
+| PUT/DELETE | `/api/approval/flows/{id}` | 修改 / 删除审批工作流 |
+| GET | `/api/approval/tasks` | 我的待办：当前节点由当前用户角色或账号处理的批次（需 `payroll:approve`） |
+| GET | `/api/approval/approvers` | 节点审批人候选项：全部角色与启用用户（需 `approval:manage`） |
 | POST | `/api/runs/{id}/send` | 全员 dry-run 发送，需 `{"confirm":true}` |
 | GET | `/api/runs/{id}/excel` | 下载批次 Excel |
 | POST | `/api/chat` | 管理台对话，body `{"message":"..."}`（≤2000 字符），返回回答与调用工具 |
@@ -518,6 +562,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | GET | `/api/admin/agents/meta` | 存储可写性、Nacos 位置与已有标签集合 |
 | GET | `/api/admin/agents/skills` | 可绑定技能清单（名称、描述、来源） |
 | PUT/DELETE | `/api/admin/agents/{id}` | 修改 / 删除智能体定义（需 `agent:manage`，Nacos 未启用时拒绝写） |
+| GET/POST | `/api/admin/skills` | 技能列表（支持 `keyword`，返回可写性与 Nacos 位置）/ 新建技能（需 `skill:manage`） |
+| GET/PUT/DELETE | `/api/admin/skills/{id}` | 查看正文 / 修改 / 删除技能（删除被智能体引用的自定义技能会拒绝） |
 | GET/POST | `/api/admin/flows` | 流程列表与激活状态 / 新建流程（需 `flow:manage`） |
 | GET | `/api/admin/flows/meta` | 存储可写性、Nacos 位置与可选智能体 |
 | PUT/DELETE | `/api/admin/flows/{id}` | 更新 / 删除流程（默认流程不可删） |
@@ -540,7 +586,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 - 覆盖范围：`/api/**` 的 POST/PUT/DELETE，以及登录成功/失败、退出、修改密码。
 - 显式事件：员工、考核、考勤、城市政策、批次审批（提交/通过/驳回）、批次出账/发送、
-  审批链增删改、智能体定义增删改、Excel 导入、用户/角色/部门、向量重建，
+  审批链增删改、智能体定义增删改、技能定义增删改、Excel 导入、用户/角色/部门、向量重建，
   记录 `before_json`、`after_json`、`actor`、`ip`、`user_agent`、`trace_id`。
 - 兜底事件：控制器未显式记录时，过滤器补记 `post /api/...` 事件并保存脱敏后的 JSON 请求体；
   401/403 等被拦截的请求同样留痕。
@@ -640,7 +686,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 mvn test
 ```
 
-共 145 个测试，覆盖：
+共 225 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -653,8 +699,11 @@ mvn test
 - 审批状态机：提交/通过/驳回/重新提交、提交人自批与自驳被拒绝、审批轨迹与金额指纹、
   审批前明细变化检测、审批后考勤变化导致出账冲突、部门审批链优先、无匹配流程报错
 - 审批链配置：默认全局流程、同范围唯一生效、金额区间过滤、名称/范围/部门/区间校验
+- 多级审批工作流：节点按顺序推进、中间节点记录“节点通过”、末节点通过才转为 `APPROVED`、
+  待办按角色/用户过滤、非当前节点审批人被拒绝、提交时冻结节点快照（后续修改配置不影响在途批次）、
+  节点金额区间过滤与无匹配节点报错、节点数量/审批人/金额区间校验
 - 审批 HTTP 权限：HR 提交、管理员审批与出账、HR 不能管理审批链、只读用户不能提交、
-  驳回原因必填、审批轨迹查询
+  驳回原因必填、审批轨迹查询、待办与节点审批人接口
 - Excel 导入：员工部分成功与失败行号、考核系数/非法员工、考勤覆盖与负数拒绝、
   缺必填列拒绝、模板表头与填写说明
 - 管理台对话与导入：回答与工具列表、空消息 400、重置、HTTP 上传 Excel、模板下载、未知类型 400
@@ -671,6 +720,16 @@ mvn test
 - Agent 管理：Nacos 缺失/损坏时回退内置智能体、保存/更新/删除写入假 Nacos、
   TTL 缓存、未启用只读与写失败提示；控制器过滤、字段归一化、枚举/长度/技能校验、
   审计快照；HTTP 权限（未登录 401、HR 403）、camelCase 序列化与错误响应
+- 动态技能与角色隔离：技能仓库视图只暴露绑定技能、自定义技能提示词不含薪酬口径、
+  自定义技能不继承薪酬工具白名单、动态加载技能后业务工具按组激活；绑定技能缺失或为空时
+  直接报错，不回退薪酬计算技能
+- 角色串线防护：默认流程已配置但不可解析时抛出错误而非回退薪酬链路；Nacos 读取抖动时
+  沿用上次成功加载的智能体与流程；会话绑定 `persona_key`，切换角色清空上一角色上下文；
+  向量召回默认按会话隔离，显式开启后才按用户跨会话召回
+- 技能管理：内置技能列表与 Nacos 覆盖标记、创建自定义技能写入 frontmatter 并按列表发现、
+  内置技能详情去除 frontmatter、覆盖后删除回退内置、ID/重复/正文/长度校验、TTL 缓存与未启用只读；
+  控制器关键字过滤、创建/修改/删除审计（不含正文）、被智能体引用时拒绝删除、内置覆盖可删除；
+  Nacos 搜索列表解析与技能仓库发现，列表失败回退内置；服务地址带 `/nacos` 时归一化避免重复前缀
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；
@@ -683,8 +742,8 @@ mvn test
 - 以 `employee_id + period` 做幂等键，核算结果落库并保留计算快照（已具备雏形）
 - 管理台已具备登录、角色、接口级权限与写操作审计；生产化还需补充会话超时策略、行级数据权限与审计日志异地留存
 - 接入真实 SMTP / 邮件服务商，增加重试、退信处理与发送配额
-- 审批流已支持可配置审批链、自批拦截与金额快照校验；生产化还需支持多级会签、审批人按组织架构解析，
-  并将审计日志对接日志平台、加密敏感字段
+- 审批流已支持可配置多级工作流、按角色/用户指定节点审批人、我的待办、自批拦截与金额快照校验；
+  生产化还需支持会签/或签、审批人按组织架构解析，并将审计日志对接日志平台、加密敏感字段
 - 批量核算分页与缓存，避免大部门一次拉全量
 - 如需限制敏感操作，可结合 AgentScope 的 Permission / HITL 能力增加人工确认
 - 若要升级到仓库内的 `2.0.3-SNAPSHOT`，修改 `pom.xml` 的 `<agentscope.version>` 即可
@@ -703,12 +762,12 @@ src/main/java/io/agentscope/examples/payroll
 │   └── PayrollIntent.java        # 结构化意图
 ├── model
 │   └── OllamaThinkingModel.java  # Ollama 流式适配：透传 thinking 与工具调用
-├── domain                        # 员工、考勤、政策、批次、邮件、核算结果、AgentDefinition
+├── domain                        # 员工、考勤、政策、批次、邮件、核算结果、AgentDefinition、审批节点/待办
 ├── db
 │   ├── PayrollDatabase.java      # H2 连接、建表与首次种子数据
 │   ├── H2PayrollRepository.java  # 主数据/考核/政策/考勤仓库
 │   ├── H2PayrollRunStore.java    # 批次、明细、失败与邮件审计
-│   ├── H2ApprovalStore.java      # 审批链、审批状态与轨迹
+│   ├── H2ApprovalStore.java      # 审批工作流、节点、待办、审批状态与轨迹
 │   └── H2AuditStore.java         # 审计日志
 ├── repository                    # 数据访问边界与 JSON 演示实现
 ├── service
@@ -726,18 +785,20 @@ src/main/java/io/agentscope/examples/payroll
 ├── skill
 │   ├── RoleSkills.java           # 三个角色技能的内置提示词
 │   ├── SkillRepositories.java    # Nacos + 内置技能仓库组合与逐技能回退
+│   ├── NacosSkillRegistry.java   # 技能增删改、内置覆盖与引用校验
 │   ├── NacosAgentRegistry.java   # Agent 定义读写、TTL 缓存与内置回退
-│   └── NacosConfigClient.java    # Nacos v1 OpenAPI 读取/发布配置
+│   └── NacosConfigClient.java    # Nacos v1 OpenAPI 读取/搜索/发布/删除配置
 ├── web
 │   ├── PayrollWebController.java # REST API（契约与原管理台一致）
 │   ├── ApprovalController.java   # 审批链配置接口
 │   ├── AgentAdminController.java # Agent 管理接口与校验/审计
+│   ├── SkillAdminController.java # 技能管理接口、引用保护与审计
 │   ├── ApiExceptionHandler.java  # 统一 400/409/404/500 错误响应
 │   └── ApiResponse.java          # {status,data,message} 响应封装
 └── support/JsonSupport.java      # snake_case JSON（CLI 与测试）
 
 src/main/resources
 ├── application.yml               # 端口、Jackson、H2、输出目录
-├── static/                       # index.html / app.js / agents.js / style.css / vendor（Vue 3）
+├── static/                       # index.html / app.js / agents.js / skills.js / flows.js / avatars.js / style.css / vendor（Vue 3）
 └── data/                         # 演示员工、考勤、变动工资
 ```

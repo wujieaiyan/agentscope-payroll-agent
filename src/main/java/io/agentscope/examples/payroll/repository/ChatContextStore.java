@@ -13,6 +13,14 @@ public interface ChatContextStore {
 
     List<ChatMessage> messages(long sessionId);
 
+    /** 会话绑定的角色标识（流程 id 或智能体 id）；空串表示尚未绑定。 */
+    default String persona(long sessionId) {
+        return "";
+    }
+
+    default void savePersona(long sessionId, String persona) {
+    }
+
     /** CLI 等无持久化场景使用的空实现。 */
     static ChatContextStore noop() {
         return new ChatContextStore() {

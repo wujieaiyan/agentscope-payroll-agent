@@ -378,6 +378,40 @@ public final class H2ChatStore implements ChatContextStore {
     }
 
     @Override
+    public String persona(long sessionId) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "SELECT persona_key FROM chat_sessions WHERE session_id = ?")) {
+            statement.setLong(1, sessionId);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return "";
+                }
+                String value = rs.getString(1);
+                return value == null ? "" : value;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取会话角色失败：" + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void savePersona(long sessionId, String persona) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "UPDATE chat_sessions SET persona_key = ?, updated_at = ? WHERE session_id = ?")) {
+            statement.setString(1, persona);
+            statement.setObject(2, LocalDateTime.now());
+            statement.setLong(3, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("保存会话角色失败：" + e.getMessage(), e);
+        }
+    }
+
+    @Override
     public ChatContextSnapshot loadContext(long sessionId) {
         String sql =
                 "SELECT context_summary, context_turns FROM chat_sessions WHERE session_id = ?";

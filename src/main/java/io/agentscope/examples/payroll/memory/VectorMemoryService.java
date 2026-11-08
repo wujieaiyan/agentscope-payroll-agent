@@ -118,20 +118,22 @@ public final class VectorMemoryService implements AutoCloseable {
         return ready;
     }
 
-    /** 召回当前用户的历史线索；失败或未启用时返回空串。 */
-    public String recall(long userId, String question) {
+    /** 默认只在当前会话内召回；显式开启 crossSession 才允许跨会话。 */
+    public String recall(long userId, long sessionId, String question) {
         if (!ready || userId <= 0 || question == null || question.isBlank()) {
             return "";
         }
+        long scope = settings.crossSession() ? 0L : sessionId;
         long startedAt = System.currentTimeMillis();
         try {
             float[] vector = embeddings.embed(question.trim());
             List<VectorHit> hits =
-                    store.search(userId, vector, settings.topK(), settings.minScore());
+                    store.search(userId, scope, vector, settings.topK(), settings.minScore());
             String block = render(hits, question);
             log.info(
-                    "[向量] 召回完成：user={}，命中={}，注入={}字，耗时={}ms",
+                    "[向量] 召回完成：user={}，scope={}，命中={}，注入={}字，耗时={}ms",
                     userId,
+                    scope <= 0 ? "user" : "session:" + scope,
                     hits.size(),
                     block.length(),
                     System.currentTimeMillis() - startedAt);
@@ -143,6 +145,11 @@ public final class VectorMemoryService implements AutoCloseable {
                     e.getMessage());
             return "";
         }
+    }
+
+    /** 兼容旧调用：sessionId 未知时按用户范围召回。 */
+    public String recall(long userId, String question) {
+        return recall(userId, 0L, question);
     }
 
     /** 用户消息落库后调用；只索引脱敏且长度足够的问题。 */
@@ -207,12 +214,29 @@ public final class VectorMemoryService implements AutoCloseable {
         submit("删除会话向量", () -> store.deleteSession(userId, sessionId));
     }
 
-    /** 会话重置：只删摘要文档，历史问题作为跨会话记忆保留。 */
+    /** 会话重置：只删摘要文档，历史问题作为同角色跨会话线索保留。 */
     public void onSessionReset(long userId, long sessionId) {
         if (!ready || sessionId <= 0) {
             return;
         }
         submit("重置会话摘要向量", () -> store.deleteSummaries(sessionId));
+    }
+
+    /** 角色切换：同步清空该会话的全部向量，旧角色的提问不能注入新角色。 */
+    public void onPersonaChanged(long userId, long sessionId) {
+        if (!ready || userId <= 0 || sessionId <= 0) {
+            return;
+        }
+        try {
+            store.deleteSession(userId, sessionId);
+            log.info("[向量] 角色已切换，清空会话向量：user={}，session={}", userId, sessionId);
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[向量] 清空角色向量失败：user={}，session={}，原因={}",
+                    userId,
+                    sessionId,
+                    e.getMessage());
+        }
     }
 
     /** 全量重建：清空索引后按 H2 中的历史问题与摘要重灌，返回写入条数。 */

@@ -3,7 +3,11 @@ package io.agentscope.examples.payroll.skill;
 import java.time.Duration;
 import java.util.Locale;
 
-/** Nacos 技能源配置。设置 {@code PAYROLL_NACOS_SERVER} 即启用，也可用 {@code PAYROLL_NACOS_ENABLED} 显式覆盖。 */
+/**
+ * Nacos 技能源配置。默认连接本机 {@code http://127.0.0.1:8848}；可用
+ * {@code PAYROLL_NACOS_SERVER} 覆盖，或以 {@code PAYROLL_NACOS_ENABLED=false} 关闭。
+ * 服务地址可带 {@code /nacos} 上下文路径，客户端会统一去掉后再拼接 v1 API。
+ */
 public record NacosSkillSettings(
         boolean enabled,
         String server,
@@ -17,7 +21,7 @@ public record NacosSkillSettings(
     public static final String DEFAULT_GROUP = "payroll-agent";
 
     public NacosSkillSettings {
-        server = server == null ? "" : server.trim().replaceAll("/+$", "");
+        server = normalizeServer(server);
         group = group == null || group.isBlank() ? DEFAULT_GROUP : group.trim();
         namespace = namespace == null ? "" : namespace.trim();
         username = username == null ? "" : username.trim();
@@ -33,7 +37,7 @@ public record NacosSkillSettings(
     }
 
     public static NacosSkillSettings fromEnvironment() {
-        String server = env("PAYROLL_NACOS_SERVER", "");
+        String server = env("PAYROLL_NACOS_SERVER", "http://127.0.0.1:8848");
         boolean enabled = Boolean.parseBoolean(env("PAYROLL_NACOS_ENABLED", server.isBlank() ? "false" : "true"));
         return new NacosSkillSettings(
                 enabled && !server.isBlank(),
@@ -48,6 +52,18 @@ public record NacosSkillSettings(
 
     public String location() {
         return server + "/" + group + (namespace.isBlank() ? "" : "?namespace=" + namespace);
+    }
+
+    private static String normalizeServer(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim().replaceAll("/+$", "");
+        if (normalized.length() >= 6
+                && normalized.regionMatches(true, normalized.length() - 6, "/nacos", 0, 6)) {
+            normalized = normalized.substring(0, normalized.length() - 6).replaceAll("/+$", "");
+        }
+        return normalized;
     }
 
     private static String env(String key, String defaultValue) {

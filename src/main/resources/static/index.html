@@ -20,27 +20,44 @@
       </div>
     </div>
 
-    <nav id="tabs" class="nav">
-      <div class="nav-group">
-        <div class="nav-label">人事运营</div>
-        <button data-tab="employees" class="nav-item active">员工档案</button>
-        <button data-tab="reviews" class="nav-item">绩效考核</button>
-        <button data-tab="attendance" class="nav-item">考勤管理</button>
-        <button data-tab="policies" class="nav-item">城市政策</button>
-        <button data-tab="payroll" class="nav-item">工资批次</button>
-        <button data-tab="approval" data-permission="approval:manage" class="nav-item hidden">审批链</button>
+    <nav id="tabs" class="nav tree">
+      <div class="nav-group" data-nav-group="people">
+        <button type="button" class="nav-group-title" aria-expanded="true">
+          <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-text">人事运营</span>
+        </button>
+        <div class="nav-children">
+          <button data-tab="employees" class="nav-item active" title="员工档案"><span class="nav-icon" data-icon="ant:idcard" aria-hidden="true"></span><span class="nav-text">员工档案</span></button>
+          <button data-tab="reviews" class="nav-item" title="绩效考核"><span class="nav-icon" data-icon="ant:fund" aria-hidden="true"></span><span class="nav-text">绩效考核</span></button>
+          <button data-tab="attendance" class="nav-item" title="考勤管理"><span class="nav-icon" data-icon="ant:audit" aria-hidden="true"></span><span class="nav-text">考勤管理</span></button>
+          <button data-tab="policies" class="nav-item" title="城市政策"><span class="nav-icon" data-icon="ant:read" aria-hidden="true"></span><span class="nav-text">城市政策</span></button>
+          <button data-tab="payroll" class="nav-item" title="工资批次"><span class="nav-icon" data-icon="ant:calculator" aria-hidden="true"></span><span class="nav-text">工资批次</span></button>
+          <button data-tab="tasks" data-permission="payroll:approve" class="nav-item hidden" title="我的待办"><span class="nav-icon" data-icon="ant:file-text" aria-hidden="true"></span><span class="nav-text">我的待办</span></button>
+          <button data-tab="approval" data-permission="approval:manage" class="nav-item hidden" title="审批工作流"><span class="nav-icon" data-icon="ant:safety-certificate" aria-hidden="true"></span><span class="nav-text">审批工作流</span></button>
+        </div>
       </div>
-      <div class="nav-group">
-        <div class="nav-label">智能体</div>
-        <button data-tab="chat" data-permission="chat:use" class="nav-item hidden">智能问答</button>
-        <button data-tab="agents" data-permission="agent:manage" class="nav-item hidden">Agent 管理</button>
-        <button data-tab="flows" data-permission="flow:manage" class="nav-item hidden">流程编排</button>
+      <div class="nav-group" data-nav-group="agent">
+        <button type="button" class="nav-group-title" aria-expanded="true">
+          <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-text">智能体</span>
+        </button>
+        <div class="nav-children">
+          <button data-tab="chat" data-permission="chat:use" class="nav-item hidden" title="智能问答"><span class="nav-icon" data-icon="ant:message" aria-hidden="true"></span><span class="nav-text">智能问答</span></button>
+          <button data-tab="agents" data-permission="agent:manage" class="nav-item hidden" title="Agent 管理"><span class="nav-icon" data-icon="ant:robot" aria-hidden="true"></span><span class="nav-text">Agent 管理</span></button>
+          <button data-tab="skills" data-permission="skill:manage" class="nav-item hidden" title="技能管理"><span class="nav-icon" data-icon="ant:tool" aria-hidden="true"></span><span class="nav-text">技能管理</span></button>
+          <button data-tab="flows" data-permission="flow:manage" class="nav-item hidden" title="流程编排"><span class="nav-icon" data-icon="ant:branches" aria-hidden="true"></span><span class="nav-text">流程编排</span></button>
+        </div>
       </div>
-      <div class="nav-group">
-        <div class="nav-label">系统管理</div>
-        <button data-tab="users" data-permission="user:manage" class="nav-item hidden">用户</button>
-        <button data-tab="departments" data-permission="department:manage" class="nav-item hidden">部门</button>
-        <button data-tab="roles" data-permission="role:manage" class="nav-item hidden">角色权限</button>
+      <div class="nav-group" data-nav-group="system">
+        <button type="button" class="nav-group-title" aria-expanded="true">
+          <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-text">系统管理</span>
+        </button>
+        <div class="nav-children">
+          <button data-tab="users" data-permission="user:manage" class="nav-item hidden" title="用户"><span class="nav-icon" data-icon="ant:user" aria-hidden="true"></span><span class="nav-text">用户</span></button>
+          <button data-tab="departments" data-permission="department:manage" class="nav-item hidden" title="部门"><span class="nav-icon" data-icon="ant:team" aria-hidden="true"></span><span class="nav-text">部门</span></button>
+          <button data-tab="roles" data-permission="role:manage" class="nav-item hidden" title="角色权限"><span class="nav-icon" data-icon="ant:setting" aria-hidden="true"></span><span class="nav-text">角色权限</span></button>
+        </div>
       </div>
     </nav>
 
@@ -62,6 +79,10 @@
   <div class="main-wrap">
     <header class="topbar">
       <div class="topbar-left">
+        <button id="sidebar-toggle" type="button" class="sidebar-toggle" title="折叠菜单" aria-label="折叠菜单" aria-expanded="true">
+          <svg class="toggle-icon toggle-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+          <svg class="toggle-icon toggle-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
         <nav class="topbar-crumbs" aria-label="面包屑">
           <span id="crumb-group">人事运营</span>
           <span class="crumb-sep">/</span>
@@ -283,10 +304,30 @@
     </div>
   </section>
 
+  <section id="tab-tasks" class="tab">
+    <div class="toolbar">
+      <button id="tasks-refresh">刷新待办</button>
+      <span class="hint">仅显示当前审批节点由你处理（角色、账号或审批权限）的批次；提交人不能审批自己提交的批次。</span>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+          <tr>
+            <th>批次</th><th>期间</th><th>范围</th><th class="num">实发合计</th>
+            <th>当前节点</th><th>进度</th><th>提交人</th><th>提交时间</th><th>操作</th>
+          </tr>
+          </thead>
+          <tbody id="task-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <section id="tab-approval" class="tab">
     <div class="toolbar">
-      <button id="flow-new" class="primary">新增审批链</button>
-      <span class="hint">同一范围仅一条生效流程；部门专属优先于全局，金额按批次实发合计匹配。</span>
+      <button id="flow-new" class="primary">新增审批工作流</button>
+      <span class="hint">同一范围仅一条生效流程；节点按顺序执行，可按实发合计设置节点金额区间。</span>
     </div>
     <form id="flow-form" class="card form hidden">
       <h2 id="flow-form-title">新增审批链</h2>
@@ -307,15 +348,23 @@
         <label class="inline"><input type="checkbox" name="enabled" checked> 启用</label>
         <label class="span-2">说明<input name="description" maxlength="200"></label>
       </div>
+      <div class="step-editor span-2">
+        <div class="step-editor-head">
+          <strong>审批节点</strong>
+          <span class="hint">留空表示沿用单级审批（任何拥有审批权限的用户）。节点按从上到下顺序执行。</span>
+        </div>
+        <div id="flow-steps" class="step-list"></div>
+        <button type="button" id="flow-add-step" class="tiny">添加节点</button>
+      </div>
       <div class="actions">
-        <button type="submit" class="primary">保存审批链</button>
+        <button type="submit" class="primary">保存审批工作流</button>
         <button type="button" id="flow-cancel">取消</button>
       </div>
     </form>
     <div class="card">
       <table>
         <thead>
-        <tr><th>名称</th><th>范围</th><th>金额区间</th><th class="num">优先级</th><th>状态</th><th>说明</th><th>操作</th></tr>
+        <tr><th>名称</th><th>范围</th><th>金额区间</th><th>审批节点</th><th class="num">优先级</th><th>状态</th><th>说明</th><th>操作</th></tr>
         </thead>
         <tbody id="flow-rows"></tbody>
       </table>
@@ -449,6 +498,10 @@
     <div id="agents-app"></div>
   </section>
 
+  <section class="tab" id="tab-skills">
+    <div id="skills-app"></div>
+  </section>
+
   <section class="tab" id="tab-flows">
     <div id="flows-app"></div>
   </section>
@@ -474,8 +527,10 @@
 <div id="toast" class="toast hidden"></div>
 <script src="vendor/vue.global.prod.js"></script>
 <script src="vendor/vue-flow-core.iife.js"></script>
+<script src="avatars.js"></script>
 <script src="app.js"></script>
 <script src="agents.js"></script>
+<script src="skills.js"></script>
 <script src="flows.js"></script>
 </body>
 </html>

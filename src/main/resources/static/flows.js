@@ -344,6 +344,11 @@ function initFlowsTab() {
         const agent = this.meta.agents.find((item) => item.id === agentId);
         return agent ? (agent.avatar || '🤖') : '🤖';
       },
+      avatarMarkup(value) {
+        return window.payrollAvatarMarkup
+          ? window.payrollAvatarMarkup(value)
+          : (value || '🤖');
+      },
       conditionText(condition) {
         return {
           HAS_CALCULATION_TARGETS: '有核算对象',
@@ -444,7 +449,7 @@ function initFlowsTab() {
               <template #node-agent="{ data }">
                 <Handle type="target" :position="Position.Left" />
                 <div class="flow-node flow-agent">
-                  <span class="flow-avatar">{{ data.avatar || '🤖' }}</span>
+                  <span class="flow-avatar" v-html="avatarMarkup(data.avatar)"></span>
                   <div class="flow-node-text">
                     <strong>{{ data.name }}</strong>
                     <small>{{ data.agentId }}</small>
@@ -483,7 +488,7 @@ function initFlowsTab() {
               <label>绑定智能体
                 <select v-model="selectedNode.data.agentId" @change="applyAgentDefaults(selectedNode)">
                   <option v-for="item in meta.agents" :key="item.id" :value="item.id">
-                    {{ item.avatar }} {{ item.name }}{{ item.status === 'ONLINE' ? '' : '（未上架）' }}
+                    {{ item.name }}{{ item.status === 'ONLINE' ? '' : '（未上架）' }}
                   </option>
                 </select>
               </label>

@@ -109,13 +109,16 @@ public final class ElasticsearchVectorStore implements VectorStore {
 
     @Override
     public List<VectorHit> search(
-            long userId, float[] queryVector, int topK, double minCosine) {
+            long userId, long sessionId, float[] queryVector, int topK, double minCosine) {
         List<Float> query = toList(queryVector);
         SearchResponse<Map> response;
         try {
             response =
                     client.search(
-                            s -> s.index(index).size(topK).query(vectorQuery(userId, query)),
+                            s ->
+                                    s.index(index)
+                                            .size(topK)
+                                            .query(vectorQuery(userId, sessionId, query)),
                             Map.class);
         } catch (IOException e) {
             throw new IllegalStateException("向量检索失败：" + e.getMessage(), e);
@@ -242,13 +245,34 @@ public final class ElasticsearchVectorStore implements VectorStore {
         }
     }
 
-    private static Query vectorQuery(long userId, List<Float> query) {
-        Query userFilter = Query.of(q -> q.term(t -> t.field("user_id").value(userId)));
+    private static Query vectorQuery(long userId, long sessionId, List<Float> query) {
+        Query filter =
+                Query.of(
+                        q ->
+                                q.bool(
+                                        b -> {
+                                            b.filter(
+                                                    t ->
+                                                            t.term(
+                                                                    x ->
+                                                                            x.field("user_id")
+                                                                                    .value(userId)));
+                                            if (sessionId > 0) {
+                                                b.filter(
+                                                        t ->
+                                                                t.term(
+                                                                        x ->
+                                                                                x.field("session_id")
+                                                                                        .value(
+                                                                                                sessionId)));
+                                            }
+                                            return b;
+                                        }));
         return Query.of(
                 q ->
                         q.scriptScore(
                                 s ->
-                                        s.query(userFilter)
+                                        s.query(filter)
                                                 .script(
                                                         script ->
                                                                 script.inline(

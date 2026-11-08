@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.domain;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -19,8 +20,13 @@ public record ApprovalFlow(
         int priority,
         boolean enabled,
         String description,
+        List<ApprovalStep> steps,
         LocalDateTime createdAt,
         LocalDateTime updatedAt) {
+
+    public ApprovalFlow {
+        steps = steps == null ? List.of() : List.copyOf(steps);
+    }
 
     public static final String GLOBAL = "GLOBAL";
     public static final String DEPARTMENT = "DEPARTMENT";

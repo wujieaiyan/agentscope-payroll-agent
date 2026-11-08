@@ -36,9 +36,9 @@ payroll:
   # 审计日志保留天数，启动时清理更早的记录。
   audit:
     retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"
-  # 向量记忆：只索引用户问题与压缩摘要，按 user_id 隔离检索。
+  # 向量记忆：只索引用户问题与压缩摘要；默认只在当前会话内召回，避免不同角色串线。
   memory:
-    enabled: "${PAYROLL_MEMORY_ENABLED:false}"
+    enabled: "${PAYROLL_MEMORY_ENABLED:true}"
     es-url: "${PAYROLL_MEMORY_ES_URL:http://localhost:9200}"
     es-username: "${PAYROLL_MEMORY_ES_USERNAME:}"
     es-password: "${PAYROLL_MEMORY_ES_PASSWORD:}"
@@ -51,6 +51,8 @@ payroll:
     min-score: "${PAYROLL_MEMORY_MIN_SCORE:0.55}"
     max-inject-chars: "${PAYROLL_MEMORY_MAX_INJECT_CHARS:1200}"
     async-index: "${PAYROLL_MEMORY_ASYNC_INDEX:true}"
+    # false=只召回当前会话（默认）；true=允许跨会话召回同一用户的历史问题。
+    cross-session: "${PAYROLL_MEMORY_CROSS_SESSION:false}"
 
 # logback.xml 默认 WARN（CLI 保持安静），管理台启动日志需要 INFO。
 logging:

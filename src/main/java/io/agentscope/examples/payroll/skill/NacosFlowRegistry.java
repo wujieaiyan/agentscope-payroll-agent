@@ -70,7 +70,7 @@ public final class NacosFlowRegistry {
             if (snapshot != null && now - fetchedAt < ttlMillis) {
                 return snapshot;
             }
-            snapshot = load();
+            snapshot = load(snapshot);
             cache = snapshot;
             fetchedAt = now;
             return snapshot;
@@ -99,7 +99,7 @@ public final class NacosFlowRegistry {
             if (snapshot != null && now - settingsFetchedAt < ttlMillis) {
                 return snapshot;
             }
-            snapshot = loadActiveFlowId();
+            snapshot = loadActiveFlowId(snapshot);
             cachedActiveFlowId = snapshot;
             settingsFetchedAt = now;
             return snapshot;
@@ -205,26 +205,46 @@ public final class NacosFlowRegistry {
         }
     }
 
-    private String loadActiveFlowId() {
+    /** 读取失败时沿用上次值，避免临时抖动让默认流程“消失”并回退到薪酬链路。 */
+    private String loadActiveFlowId(String fallback) {
         Optional<String> body = client.fetch(SETTINGS_DATA_ID);
         if (body.isEmpty()) {
+            if (fallback != null && !fallback.isBlank()) {
+                log.warn("[流程编排] 读取 {} 失败，沿用上次默认流程 {}", SETTINGS_DATA_ID, fallback);
+                return fallback;
+            }
             return "";
         }
         try {
             return json.readTree(body.get()).path("activeFlowId").asText("").trim();
         } catch (Exception e) {
+            if (fallback != null && !fallback.isBlank()) {
+                log.warn(
+                        "[流程编排] 解析 {} 失败，沿用上次默认流程 {}：{}",
+                        SETTINGS_DATA_ID,
+                        fallback,
+                        e.getMessage());
+                return fallback;
+            }
             log.warn("[流程编排] 解析 Nacos 配置 {} 失败，按未设置处理：{}",
                     SETTINGS_DATA_ID, e.getMessage());
             return "";
         }
     }
 
-    private List<FlowDefinition> load() {
+    private List<FlowDefinition> load(List<FlowDefinition> previous) {
         if (!settings.enabled()) {
             return List.of(builtinFlow());
         }
         Optional<String> body = client.fetch(DATA_ID);
         if (body.isEmpty()) {
+            if (previous != null && !previous.isEmpty()) {
+                log.warn(
+                        "[流程编排] Nacos 读取 {} 失败或内容为空，沿用上次成功加载的 {} 条流程定义",
+                        DATA_ID,
+                        previous.size());
+                return previous;
+            }
             log.info("[流程编排] Nacos 未提供 {}，使用内置标准流程", DATA_ID);
             return List.of(builtinFlow());
         }
@@ -237,6 +257,14 @@ public final class NacosFlowRegistry {
             log.info("[流程编排] 从 Nacos 加载 {} 条流程定义", flows.size());
             return List.copyOf(flows);
         } catch (Exception e) {
+            if (previous != null && !previous.isEmpty()) {
+                log.warn(
+                        "[流程编排] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 条流程定义：{}",
+                        DATA_ID,
+                        previous.size(),
+                        e.getMessage());
+                return previous;
+            }
             log.warn("[流程编排] 解析 Nacos 配置 {} 失败，回退内置标准流程：{}", DATA_ID, e.getMessage());
             return List.of(builtinFlow());
         }

@@ -11,6 +11,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -80,6 +81,33 @@ class NacosConfigClientTest {
         assertEquals(Optional.of("remote"), client.fetch("payroll-calculator.md"));
         assertEquals(Optional.of("remote"), client.fetch("payroll-validator.md"));
         assertEquals(1, logins.get(), "登录 token 应复用");
+    }
+
+    @Test
+    @DisplayName("按 dataId 模式列出配置并解析正文与更新时间")
+    void listsConfigsByPattern() throws IOException {
+        Map<String, String> lastQuery = new HashMap<>();
+        start(
+                exchange -> {
+                    lastQuery.putAll(query(exchange));
+                    respond(
+                            exchange,
+                            200,
+                            "{\"totalCount\":1,\"pageItems\":[{\"dataId\":\"payroll-calculator.md\","
+                                    + "\"group\":\"payroll-agent\",\"content\":\"## 角色\","
+                                    + "\"gmtModified\":1760000000000}]}");
+                });
+
+        List<NacosConfigClient.ConfigEntry> entries =
+                client(settings("", "")).list("*.md");
+
+        assertEquals(1, entries.size());
+        assertEquals("payroll-calculator.md", entries.get(0).dataId());
+        assertEquals("## 角色", entries.get(0).content());
+        assertEquals(1_760_000_000_000L, entries.get(0).updatedAt());
+        assertEquals("blur", lastQuery.get("search"));
+        assertEquals("*.md", lastQuery.get("dataId"));
+        assertEquals("payroll-agent", lastQuery.get("group"));
     }
 
     @Test

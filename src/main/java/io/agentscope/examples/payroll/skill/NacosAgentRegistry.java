@@ -69,7 +69,7 @@ public final class NacosAgentRegistry {
             if (snapshot != null && now - fetchedAt < ttlMillis) {
                 return snapshot;
             }
-            snapshot = load();
+            snapshot = load(snapshot);
             cache = snapshot;
             fetchedAt = now;
             return snapshot;
@@ -231,12 +231,23 @@ public final class NacosAgentRegistry {
         }
     }
 
-    private List<AgentDefinition> load() {
+    /**
+     * 读取失败时保留上次成功目录：临时网络抖动不能让自定义智能体凭空消失，
+     * 否则引用它的默认流程会校验失败并静默回退到薪酬链路。
+     */
+    private List<AgentDefinition> load(List<AgentDefinition> previous) {
         if (!settings.enabled()) {
             return builtinAgents();
         }
         Optional<String> body = client.fetch(DATA_ID);
         if (body.isEmpty()) {
+            if (previous != null && !previous.isEmpty()) {
+                log.warn(
+                        "[Agent] Nacos 读取 {} 失败或内容为空，沿用上次成功加载的 {} 个智能体定义",
+                        DATA_ID,
+                        previous.size());
+                return previous;
+            }
             log.info("[Agent] Nacos 未提供 {}，使用内置默认智能体", DATA_ID);
             return builtinAgents();
         }
@@ -249,6 +260,14 @@ public final class NacosAgentRegistry {
             log.info("[Agent] 从 Nacos 加载 {} 个智能体定义", agents.size());
             return List.copyOf(agents);
         } catch (Exception e) {
+            if (previous != null && !previous.isEmpty()) {
+                log.warn(
+                        "[Agent] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 个智能体定义：{}",
+                        DATA_ID,
+                        previous.size(),
+                        e.getMessage());
+                return previous;
+            }
             log.warn("[Agent] 解析 Nacos 配置 {} 失败，回退内置默认智能体：{}", DATA_ID, e.getMessage());
             return builtinAgents();
         }

@@ -1,7 +1,9 @@
 package io.agentscope.examples.payroll.agent;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.core.ReActAgent;
@@ -19,6 +21,7 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.examples.payroll.agent.PayrollTools;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
 import io.agentscope.examples.payroll.service.PayrollEngine;
@@ -84,6 +87,43 @@ class DynamicSkillWiringTest {
     }
 
     @Test
+    @DisplayName("技能仓库视图只暴露智能体绑定的技能，避免加载未绑定角色")
+    void scopedRepositoryOnlyExposesBoundSkills() {
+        AgentSkillRepository repository =
+                SkillRepositories.scoped(
+                        new BuiltInSkillRepository(), List.of(RoleSkills.CALCULATOR));
+
+        assertNotNull(repository.getSkill(RoleSkills.CALCULATOR));
+        assertNull(repository.getSkill(RoleSkills.ACCOUNTANT));
+        assertEquals(List.of(RoleSkills.CALCULATOR), repository.getAllSkillNames());
+        assertEquals(
+                List.of(RoleSkills.CALCULATOR),
+                repository.getAllSkills().stream().map(AgentSkill::getName).toList());
+    }
+
+    @Test
+    @DisplayName("自定义技能智能体的提示词不注入薪酬口径")
+    void customSkillPromptHasNoPayrollFraming() {
+        String prompt =
+                PayrollAgentFactory.activeAgentPrompt(
+                        agentDefinition(List.of("ai-coding")), "ai-coding_nacos");
+
+        assertTrue(prompt.contains("ai-coding_nacos"));
+        assertTrue(prompt.contains("测试智能体"));
+        assertTrue(prompt.contains("绝对规则"));
+        assertFalse(prompt.contains("薪酬"));
+        assertFalse(prompt.contains("gross_pay"));
+    }
+
+    @Test
+    @DisplayName("自定义技能智能体不继承薪酬工具白名单")
+    void customSkillAgentHasNoPayrollTools() {
+        assertTrue(PayrollAgentFactory.allowedTools(List.of("ai-coding")).isEmpty());
+        assertFalse(PayrollAgentFactory.allowedTools(List.of(RoleSkills.CALCULATOR)).isEmpty());
+        assertFalse(PayrollAgentFactory.allowedTools(List.of()).isEmpty());
+    }
+
+    @Test
     @DisplayName("绑定计算技能的智能体走三段流水线，其余按技能单兵作答")
     void pipelineDependsOnBoundSkills() {
         assertTrue(PayrollAgentFactory.isPipeline(null));
@@ -94,6 +134,28 @@ class DynamicSkillWiringTest {
                 PayrollAgentFactory.isPipeline(
                         agentDefinition(List.of(RoleSkills.VALIDATOR))));
         assertFalse(PayrollAgentFactory.isPipeline(agentDefinition(List.of())));
+    }
+
+    @Test
+    @DisplayName("智能体绑定的技能不存在时直接报错，禁止回退薪酬计算技能")
+    void missingSkillFailsLoudly() {
+        AgentDefinition missing =
+                agentDefinition(List.of("ai-coding-not-created"));
+        PayrollException error =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        PayrollException.class,
+                        () -> PayrollAgentFactory.boundSkills(
+                                new BuiltInSkillRepository(), missing));
+        assertTrue(error.getMessage().contains("绑定的技能不存在"), error.getMessage());
+        assertTrue(error.getMessage().contains("已阻止回退"), error.getMessage());
+
+        AgentDefinition empty = agentDefinition(List.of());
+        PayrollException emptyError =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        PayrollException.class,
+                        () -> PayrollAgentFactory.boundSkills(
+                                new BuiltInSkillRepository(), empty));
+        assertTrue(emptyError.getMessage().contains("未绑定技能"), emptyError.getMessage());
     }
 
     private static AgentDefinition agentDefinition(List<String> skillIds) {

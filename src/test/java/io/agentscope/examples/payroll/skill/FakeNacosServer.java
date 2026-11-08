@@ -1,5 +1,8 @@
 package io.agentscope.examples.payroll.skill;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -18,6 +21,9 @@ final class FakeNacosServer implements AutoCloseable {
     final AtomicInteger reads = new AtomicInteger();
     final AtomicInteger writes = new AtomicInteger();
     volatile boolean failWrites;
+    volatile boolean failReads;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final HttpServer server;
 
@@ -35,7 +41,16 @@ final class FakeNacosServer implements AutoCloseable {
         String method = exchange.getRequestMethod();
         if ("GET".equals(method)) {
             reads.incrementAndGet();
-            String dataId = query(exchange).get("dataId");
+            if (failReads) {
+                respond(exchange, 500, "boom");
+                return;
+            }
+            Map<String, String> query = query(exchange);
+            if ("blur".equals(query.get("search"))) {
+                respond(exchange, 200, searchPage(query.get("dataId")));
+                return;
+            }
+            String dataId = query.get("dataId");
             String body = dataId == null ? null : configs.get(dataId);
             if (body == null) {
                 respond(exchange, 404, "config data not exist");
@@ -57,6 +72,26 @@ final class FakeNacosServer implements AutoCloseable {
         Map<String, String> form = form(exchange);
         configs.put(form.get("dataId"), form.get("content"));
         respond(exchange, 200, "true");
+    }
+
+    private String searchPage(String pattern) throws IOException {
+        ObjectNode root = JSON.createObjectNode();
+        ArrayNode items = root.putArray("pageItems");
+        String suffix = pattern != null && pattern.startsWith("*") ? pattern.substring(1) : null;
+        configs.entrySet().stream()
+                .filter(entry -> suffix == null
+                        ? entry.getKey().equals(pattern)
+                        : entry.getKey().endsWith(suffix))
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> {
+                    ObjectNode item = items.addObject();
+                    item.put("dataId", entry.getKey());
+                    item.put("group", "payroll-agent");
+                    item.put("content", entry.getValue());
+                    item.put("gmtModified", 1_760_000_000_000L);
+                });
+        root.put("totalCount", items.size());
+        return JSON.writeValueAsString(root);
     }
 
     private static Map<String, String> query(HttpExchange exchange) {

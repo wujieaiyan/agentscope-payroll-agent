@@ -176,6 +176,27 @@ class NacosFlowRegistryTest {
     }
 
     @Test
+    @DisplayName("Nacos 读取抖动时沿用上次流程与默认流程，不静默回退")
+    void keepsLastKnownGoodWhenReadFails() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosFlowRegistry seeder = new NacosFlowRegistry(settings(true));
+        FlowDefinition saved = seeder.save(flow(null, "情感流程"), "admin");
+        seeder.setActiveFlow(saved.id());
+
+        NacosFlowRegistry registry =
+                new NacosFlowRegistry(settings(true, Duration.ofMillis(1)));
+        assertEquals(2, registry.list().size());
+        assertEquals(saved.id(), registry.activeFlowId());
+
+        nacos.failReads = true;
+        Thread.sleep(5);
+
+        assertEquals(2, registry.list().size(), "读取失败时应沿用上次成功加载的流程");
+        assertEquals(saved.id(), registry.activeFlowId());
+        assertNotNull(registry.activeFlow());
+    }
+
+    @Test
     @DisplayName("Nacos 写入失败时抛出明确异常")
     void writeFailureThrows() throws IOException {
         nacos = new FakeNacosServer();
@@ -194,6 +215,10 @@ class NacosFlowRegistryTest {
     }
 
     private NacosSkillSettings settings(boolean enabled) {
+        return settings(enabled, Duration.ofSeconds(60));
+    }
+
+    private NacosSkillSettings settings(boolean enabled, Duration ttl) {
         return new NacosSkillSettings(
                 enabled,
                 nacos == null ? "http://127.0.0.1:1" : nacos.url(),
@@ -202,7 +227,7 @@ class NacosFlowRegistryTest {
                 "",
                 "",
                 Duration.ofSeconds(2),
-                Duration.ofSeconds(60));
+                ttl);
     }
 
     private static FlowDefinition flow(String id, String name) {

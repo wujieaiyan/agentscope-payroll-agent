@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -71,6 +72,13 @@ class ApprovalWebTest {
         String submitted =
                 post(hr, "/api/runs/" + runId + "/submit-approval", "{\"comment\":\"月度核算\"}");
         assertTrue(submitted.contains("\"PENDING_APPROVAL\""), submitted);
+        assertTrue(submitted.contains("\"workflow_steps\""), submitted);
+        assertTrue(submitted.contains("\"current_step\":0"), submitted);
+
+        String adminTasks = get(admin, "/api/approval/tasks");
+        assertTrue(adminTasks.contains("\"run_id\":" + runId), adminTasks);
+        String hrTasks = get(hr, "/api/approval/tasks");
+        assertFalse(hrTasks.contains("\"run_id\":" + runId), hrTasks);
 
         HttpResponse<String> selfApproval =
                 postRaw(hr, "/api/runs/" + runId + "/approve", "{\"comment\":\"自批\"}");
@@ -94,6 +102,7 @@ class ApprovalWebTest {
                         .statusCode());
         assertEquals(200, getRaw(viewer, "/api/runs").statusCode());
         assertEquals(403, getRaw(viewer, "/api/approval/flows").statusCode());
+        assertEquals(403, getRaw(viewer, "/api/approval/tasks").statusCode());
     }
 
     @Test
@@ -160,6 +169,21 @@ class ApprovalWebTest {
                                 + "\"scope_value\":\"星际部\"}");
         assertEquals(400, unknownDepartment.statusCode(), unknownDepartment.body());
         assertTrue(unknownDepartment.body().contains("部门不存在"), unknownDepartment.body());
+
+        String stepFlow =
+                """
+                {"name":"财务部两级审批","scope_type":"DEPARTMENT","scope_value":"财务部",
+                 "min_amount":0,"priority":10,"enabled":true,"steps":[
+                   {"name":"财务复核","approver_type":"ROLE","approver_value":"HR"},
+                   {"name":"管理员确认","approver_type":"USER","approver_value":"admin"}]}
+                """;
+        String created = post(admin, "/api/approval/flows", stepFlow);
+        assertTrue(created.contains("财务复核"), created);
+        assertTrue(created.contains("\"approver_type\":\"ROLE\""), created);
+
+        String approvers = get(admin, "/api/approval/approvers");
+        assertTrue(approvers.contains("\"roles\""), approvers);
+        assertTrue(approvers.contains("\"users\""), approvers);
     }
 
     private long preview(HttpClient client) throws Exception {

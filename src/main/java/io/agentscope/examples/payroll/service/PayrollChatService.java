@@ -66,6 +66,7 @@ public final class PayrollChatService implements PayrollChat {
     private final VectorMemoryService memory;
     private final Supplier<AgentDefinition> activeAgentSupplier;
     private final Supplier<FlowDefinition> activeFlowSupplier;
+    private final Supplier<String> activeFlowIdSupplier;
     private final Supplier<List<AgentDefinition>> agentCatalogSupplier;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
@@ -133,11 +134,13 @@ public final class PayrollChatService implements PayrollChat {
                 memory,
                 activeAgentSupplier,
                 () -> null,
+                () -> "",
                 () -> List.of());
     }
 
     /**
      * @param activeFlowSupplier 每轮读取全局默认流程；null 表示未启用流程编排
+     * @param activeFlowIdSupplier 读取已配置的默认流程 id，用于区分“未配置”和“配置了但暂不可用”
      * @param agentCatalogSupplier 读取智能体目录，用于校验流程节点引用与执行时解析定义
      */
     public PayrollChatService(
@@ -149,6 +152,7 @@ public final class PayrollChatService implements PayrollChat {
             VectorMemoryService memory,
             Supplier<AgentDefinition> activeAgentSupplier,
             Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
             Supplier<List<AgentDefinition>> agentCatalogSupplier) {
         this.engine = engine;
         this.contextStore = contextStore;
@@ -158,6 +162,7 @@ public final class PayrollChatService implements PayrollChat {
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
         this.activeAgentSupplier = activeAgentSupplier;
         this.activeFlowSupplier = activeFlowSupplier;
+        this.activeFlowIdSupplier = activeFlowIdSupplier;
         this.agentCatalogSupplier = agentCatalogSupplier;
         this.context = loadContext(contextStore, sessionId);
     }
@@ -194,14 +199,22 @@ public final class PayrollChatService implements PayrollChat {
             traceRecorder.clear();
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
+            ResolvedFlow resolvedFlow = resolveActiveFlow();
+            String persona =
+                    resolvedFlow != null
+                            ? "flow:" + resolvedFlow.flow().id()
+                            : current.activeAgent() == null
+                                    ? "pipeline"
+                                    : "agent:" + current.activeAgent().id();
+            applyPersona(persona, events);
+
             prepareContext(context, events, current.summarizer());
-            String memoryBlock = memory.recall(userId, question);
+            String memoryBlock = memory.recall(userId, sessionId, question);
             if (!memoryBlock.isBlank()) {
                 log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
             }
             String calculatorInput = context.augment(question, memoryBlock);
 
-            ResolvedFlow resolvedFlow = resolveActiveFlow();
             String reply;
             if (resolvedFlow != null) {
                 reply = flowReply(calculatorInput, resolvedFlow, events, tools);
@@ -329,48 +342,122 @@ public final class PayrollChatService implements PayrollChat {
         return reply;
     }
 
-    /** 读取全局默认流程；未配置、校验失败或引用智能体不可用时回退既有链路。 */
+    /**
+     * 读取全局默认流程。
+     *
+     * <p>未配置默认流程时才允许走既有薪酬链路；一旦配置了流程却无法解析（Nacos 抖动、智能体
+     * 未加载、校验失败），必须直接报错，禁止静默回退到薪酬计算智能体，否则自定义角色会话会
+     * 收到完全无关的工资回答。
+     */
     private ResolvedFlow resolveActiveFlow() {
         if (activeFlowSupplier == null || agentCatalogSupplier == null) {
             return null;
         }
+        String configuredId = "";
+        if (activeFlowIdSupplier != null) {
+            try {
+                configuredId = activeFlowIdSupplier.get();
+            } catch (RuntimeException e) {
+                throw new PayrollException(
+                        "读取默认流程配置失败，已阻止回退薪酬链路：" + rootMessage(e), e);
+            }
+            configuredId = configuredId == null ? "" : configuredId.trim();
+        }
+        FlowDefinition flow;
         try {
-            FlowDefinition flow = activeFlowSupplier.get();
-            if (flow == null) {
-                return null;
-            }
-            List<AgentDefinition> catalog = agentCatalogSupplier.get();
-            Map<String, AgentDefinition> agents = new LinkedHashMap<>();
-            for (AgentDefinition agent : catalog) {
-                agents.put(agent.id(), agent);
-            }
-            List<String> errors = FlowValidator.validate(flow, agents.keySet());
-            if (!errors.isEmpty()) {
-                log.warn("[流程编排] 默认流程 {} 校验失败，回退既有链路：{}", flow.id(), errors);
-                return null;
-            }
-            for (FlowNode node : flow.nodes()) {
-                if (!FlowNode.TYPE_AGENT.equalsIgnoreCase(node.type())) {
-                    continue;
-                }
-                AgentDefinition agent = agents.get(node.agentId());
-                if (agent == null || !AgentDefinition.STATUS_ONLINE.equals(agent.status())) {
-                    log.warn(
-                            "[流程编排] 节点 {} 引用的智能体 {} 不可用，回退既有链路",
-                            node.id(),
-                            node.agentId());
-                    return null;
-                }
-            }
-            log.info(
-                    "[流程编排] 使用全局默认流程：{}（{}），节点={}，同层并行",
-                    flow.name(),
-                    flow.id(),
-                    flow.nodes().size());
-            return new ResolvedFlow(flow, Map.copyOf(agents));
+            flow = activeFlowSupplier.get();
         } catch (RuntimeException e) {
+            if (!configuredId.isBlank()) {
+                throw new PayrollException(
+                        "默认流程「" + configuredId + "」暂不可用，已阻止回退薪酬链路："
+                                + rootMessage(e),
+                        e);
+            }
             log.warn("[流程编排] 读取默认流程失败，回退既有链路：{}", rootMessage(e));
             return null;
+        }
+        if (flow == null) {
+            if (!configuredId.isBlank()) {
+                throw new PayrollException(
+                        "默认流程「" + configuredId
+                                + "」暂不可用（流程或智能体未加载），已阻止回退薪酬链路，请稍后重试");
+            }
+            return null;
+        }
+        List<AgentDefinition> catalog;
+        try {
+            catalog = agentCatalogSupplier.get();
+        } catch (RuntimeException e) {
+            throw new PayrollException(
+                    "读取智能体目录失败，已阻止回退薪酬链路：" + rootMessage(e), e);
+        }
+        Map<String, AgentDefinition> agents = new LinkedHashMap<>();
+        for (AgentDefinition agent : catalog) {
+            agents.put(agent.id(), agent);
+        }
+        List<String> errors = FlowValidator.validate(flow, agents.keySet());
+        if (!errors.isEmpty()) {
+            log.warn("[流程编排] 默认流程 {} 校验失败：{}", flow.id(), errors);
+            throw new PayrollException(
+                    "默认流程「" + flow.name() + "」校验失败，已阻止回退薪酬链路："
+                            + String.join("；", errors));
+        }
+        for (FlowNode node : flow.nodes()) {
+            if (!FlowNode.TYPE_AGENT.equalsIgnoreCase(node.type())) {
+                continue;
+            }
+            AgentDefinition agent = agents.get(node.agentId());
+            if (agent == null || !AgentDefinition.STATUS_ONLINE.equals(agent.status())) {
+                log.warn(
+                        "[流程编排] 节点 {} 引用的智能体 {} 不可用",
+                        node.id(),
+                        node.agentId());
+                throw new PayrollException(
+                        "默认流程「" + flow.name() + "」节点「" + node.label()
+                                + "」引用的智能体不可用，已阻止回退薪酬链路；请检查 Agent 管理或稍后重试");
+            }
+        }
+        log.info(
+                "[流程编排] 使用全局默认流程：{}（{}），节点={}，同层并行",
+                flow.name(),
+                flow.id(),
+                flow.nodes().size());
+        return new ResolvedFlow(flow, Map.copyOf(agents));
+    }
+
+    /**
+     * 会话与当前角色绑定：管理员切换默认流程/智能体后，上一角色的对话上下文与向量线索
+     * 都不能继续注入，否则情感专家会看到“武杰的工资”这类历史问题并给出串线回答。
+     */
+    void applyPersona(String persona, ChatStreamListener events) {
+        if (sessionId <= 0 || persona == null || persona.isBlank()) {
+            return;
+        }
+        String previous;
+        try {
+            previous = contextStore.persona(sessionId);
+        } catch (RuntimeException e) {
+            log.warn("[会话] 读取角色绑定失败：sessionId={}，原因={}", sessionId, rootMessage(e));
+            return;
+        }
+        if (persona.equals(previous)) {
+            return;
+        }
+        if (previous != null && !previous.isBlank()) {
+            context = new ConversationContext("", 0);
+            persistContext(context);
+            memory.onPersonaChanged(userId, sessionId);
+            events.onPhase("检测到智能体切换，已隔离上一角色的会话上下文");
+            log.info(
+                    "[会话] 角色切换：sessionId={}，{} -> {}，已清空会话上下文",
+                    sessionId,
+                    previous,
+                    persona);
+        }
+        try {
+            contextStore.savePersona(sessionId, persona);
+        } catch (RuntimeException e) {
+            log.warn("[会话] 保存角色绑定失败：sessionId={}，原因={}", sessionId, rootMessage(e));
         }
     }
 

@@ -25,6 +25,7 @@ import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
+import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
@@ -134,6 +135,7 @@ public class PayrollConfiguration {
                         memory,
                         agentRegistry::activeAgent,
                         flowRegistry::activeFlow,
+                        flowRegistry::activeFlowId,
                         agentRegistry::list);
     }
 
@@ -147,6 +149,12 @@ public class PayrollConfiguration {
     @Bean
     public NacosFlowRegistry flowRegistry() {
         return new NacosFlowRegistry();
+    }
+
+    /** 技能管理直接读写 Nacos 中的 {@code <skill-id>.md}，与运行时技能仓库同源。 */
+    @Bean
+    public NacosSkillRegistry skillRegistry() {
+        return new NacosSkillRegistry();
     }
 
     @Bean(destroyMethod = "close")
@@ -164,7 +172,8 @@ public class PayrollConfiguration {
             @Value("${payroll.memory.top-k:5}") int topK,
             @Value("${payroll.memory.min-score:0.55}") double minScore,
             @Value("${payroll.memory.max-inject-chars:1200}") int maxInjectChars,
-            @Value("${payroll.memory.async-index:true}") boolean asyncIndex) {
+            @Value("${payroll.memory.async-index:true}") boolean asyncIndex,
+            @Value("${payroll.memory.cross-session:false}") boolean crossSession) {
         return VectorMemoryService.start(
                 new VectorMemorySettings(
                         enabled,
@@ -179,7 +188,8 @@ public class PayrollConfiguration {
                         topK,
                         minScore,
                         maxInjectChars,
-                        asyncIndex));
+                        asyncIndex,
+                        crossSession));
     }
 
     @Bean

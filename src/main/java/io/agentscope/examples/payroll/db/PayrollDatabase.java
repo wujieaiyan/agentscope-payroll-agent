@@ -98,6 +98,10 @@ public final class PayrollDatabase {
                 ADD COLUMN IF NOT EXISTS context_turns INT NOT NULL DEFAULT 0
             """,
             """
+            ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS persona_key VARCHAR(128)
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_user
                 ON chat_sessions (user_id, updated_at)
             """,
@@ -258,6 +262,31 @@ public final class PayrollDatabase {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS approval_flow_steps (
+                step_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                flow_id BIGINT NOT NULL,
+                step_order INT NOT NULL,
+                name VARCHAR(64) NOT NULL,
+                approver_type VARCHAR(16) NOT NULL,
+                approver_value VARCHAR(64) NOT NULL,
+                min_amount DECIMAL(16,2),
+                max_amount DECIMAL(16,2),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_approval_flow_steps_flow
+                ON approval_flow_steps (flow_id, step_order)
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS workflow_steps_json CLOB
+            """,
+            """
+            ALTER TABLE payroll_runs
+                ADD COLUMN IF NOT EXISTS current_step INT NOT NULL DEFAULT 0
+            """,
+            """
             ALTER TABLE payroll_runs
                 ADD COLUMN IF NOT EXISTS approval_flow_id BIGINT
             """,
@@ -330,6 +359,14 @@ public final class PayrollDatabase {
                 snapshot_hash VARCHAR(64),
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
+            """,
+            """
+            ALTER TABLE payroll_approval_events
+                ADD COLUMN IF NOT EXISTS step_order INT
+            """,
+            """
+            ALTER TABLE payroll_approval_events
+                ADD COLUMN IF NOT EXISTS step_name VARCHAR(64)
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_approval_events_run

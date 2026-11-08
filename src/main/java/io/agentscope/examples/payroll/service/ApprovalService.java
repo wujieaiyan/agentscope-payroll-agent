@@ -3,6 +3,8 @@ package io.agentscope.examples.payroll.service;
 import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.domain.ApprovalFlow;
+import io.agentscope.examples.payroll.domain.ApprovalStep;
+import io.agentscope.examples.payroll.domain.ApprovalTask;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollApproval;
 import io.agentscope.examples.payroll.domain.PayrollApprovalEvent;
@@ -14,6 +16,7 @@ import io.agentscope.examples.payroll.domain.PayrollRunFailure;
 import io.agentscope.examples.payroll.domain.PayrollRunItem;
 import io.agentscope.examples.payroll.domain.PayrollRunStatus;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -65,10 +68,11 @@ public final class ApprovalService {
                                 () ->
                                         new PayrollException(
                                                 "未找到适用的审批链，请先在“审批链”页签配置全局或部门流程"));
+        List<ApprovalStep> steps = resolveSteps(flow, run.totalNet());
         String actorName = actorName(actor);
         String hash = snapshotHash(run.period(), run.scope(), items);
         if (!store.markSubmitted(
-                runId, flow, actorId(actor), actorName, trimComment(comment), hash)) {
+                runId, flow, actorId(actor), actorName, trimComment(comment), hash, steps)) {
             throw new PayrollConflictException("批次状态已变化，请刷新后重新提交");
         }
         store.recordEvent(
@@ -81,9 +85,13 @@ public final class ApprovalService {
         PayrollRun run = requireRun(runId);
         requirePending(run);
         requireDifferentActor(run, actor, "不能审批自己提交的批次");
+        PayrollApproval approval = run.approval();
+        List<ApprovalStep> steps = snapshotSteps(approval);
+        int current = currentIndex(approval, steps);
+        ApprovalStep step = steps.get(current);
+        requireCurrentApprover(step, actor);
         List<PayrollRunItem> items = runStore.items(runId);
         String hash = snapshotHash(run.period(), run.scope(), items);
-        PayrollApproval approval = run.approval();
         if (approval == null
                 || approval.snapshotHash() == null
                 || !approval.snapshotHash().equals(hash)) {
@@ -92,24 +100,48 @@ public final class ApprovalService {
         }
         String actorName = actorName(actor);
         String trimmed = trimComment(comment);
-        if (!store.markApproved(runId, actorId(actor), actorName, trimmed, hash)) {
+        boolean last = current >= steps.size() - 1;
+        boolean updated =
+                last
+                        ? store.markApproved(runId, actorId(actor), actorName, trimmed, hash, current)
+                        : store.advanceStep(runId, current, current + 1, hash);
+        if (!updated) {
             throw new PayrollConflictException("批次状态已变化，请刷新后重试");
         }
         store.recordEvent(
                 runId,
-                PayrollApprovalEvent.APPROVE,
+                last ? PayrollApprovalEvent.APPROVE : PayrollApprovalEvent.STEP_APPROVE,
                 actorId(actor),
                 actorName,
                 flowOf(run, hash),
                 trimmed,
-                hash);
+                hash,
+                step.order(),
+                step.name());
         return detail(runId);
+    }
+
+    /** 当前登录用户可处理的审批任务；系统管理员在关闭认证时可见全部待办。 */
+    public List<ApprovalTask> tasks(AuthUser actor) {
+        if (actor == null) {
+            return List.of();
+        }
+        List<ApprovalTask> pending = store.pendingTasks();
+        if (actor.id() == 0L) {
+            return pending;
+        }
+        return pending.stream()
+                .filter(task -> task.submittedById() == null || task.submittedById() != actor.id())
+                .filter(task -> task.step().matches(actor))
+                .toList();
     }
 
     public PayrollRunDetail reject(long runId, AuthUser actor, String reason) {
         PayrollRun run = requireRun(runId);
         requirePending(run);
         requireDifferentActor(run, actor, "不能驳回自己提交的批次");
+        List<ApprovalStep> steps = snapshotSteps(run.approval());
+        requireCurrentApprover(steps.get(currentIndex(run.approval(), steps)), actor);
         String trimmed = reason == null ? "" : reason.trim();
         if (trimmed.isEmpty()) {
             throw new PayrollException("请填写驳回原因");
@@ -167,6 +199,48 @@ public final class ApprovalService {
         }
     }
 
+    /** 按实发合计过滤审批节点；未配置节点时退化为单级“任意审批权限”。 */
+    private static List<ApprovalStep> resolveSteps(ApprovalFlow flow, BigDecimal amount) {
+        if (flow.steps().isEmpty()) {
+            return List.of(ApprovalStep.permissionFallback());
+        }
+        List<ApprovalStep> applicable =
+                flow.steps().stream().filter(step -> step.covers(amount)).toList();
+        if (applicable.isEmpty()) {
+            throw new PayrollException(
+                    "实发合计 " + amount + " 未匹配任何审批节点，请检查审批链“"
+                            + flow.name() + "”的节点金额区间");
+        }
+        return applicable;
+    }
+
+    private static List<ApprovalStep> snapshotSteps(PayrollApproval approval) {
+        if (approval == null || approval.workflowSteps().isEmpty()) {
+            return List.of(ApprovalStep.permissionFallback());
+        }
+        return approval.workflowSteps();
+    }
+
+    private static int currentIndex(PayrollApproval approval, List<ApprovalStep> steps) {
+        int current = approval == null ? 0 : approval.currentStep();
+        return Math.max(0, Math.min(current, steps.size() - 1));
+    }
+
+    /**
+     * 关闭认证时系统账号（id=0）代表本地演示，直接放行节点校验；
+     * 未配置节点时的权限回退由接口层 {@code payroll:approve} 兜底。
+     */
+    private static void requireCurrentApprover(ApprovalStep step, AuthUser actor) {
+        if (actor == null
+                || actor.id() == 0L
+                || ApprovalStep.PERMISSION.equals(step.approverType())
+                || step.matches(actor)) {
+            return;
+        }
+        throw new PayrollException(
+                "当前审批节点「" + step.name() + "」由" + step.approverLabel() + "处理");
+    }
+
     private ApprovalFlow flowOf(PayrollRun run, String hash) {
         PayrollApproval approval = run.approval();
         if (approval == null || approval.flowId() == null) {
@@ -185,6 +259,7 @@ public final class ApprovalService {
                                         0,
                                         false,
                                         "",
+                                        List.of(),
                                         null,
                                         null));
     }

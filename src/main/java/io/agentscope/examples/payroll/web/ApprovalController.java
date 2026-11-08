@@ -1,12 +1,19 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.db.H2AdminRepository;
 import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2ApprovalStore.FlowDraft;
+import io.agentscope.examples.payroll.db.H2ApprovalStore.StepDraft;
+import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.ApprovalFlow;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.support.Permissions;
+import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,10 +30,21 @@ import org.springframework.web.bind.annotation.RestController;
 public class ApprovalController {
 
     private final H2ApprovalStore store;
+    private final H2AdminRepository adminRepository;
+    private final ApprovalService approvalService;
+    private final AuthService authService;
     private final AuditService auditService;
 
-    public ApprovalController(H2ApprovalStore store, AuditService auditService) {
+    public ApprovalController(
+            H2ApprovalStore store,
+            H2AdminRepository adminRepository,
+            ApprovalService approvalService,
+            AuthService authService,
+            AuditService auditService) {
         this.store = store;
+        this.adminRepository = adminRepository;
+        this.approvalService = approvalService;
+        this.authService = authService;
         this.auditService = auditService;
     }
 
@@ -34,6 +52,22 @@ public class ApprovalController {
     @RequirePermission(Permissions.APPROVAL_MANAGE)
     public ApiResponse flows() {
         return ApiResponse.ok(store.flows());
+    }
+
+    /** 我的待办：当前节点由当前用户的角色/账号/权限处理的批次。 */
+    @GetMapping("/tasks")
+    @RequirePermission(Permissions.PAYROLL_APPROVE)
+    public ApiResponse tasks(HttpServletRequest request) {
+        return ApiResponse.ok(approvalService.tasks(authService.currentUser(request)));
+    }
+
+    /** 节点审批人候选项：全部角色与启用用户。 */
+    @GetMapping("/approvers")
+    @RequirePermission(Permissions.APPROVAL_MANAGE)
+    public ApiResponse approvers() {
+        List<AppUser> users =
+                adminRepository.users().stream().filter(AppUser::active).toList();
+        return ApiResponse.ok(Map.of("roles", adminRepository.roles(), "users", users));
     }
 
     @PostMapping("/flows")
@@ -93,9 +127,12 @@ public class ApprovalController {
             BigDecimal maxAmount,
             Integer priority,
             Boolean enabled,
-            String description) {
+            String description,
+            List<StepRequest> steps) {
 
         FlowDraft toDraft() {
+            List<StepDraft> drafts =
+                    steps == null ? List.of() : steps.stream().map(StepRequest::toDraft).toList();
             return new FlowDraft(
                     name,
                     scopeType,
@@ -104,7 +141,21 @@ public class ApprovalController {
                     maxAmount,
                     priority == null ? 100 : priority,
                     enabled == null || enabled,
-                    description);
+                    description,
+                    drafts);
+        }
+    }
+
+    /** 审批节点表单；顺序即执行顺序。 */
+    public record StepRequest(
+            String name,
+            String approverType,
+            String approverValue,
+            BigDecimal minAmount,
+            BigDecimal maxAmount) {
+
+        StepDraft toDraft() {
+            return new StepDraft(name, approverType, approverValue, minAmount, maxAmount);
         }
     }
 }

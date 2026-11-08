@@ -17,7 +17,12 @@ public interface VectorStore extends AutoCloseable {
     /** 幂等写入：同一用户、会话、来源、轮次与内容会覆盖同一条文档。 */
     void index(VectorRecord record);
 
-    List<VectorHit> search(long userId, float[] queryVector, int topK, double minCosine);
+    /**
+     * 按用户与会话召回；sessionId 大于 0 时只查该会话，0 表示跨会话召回。
+     * 检索签名强制携带 userId，从接口层面保证不会跨租户召回。
+     */
+    List<VectorHit> search(
+            long userId, long sessionId, float[] queryVector, int topK, double minCosine);
 
     void deleteSession(long userId, long sessionId);
 

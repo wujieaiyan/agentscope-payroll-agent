@@ -3,8 +3,10 @@ package io.agentscope.examples.payroll.skill;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.SkillFilter;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
+import io.agentscope.core.skill.repository.AgentSkillRepositoryInfo;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,6 +52,21 @@ public final class SkillRepositories {
     }
 
     /**
+     * 把仓库视图限定为智能体绑定的技能。
+     *
+     * <p>AgentScope 的 {@link SkillFilter} 只影响系统提示中列出的技能，动态加载工具仍会注册
+     * 仓库里的全部技能，模型可以加载任意未绑定的角色技能。流程节点和自定义智能体必须使用
+     * 限定视图，才能保证“创建了 ai-coding 智能体却加载到薪酬技能”不会发生。
+     */
+    public static AgentSkillRepository scoped(
+            AgentSkillRepository repository, List<String> skillIds) {
+        if (repository == null || skillIds == null || skillIds.isEmpty()) {
+            return repository;
+        }
+        return new ScopedSkillRepository(repository, Set.copyOf(skillIds));
+    }
+
+    /**
      * 返回实际生效的技能。AgentScope 按 {@link AgentSkill#getName()}（不含来源后缀）激活
      * {@code activateOnSkill} 工具组，因此调用方必须从技能对象取名称，不能拼完整 skillId。
      */
@@ -65,5 +82,73 @@ public final class SkillRepositories {
             return skillId + "(缺失)";
         }
         return skillId + "(" + skill.getSource() + ")";
+    }
+
+    private static final class ScopedSkillRepository implements AgentSkillRepository {
+
+        private final AgentSkillRepository delegate;
+        private final Set<String> allowed;
+
+        private ScopedSkillRepository(AgentSkillRepository delegate, Set<String> allowed) {
+            this.delegate = delegate;
+            this.allowed = allowed;
+        }
+
+        @Override
+        public AgentSkill getSkill(String name) {
+            return name != null && allowed.contains(name) ? delegate.getSkill(name) : null;
+        }
+
+        @Override
+        public List<String> getAllSkillNames() {
+            return delegate.getAllSkillNames().stream().filter(allowed::contains).toList();
+        }
+
+        @Override
+        public List<AgentSkill> getAllSkills() {
+            return delegate.getAllSkills().stream()
+                    .filter(skill -> allowed.contains(skill.getName()))
+                    .toList();
+        }
+
+        @Override
+        public boolean save(List<AgentSkill> skills, boolean overwrite) {
+            return delegate.save(skills, overwrite);
+        }
+
+        @Override
+        public boolean delete(String name) {
+            return delegate.delete(name);
+        }
+
+        @Override
+        public boolean skillExists(String name) {
+            return getSkill(name) != null;
+        }
+
+        @Override
+        public AgentSkillRepositoryInfo getRepositoryInfo() {
+            return delegate.getRepositoryInfo();
+        }
+
+        @Override
+        public String getSource() {
+            return delegate.getSource();
+        }
+
+        @Override
+        public void setWriteable(boolean writeable) {
+            delegate.setWriteable(writeable);
+        }
+
+        @Override
+        public boolean isWriteable() {
+            return delegate.isWriteable();
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
     }
 }

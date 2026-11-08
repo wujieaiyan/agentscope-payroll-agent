@@ -190,7 +190,9 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
 - 开关：`payroll.memory.enabled` / `PAYROLL_MEMORY_ENABLED`，默认 `false`；
   开启前需 `ollama pull nomic-embed-text`，并确保 ES `127.0.0.1:9200` 可访问。
 - 写入：用户消息落 H2 后异步提交；摘要压缩成功后替换旧摘要向量；助手答复不入索引。
-- 召回：每轮对话前按 `user_id` 检索，topK=5、余弦阈值 0.55，最多注入 1200 字，失败返回空串。
+- 召回：每轮对话前默认按 `session_id` 检索（`payroll.memory.cross-session=false`），
+  显式开启 `PAYROLL_MEMORY_CROSS_SESSION=true` 才按 `user_id` 跨会话检索；
+  topK=5、余弦阈值 0.55，最多注入 1200 字，失败返回空串。
 - 重建：`POST /api/admin/vector/rebuild`（`ROLE_MANAGE`）清空索引后按 H2 历史重灌。
 - 关键日志前缀 `[向量]`：启动探测、召回耗时/命中数、注入字数、重建条数。
 - 排查顺序：`[向量] 未启用/初始化失败` → ES 与模型连通性 → `_count` 文档数 → 召回阈值。
@@ -709,12 +711,14 @@ ChatTraceWebTest test
 | `skill/NacosFlowRegistry.java` | `payroll-flows.json` / `payroll-flow-settings.json` 读写、内置流程 |
 | `web/FlowAdminController.java` | `/api/admin/flows` CRUD、激活、审计 |
 | `agent/PayrollAgentFactory.java` | `createFlowNodeAgent` / `createFlowModel`，按技能选择角色提示词 |
-| `service/PayrollChatService.java` | 每轮解析默认流程；失败回退既有链路 |
+| `service/PayrollChatService.java` | 每轮解析默认流程；已配置但无法解析时直接报错，不静默回退 |
 | `static/flows.js` + `style.css` + `index.html` | Vue Flow 画布、节点面板、属性面板 |
 
 ### 执行语义
 
-1. 每轮对话读取 `activeFlow()`；为空、结构非法、引用智能体缺失/下架时告警并回退原链路。
+1. 每轮对话读取 `activeFlow()`；为空时沿用三阶段流水线；已配置但结构非法、流程不存在、
+   引用智能体缺失/下架或读取失败时抛出可定位错误并提示“已阻止回退薪酬链路”，
+   不会静默切回薪酬角色。Nacos 短暂不可用时沿用上次成功加载的流程与智能体列表。
 2. 从 START 出发，按“所有入边已确定”逐层推进；同层节点提交固定线程池并行执行。
 3. 节点输入 = `【用户问题】` + 所有经**选中路径**可达的上游记录（按拓扑层级排序）。
    兄弟分支输出不会串入；汇合节点自然拿到多条分支结果。记录标题去掉“①②”编号，
@@ -765,7 +769,7 @@ ChatTraceWebTest test
 | 聊天气泡 | 保留微信式左右布局（用户 `#95ec69`、助手白底、画布 `#f1efe8`），宽度上限 680px |
 | 流程页 | `.flows-page` 用 grid areas：`main` 在左，`list` / `props` 在右 |
 
-页面结构变更后至少回归：12 个页签切换、面包屑与用户卡片、登录页、≤900px 单列布局，
+页面结构变更后至少回归：14 个页签切换、面包屑与用户卡片、登录页、≤900px 单列布局，
 并确认控制台除登录页 `alreadyLoggedIn()` 的预期 401 外没有新增报错。
 
 ### 测试
@@ -798,3 +802,266 @@ ChatTraceWebTest test
 3. 节点级失败即整轮失败，没有“忽略失败继续”策略。
 4. 画布未做自动布局；节点较多时需要手动整理位置。
 5. `FlowDefinition.createdBy/createdAt` 由注册表维护，客户端传入值会被忽略。
+
+## 21. 多级审批工作流（2026-11-08）
+
+### 背景与边界
+
+原审批链只按“部门 + 实发合计”匹配一条流程，命中后任何拥有 `payroll:approve` 的用户都能一次通过，
+没有顺序、节点与待办概念。本次补齐“工作流”能力，但**不替代**既有批次状态机、金额指纹与审计：
+
+- 审批仍在 `PENDING_APPROVAL` 内完成；末节点通过后才进入 `APPROVED`。
+- 提交时把匹配到的节点列表写入批次快照；之后修改流程配置不影响在途批次。
+- 审批仍禁止提交人自批/自驳，仍校验 SHA-256 快照。
+- 没有节点的旧流程自动退化为单级审批（`ApprovalStep.permissionFallback()`），保持兼容。
+
+### 数据与契约
+
+| 位置 | 变化 |
+| --- | --- |
+| `approval_flow_steps` | 新表：`flow_id`、`step_order`、`name`、`approver_type(ROLE/USER)`、`approver_value`、`min_amount`、`max_amount` |
+| `payroll_runs.workflow_steps_json` | 提交时冻结的节点快照（CLOB） |
+| `payroll_runs.current_step` | 当前待处理节点下标；审批用 `WHERE current_step = ?` 做乐观并发 |
+| `payroll_approval_events.step_order/step_name` | 记录每一步；中间节点事件为 `STEP_APPROVE`，末节点为 `APPROVE` |
+| `ApprovalFlow.steps` | 有序节点列表；create/update 在事务内替换节点 |
+| `PayrollApproval.workflowSteps/currentStep` | 详情与待办读取快照 |
+
+匹配规则：`ROLE` 比对 `roleCode`，`USER` 比对 `username`；节点金额区间按批次 `total_net` 过滤；
+所有节点都不匹配金额时报“未配置匹配的审批节点”。流程本身仍按“部门优先 → 优先级 → 创建顺序”选择。
+
+接口：
+
+- `GET /api/approval/tasks`：当前用户的待办（`payroll:approve`）。非系统账号只返回
+  当前节点匹配、且提交人不是自己的批次；关闭认证的系统账号（id=0）返回全部。
+- `GET /api/approval/approvers`：角色与启用用户候选项（`approval:manage`）。
+- `POST/PUT /api/approval/flows`：`steps` 为有序数组；最多 10 个节点，仅支持 `ROLE`/`USER`，
+  校验角色/用户存在、金额非负、上限不小于下限。
+
+### 前端
+
+- 侧边栏新增“我的待办”（`payroll:approve`）；原“审批链”改名“审批工作流”（`approval:manage`）。
+- 审批工作流表单新增节点编辑器：节点名称、按角色/指定用户、审批人、节点金额区间、增删与序号。
+- 批次详情用 `.wf-track` 展示节点进度：进行中 `active`、已完成 `done`；
+  批次 `APPROVED/FINALIZED/SENT` 时全部节点显示完成，`REJECTED` 时不再标进行中。
+- 待办支持“查看 / 通过 / 驳回”，通过中间节点提示“已通过当前节点”，进入下一级；
+  最后一级通过后批次变为“已审批”，出账按钮出现。
+- 前端仍需匹配当前节点才显示审批按钮（`canApprove`），避免误操作后再由后端拒绝。
+
+### 测试
+
+- `ApprovalWorkflowTest`（4）：逐级审批与待办过滤、非当前审批人被拒绝、快照不可变、
+  节点金额区间与无匹配报错、节点配置校验。
+- `ApprovalWebTest` 扩展：`workflow_steps`/`current_step` 序列化、管理员与 HR 待办、
+  只读用户 403、带节点创建流程、`/approvers` 返回角色与用户。
+- 全量 `mvn test`：216 个测试通过（40 个测试类）。
+- 端到端实测：管理员提交研发部批次 → 李敏（HR）在待办完成第 1/2 节点 →
+  王岚（fin01）完成第 2/2 节点 → 批次“已审批”，轨迹包含
+  `节点通过「人事初审」` 与 `审批通过「财务复核」`；fin01 在 HR 节点处理前看不到待办。
+
+### 已知限制
+
+1. 节点是串行会签；尚未支持或签、并行会签、加签/转办与超时催办。
+2. 审批人只支持角色码与用户名，未按组织架构/汇报线解析。
+3. 待办按当前节点实时过滤，没有站内信/邮件通知；`prompt()` 仍用于备注输入。
+4. 流程删除不校验在途批次，但快照保证在途审批不受影响。
+5. 本地验收可自行创建 HR/财务账号（角色 `HR` 与 `ADMIN`）；内置种子仍只有 `admin`。
+
+## 22. 技能管理（2026-11-08）
+
+### 背景与边界
+
+技能提示词此前只能通过 `NacosSkillRepository` 读取 `<技能ID>.md`，内置三个角色技能，
+自定义技能需要手工调用 Nacos API 发布。本次新增管理台“技能管理”页签，提供列表、查看、
+新增、编辑与删除，仍然以 Nacos 配置为唯一持久化来源，不引入新表。
+
+- 与 Agent 管理共用 `PAYROLL_NACOS_SERVER` / `PAYROLL_NACOS_GROUP` / 账号配置。
+- 管理的是“技能提示词”本身；Agent 绑定关系仍在 `payroll-agents.json` 维护。
+- 删除自定义技能前校验智能体引用，避免运行期 `getSkill` 解析失败。
+
+### 存储与语义
+
+| 位置 | 变化 |
+| --- | --- |
+| Nacos `<技能ID>.md` | 技能正文 + 可选 YAML frontmatter（`name`、`description`），group 默认 `payroll-agent`，类型 `markdown` |
+| `NacosConfigClient.list(pattern)` | 调用 `/nacos/v1/cs/configs?search=blur&dataId=*.md`，解析 `pageItems` 的 `dataId/content/gmtModified` |
+| `NacosConfigClient.publish(dataId, content, type)` | 原两参 `publish` 委托为 `type=json`；技能固定 `markdown` |
+| `NacosSkillRegistry` | 技能列表/详情/创建/更新/删除、ID 校验、frontmatter 组装与解析、TTL 快照 |
+| `NacosSkillRepository` | 新增 `lister` 发现自定义技能；`knownIds()` TTL 缓存，失败回退内置 ID |
+| `Permissions.SKILL_MANAGE` | 新权限码 `skill:manage`（“管理技能”），仅内置管理员拥有 |
+
+语义：
+
+- **内置覆盖**：`RoleSkills.ids()` 中的三个技能始终出现在列表；若 Nacos 存在同名配置则
+  `overridden=true`、`source=nacos`，详情读取 Nacos 正文。删除该配置后回到内置版本。
+- **自定义技能**：非内置 ID 只能来自 Nacos；列表排在三个内置技能之后并按字母排序。
+- **ID 规则**：`^[a-z][a-z0-9-]{1,63}$`；新建不允许与任何已有技能（含内置）重名，
+  覆盖内置必须走编辑。
+- **正文格式**：`detail` 返回去掉 frontmatter 的正文；保存时重新组装并转义 YAML 引号，
+  描述上限 200 字、正文上限 200000 字符。
+- **删除保护**：自定义技能被任一 `AgentDefinition.skillIds()` 引用时返回 400 与引用者名称；
+  内置覆盖可以删除，删除后回退内置。
+- **只读回退**：`PAYROLL_NACOS_ENABLED=false` 时 `writable=false`，列表仍展示内置技能；
+  已启用但 Nacos 连接失败时列表回退内置技能，写操作返回中文错误。
+
+服务地址默认 `http://127.0.0.1:8848`；若传入带 `/nacos` 上下文路径的地址（例如从控制台复制的
+`http://127.0.0.1:8848/nacos`），`NacosSkillSettings.normalizeServer` 会去掉该后缀再拼接
+`/nacos/v1/...`。此前默认值被改成带 `/nacos`，导致请求路径变成 `/nacos/nacos/v1/cs/configs`
+并返回 404，已通过归一化修复。
+
+### 接口与审计
+
+- `GET /api/admin/skills?keyword=`：`{writable, location, skills[]}`，`keyword` 过滤 ID/描述。
+- `GET /api/admin/skills/{id}`：正文、描述、来源、是否内置/覆盖、更新时间。
+- `POST /api/admin/skills`：body `{id, description, content}`，新建配置。
+- `PUT /api/admin/skills/{id}`：更新描述与正文，路径 ID 为准。
+- `DELETE /api/admin/skills/{id}`：删除 Nacos 配置或内置覆盖。
+- 全部接口要求 `skill:manage`；审计事件 `skill.create` / `skill.update` / `skill.delete`，
+  修改与删除带变更前元数据；审计不保存提示词正文，只保存 ID、描述、来源、是否内置与正文长度。
+
+### 前端
+
+- `index.html` 侧边栏新增“技能管理”（`data-permission="skill:manage"`），位于 Agent 管理与流程编排之间；
+  `app.js` 增加 `TAB_META.skills` 与 `showTab` 分发；`skills.js` 使用独立 Vue 实例挂载 `#skills-app`。
+- 左列技能清单显示来源徽标（`Nacos` / `覆盖内置` / `内置`）、描述与正文长度；
+  右侧编辑器显示 ID、描述与正文；内置技能可直接编辑（保存即生成 Nacos 覆盖），
+  纯内置不能删除，已有覆盖删除后回退内置。
+- 保存后刷新列表并保持当前选中；删除前二次确认；未启用 Nacos 时顶部提示并禁用保存/删除。
+
+### 测试与本机验收
+
+- `NacosSkillRegistryTest`（7）：空 Nacos 列内置、创建自定义技能写入 frontmatter 并可列表/详情、
+  内置详情去 frontmatter、内置覆盖后删除回退、ID/重复/正文/长度校验、TTL 缓存、未启用只读。
+- `SkillAdminControllerTest`（7）：列表 meta 与关键字过滤、创建/更新/删除审计、
+  自定义技能被引用时拒绝删除、内置覆盖可删除、详情透传。
+- `NacosSkillRepositoryTest`：新增 lister 发现 `payroll-auditor.md`、lister 抛错回退内置。
+- `NacosConfigClientTest`：新增搜索列表解析（`search=blur`、`dataId=*.md`、`gmtModified`）。
+- 全量 `mvn test`：216 个测试通过（40 个测试类）。
+- 本机 Nacos 2.1.1 端到端：创建 `payroll-ui-test` → 编辑 → 出现在 `/api/admin/agents/skills`
+  可绑定列表 → 被智能体引用后删除返回 400 → 解绑后删除成功 → 审计含 `skill.create/update/delete`
+  且不含正文；清理后 Nacos 恢复原有 3 个配置。
+- 浏览器 DOM 级验收完成登录、页签切换、新建/编辑/删除；当前环境截图为 0×0 视口，
+  未取得可视截图，需在正常窗口下补一次人工目检。
+
+### 已知限制
+
+1. Nacos 2.1.1 搜索接口不返回 `gmtModified`，列表 `updatedAt` 为 0，前端不显示时间；
+   详情也未读取 `Last-Modified` 响应头，后续可补。
+2. 并发编辑仍按最后写入覆盖，没有版本号/乐观锁。
+3. 删除保护只覆盖智能体绑定；流程节点若通过智能体间接引用技能，删除时会随智能体解析失败暴露。
+4. 自定义技能立即可绑定，但已创建会话的技能仓库按 TTL（默认 60s）刷新，期间可能看不到新技能。
+
+## 23. 角色切换、树状菜单与头像选择（2026-11-08）
+
+### 背景
+
+使用者在 Nacos 创建了 `ai-coding` 技能与「java工程师」智能体（`agent-26aa1eaf`，
+`skillIds: ["ai-coding"]`），并把包含该 AGENT 节点的流程 `flow-2a690298` 设为全局默认。
+对话仍回复“先加载薪酬核算相关技能”，角色没有切换。
+
+### 根因
+
+- AgentScope 的 `SkillFilter` 只作用于系统提示中的 `<available_skills>`；
+  `DynamicSkillMiddleware.reloadSkills()` 会把仓库 `getAllSkills()` 全部注册进 `SkillBox`，
+  `load_skill_through_path` 因此仍能加载未绑定的 `payroll-accountant_nacos`。
+- `activeAgentPrompt` 对非角色技能也拼接了薪酬 `COMMON_RULES` 和
+  “管理员已指定你负责本轮会话的薪酬核算”，模型被提示词拉回薪酬场景。
+- 旧单智能体路径的 `allowedTools` 在自定义技能下回退到 `CALCULATOR_TOOLS`，工具面仍是薪酬。
+
+### 修改
+
+- `SkillRepositories.scoped(repository, skillIds)`：新增只读仓库视图，按技能裸名称过滤
+  `getSkill` / `getAllSkillNames` / `getAllSkills`；`PayrollAgentFactory.createAgent` 统一用它
+  包装 `skillRepository`，流程节点与自定义智能体只注册绑定技能。
+- `PayrollAgentFactory.GENERAL_RULES` + 重写 `activeAgentPrompt`：自定义技能不再注入薪酬口径，
+  角色由智能体名称、描述与已加载技能定义；角色技能（计算/验证/核算）仍沿用原提示词。
+- `allowedTools` 仅在 `skillIds` 为空时回退 `CALCULATOR_TOOLS`；显式自定义技能返回空集合，
+  与 `flowTools` 行为一致。
+- 侧边栏改为树状：分组标题为可点击按钮（`nav-group-title` + `nav-caret` + `nav-children`），
+  顶栏新增 `#sidebar-toggle` 可整体收起为 72px 图标栏；两种折叠状态分别持久化到
+  `localStorage`：`payroll.nav.collapsed`、`payroll.sidebar.collapsed`。
+  `showTab` 会展开当前页签所在分组；`applyPermissions` 会隐藏没有可见子项的整组。
+- 智能体头像：新增 `static/avatars.js`，内置 26 个 Ant Design outline 图标的本地 SVG
+  （MIT，`ant:<name>` 作为持久化值），并提供 `payrollAvatarMarkup(value)` 统一渲染，
+  未知值按文本转义回退。`agents.js` 新建/编辑弹窗改为 26 宫格选择器 + 自定义 Emoji 输入；
+  Agent 卡片、流程节点同步使用；后端 `MAX_AVATAR_LENGTH` 由 8 提升到 40。
+
+### 测试与本机验收
+
+- `DynamicSkillWiringTest`（9）：新增“仓库视图只暴露绑定技能”“自定义技能提示词不含薪酬口径”
+  “自定义技能不继承薪酬工具白名单”三个用例。
+- `AgentAdminControllerTest`：超长头像用例改为 41 字符（上限 40）。
+- 全量 `mvn test`：**219 个测试通过（40 个测试类）**。
+- 隔离实例（18081，内存 H2，`PAYROLL_AUTH_ENABLED=false`，本机 Nacos）端到端：
+  默认流程 `flow-2a690298` 的 `agent-1` 回复“我是java工程师，负责高并发编程相关的工作”；
+  日志只出现 `Registered skill 'ai-coding_nacos'`，不再注册任何 `payroll-*` 技能。
+- 浏览器 DOM 验收：3 个分组可折叠/恢复并写入 localStorage；顶栏按钮切换
+  `app-layout sidebar-collapsed`；Agent 管理弹窗渲染 26 个头像，选择后输入值变为 `ant:robot`
+  且预览 SVG 生效。当前环境视口为 0×0，未能截图，需在正常窗口补一次人工目检。
+
+### 已知限制
+
+1. 头像图标为静态内置集合；新增图标需在 `avatars.js` 补充 SVG 与名称。
+2. 侧边栏折叠动画依赖 `grid-template-columns` 过渡；极旧浏览器会直接切换无动画。
+3. 自定义技能智能体不获得薪酬工具；若未来需要混合角色，应在智能体定义中显式增加技能到工具的映射。
+
+## 24. 会话角色隔离与折叠菜单重设计（2026-11-08）
+
+### 背景
+
+新增「情感专家」技能与对应智能体/默认流程后，提问仍返回“武杰的工资”，
+不同角色与话题的消息互相串线。
+
+### 根因（三条链路叠加）
+
+1. Nacos 读取短暂失败时，`NacosAgentRegistry` / `NacosFlowRegistry` 回退到内置薪酬智能体，
+   已配置的默认流程无法解析；`resolveActiveFlow()` 随后静默回退三阶段薪酬流水线。
+2. `chat_sessions` 没有记录当前角色，同一会话切换默认流程后仍携带上一角色的
+   `ConversationContext`（最近问题与摘要），模型据此继续回答薪酬问题。
+3. 向量记忆按 `user_id` 跨会话召回，其他会话中关于武杰工资的历史片段被注入新角色。
+
+### 修改
+
+- **last-known-good 目录**：`NacosAgentRegistry` / `NacosFlowRegistry` 在读取或解析失败时
+  沿用上次成功加载的列表与 `activeFlowId`，不再切回内置薪酬角色。
+- **失败即报错**：`PayrollChatService.resolveActiveFlow()` 对“已配置但流程不存在、结构非法、
+  引用智能体缺失/下架、供应商异常”抛出 `PayrollException`，消息包含
+  “已阻止回退薪酬链路”；仅 `activeFlowId` 为空时才使用三阶段流水线。
+- **按会话绑定角色**：`chat_sessions` 新增 `persona_key`（`flow:<id>` / `agent:<id>` / `pipeline`），
+  `ChatContextStore` 提供 `persona` / `savePersona`。每轮 `run()` 解析 persona 后调用
+  `applyPersona()`：角色变化时清空并持久化上下文、删除该会话向量、推送阶段事件
+  “检测到智能体切换，已隔离上一角色的会话上下文”。
+- **向量召回默认按会话隔离**：`VectorMemorySettings` 新增 `crossSession`（默认 `false`），
+  `ElasticsearchVectorStore.search` 在 `sessionId > 0` 时追加 `session_id` 过滤；
+  `PAYROLL_MEMORY_CROSS_SESSION=true` 才回到按用户跨会话召回。
+- **技能缺失不回退**：`PayrollAgentFactory.boundSkills` 在智能体未绑定技能或绑定技能不存在时
+  直接报错，禁止回退 `CALCULATOR_TOOLS` / 薪酬角色提示词。
+- **折叠菜单重设计**：`.app-layout.sidebar-collapsed` 宽度 64px → 72px；折叠项 40×40、
+  图标芯片 32×32（SVG 17px）、组间距收紧；隐藏分组标题/文字/演示卡/用户信息，
+  保留底部头像；展开态导航项 42px、13px 字号，使用 Ant Design 图标芯片与分组分隔线。
+
+### 测试与本机验收
+
+- 新增/更新测试：
+  - `DynamicSkillWiringTest#missingSkillFailsLoudly`：未绑定/技能不存在均报错；
+  - `NacosAgentRegistryTest#keepsLastKnownGoodWhenReadFails`、`NacosFlowRegistryTest#keepsLastKnownGoodWhenReadFails`：
+    Nacos 500 时沿用上次列表与默认流程；
+  - `PayrollChatServicePersonaTest`（2）：首次绑定不清空、切换角色写入一次空上下文快照、
+    同角色不重复清空、`sessionId=0` 空操作；
+  - `VectorMemoryServiceTest#recallScopesToSessionUnlessCrossSessionEnabled`：
+    默认以 `session_id` 召回，开启跨会话后以 `0` 检索。
+- 全量 `mvn -o test`：**225 个测试通过，0 失败**。
+- 浏览器静态壳验收（真实 `style.css` + `index.html` + `avatars.js`，1440×900，视口 1414×807）：
+  - 展开：侧栏 236px，14 个 SVG 图标，导航项 207×42，图标芯片 28px，分组标题/文字/用户信息可见；
+  - 折叠：侧栏 72px，导航项 40×40，图标芯片 32×32，分组标题/文字/用户信息隐藏，
+    `toggle-expand` 可见，底部头像可见（内容底部 797 < 侧栏底部 807）。
+  - 截图：`target/ui-expanded.png`、`target/ui-collapsed.png`。
+- 说明：本机 H2 的管理员密码已非默认值，未修改用户数据；视觉验收使用离线静态壳完成，
+  交互逻辑（折叠状态、权限显隐）仍由既有 DOM 级用例覆盖。
+
+### 排查提示
+
+- 对话出现 `已阻止回退薪酬链路`：检查 Nacos `payroll-flows.json`、
+  `payroll-flow-settings.json` 与流程引用的智能体是否仍存在/上架。
+- 角色切换后仍提到旧话题：确认 `chat_sessions.persona_key` 是否随角色更新，
+  以及事件流是否出现“检测到智能体切换”。
+- 开启向量记忆时，跨会话回忆需显式设置 `PAYROLL_MEMORY_CROSS_SESSION=true`。

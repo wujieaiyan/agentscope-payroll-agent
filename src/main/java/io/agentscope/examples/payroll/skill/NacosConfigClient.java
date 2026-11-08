@@ -9,7 +9,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -23,6 +25,11 @@ final class NacosConfigClient {
 
     private static final Logger log = LoggerFactory.getLogger(NacosConfigClient.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int LIST_PAGE_SIZE = 200;
+
+    /** 配置列表项，读取管理台技能列表时一并带回正文，避免逐条再查。 */
+    record ConfigEntry(String dataId, String content, long updatedAt) {
+    }
 
     private final NacosSkillSettings settings;
     private final HttpClient http;
@@ -82,10 +89,73 @@ final class NacosConfigClient {
         }
     }
 
+    /** 按 dataId 模式列出配置（Nacos v1 模糊搜索），失败时返回空列表由调用方回退。 */
+    List<ConfigEntry> list(String dataIdPattern) {
+        try {
+            ensureToken();
+            Map<String, String> params = new LinkedHashMap<>();
+            params.put("search", "blur");
+            params.put("dataId", dataIdPattern);
+            params.put("group", settings.group());
+            params.put("pageNo", "1");
+            params.put("pageSize", String.valueOf(LIST_PAGE_SIZE));
+            if (!settings.namespace().isBlank()) {
+                params.put("tenant", settings.namespace());
+            }
+            if (accessToken != null && !accessToken.isBlank()) {
+                params.put("accessToken", accessToken);
+            }
+            HttpRequest request =
+                    HttpRequest.newBuilder(uri("/nacos/v1/cs/configs", params))
+                            .timeout(settings.timeout())
+                            .header("Accept", "application/json")
+                            .GET()
+                            .build();
+            HttpResponse<String> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() == 200) {
+                lastWarning = null;
+                JsonNode pageItems = JSON.readTree(response.body()).path("pageItems");
+                if (!pageItems.isArray()) {
+                    return List.of();
+                }
+                List<ConfigEntry> entries = new ArrayList<>(pageItems.size());
+                for (JsonNode item : pageItems) {
+                    String dataId = item.path("dataId").asText("");
+                    if (dataId.isBlank()) {
+                        continue;
+                    }
+                    entries.add(
+                            new ConfigEntry(
+                                    dataId,
+                                    item.path("content").asText(""),
+                                    item.path("gmtModified").asLong(0)));
+                }
+                return List.copyOf(entries);
+            }
+            if (response.statusCode() == 403) {
+                accessToken = null;
+                tokenExpiresAt = 0;
+            }
+            warnOnce("列出配置 " + dataIdPattern + " 失败：HTTP " + response.statusCode());
+            return List.of();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (IOException | RuntimeException e) {
+            warnOnce("列出 Nacos 配置 " + dataIdPattern + " 失败：" + rootMessage(e));
+            return List.of();
+        }
+    }
+
     boolean publish(String dataId, String content) {
+        return publish(dataId, content, "json");
+    }
+
+    boolean publish(String dataId, String content, String type) {
         Map<String, String> params = baseParams(dataId);
         params.put("content", content);
-        params.put("type", "json");
+        params.put("type", type);
         return write("发布", "POST", dataId, params);
     }
 

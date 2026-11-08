@@ -34,7 +34,7 @@ public class AgentAdminController {
 
     private static final int MAX_NAME_LENGTH = 30;
     private static final int MAX_DESCRIPTION_LENGTH = 200;
-    private static final int MAX_AVATAR_LENGTH = 8;
+    private static final int MAX_AVATAR_LENGTH = 40;
     private static final int MAX_TAGS = 6;
     private static final int MAX_TAG_LENGTH = 12;
 

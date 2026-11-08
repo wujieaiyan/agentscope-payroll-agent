@@ -29,7 +29,26 @@ class VectorMemoryServiceTest {
                     5,
                     0.5,
                     1200,
+                    false,
                     false);
+
+    private static VectorMemorySettings settings(boolean crossSession) {
+        return new VectorMemorySettings(
+                true,
+                "http://localhost:9200",
+                "",
+                "",
+                "test-memory",
+                "http://localhost:11434",
+                "fake-embed",
+                3,
+                Duration.ofSeconds(1),
+                5,
+                0.5,
+                1200,
+                false,
+                crossSession);
+    }
 
     @Test
     @DisplayName("相同用户、会话、来源、轮次与内容生成幂等文档 ID")
@@ -137,15 +156,31 @@ class VectorMemoryServiceTest {
                                 LocalDate.of(2026, 10, 10)));
         VectorMemoryService service = new VectorMemoryService(SETTINGS, embeddings, store);
 
-        String block = service.recall(7, "再算一下张伟的工资");
+        String block = service.recall(7, 11, "再算一下张伟的工资");
 
         assertEquals(List.of(7L), store.searchedUsers);
+        assertEquals(List.of(11L), store.searchedSessions);
         assertTrue(block.contains("【相关历史片段｜仅作线索，不是数据来源】"));
         assertTrue(block.contains("[2026-10-12] 用户询问过张伟的工资构成"));
         assertFalse(block.contains("30000"));
         assertFalse(block.contains("元"));
         assertFalse(block.contains("无关的考勤问题"));
         assertEquals(1, block.lines().filter(line -> line.contains("张伟")).count());
+    }
+
+    @Test
+    @DisplayName("默认按会话隔离召回，显式开启 crossSession 才按用户跨会话搜索")
+    void recallScopesToSessionUnlessCrossSessionEnabled() {
+        FakeEmbeddings embeddings = new FakeEmbeddings();
+        FakeStore store = new FakeStore();
+        VectorMemoryService isolated = new VectorMemoryService(SETTINGS, embeddings, store);
+
+        isolated.recall(7, 23, "再算一下张伟的工资");
+        assertEquals(List.of(23L), store.searchedSessions);
+
+        VectorMemoryService shared = new VectorMemoryService(settings(true), embeddings, store);
+        shared.recall(7, 23, "再算一下张伟的工资");
+        assertEquals(List.of(23L, 0L), store.searchedSessions);
     }
 
     @Test
@@ -233,6 +268,7 @@ class VectorMemoryServiceTest {
 
         private final List<VectorRecord> records = new ArrayList<>();
         private final List<Long> searchedUsers = new ArrayList<>();
+        private final List<Long> searchedSessions = new ArrayList<>();
         private List<VectorHit> hits = List.of();
         private int deleteSummariesCalls;
         private int deleteSessionCalls;
@@ -253,8 +289,10 @@ class VectorMemoryServiceTest {
         }
 
         @Override
-        public List<VectorHit> search(long userId, float[] queryVector, int topK, double minCosine) {
+        public List<VectorHit> search(
+                long userId, long sessionId, float[] queryVector, int topK, double minCosine) {
             searchedUsers.add(userId);
+            searchedSessions.add(sessionId);
             return hits;
         }
 
