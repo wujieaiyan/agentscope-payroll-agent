@@ -17,12 +17,15 @@ import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.AgentRunRecord;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.FlowNode;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.TraceScope;
 import io.agentscope.examples.payroll.support.ToolTraceExtractor;
+import io.agentscope.examples.payroll.team.TeamPlan;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import java.time.Duration;
@@ -31,6 +34,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -73,7 +77,9 @@ public final class PayrollChatService implements PayrollChat {
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final List<ChatToolTrace> collectedTraces = new CopyOnWriteArrayList<>();
+    private final List<PayrollChat.StageRun> stageRuns = new CopyOnWriteArrayList<>();
     private final RuntimeContext sessionContext;
+    private volatile TraceScope runScope = TraceScope.none();
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
@@ -188,6 +194,11 @@ public final class PayrollChatService implements PayrollChat {
         listener.onDone(reply);
     }
 
+    @Override
+    public List<PayrollChat.StageRun> stageRuns() {
+        return List.copyOf(stageRuns);
+    }
+
     /**
      * 单轮对话：收集文本与工具名，同时把事件转发给流式监听器。
      *
@@ -204,6 +215,7 @@ public final class PayrollChatService implements PayrollChat {
             long startedAt = System.currentTimeMillis();
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
             collectedTraces.clear();
+            stageRuns.clear();
             traceRecorder.clear();
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
@@ -286,6 +298,7 @@ public final class PayrollChatService implements PayrollChat {
             events.onAgentStart("validator", "② 验证智能体：本轮无需校验");
             events.onAgentOutput("validator", validation);
             events.onAgentEnd("validator");
+            recordSkippedStage("validator", validation.length());
             log.info("[多智能体] ② 跳过验证：本轮没有工资计算对象");
         } else {
             validation = validate(current.validator(), question, calculation, events, tools);
@@ -295,6 +308,7 @@ public final class PayrollChatService implements PayrollChat {
         if (calculation.targets().isEmpty()) {
             // 查询类问题（员工清单/档案/政策/考勤）直接返回计算记录，避免小模型改写出错误的工资结论。
             String reply = calculation.text().trim();
+            recordSkippedStage("accountant", reply.length());
             events.onText(reply);
             log.info("[多智能体] ③ 跳过核算汇总：查询类问题直接返回计算记录");
             return reply;
@@ -512,6 +526,16 @@ public final class PayrollChatService implements PayrollChat {
             String input,
             ChatStreamListener listener,
             Set<String> allTools) {
+        return executeFlowNode(node, agent, input, listener, allTools, roleOf(node.id()));
+    }
+
+    private AgentFlowExecutor.NodeResult executeFlowNode(
+            FlowNode node,
+            AgentDefinition agent,
+            String input,
+            ChatStreamListener listener,
+            Set<String> allTools,
+            String role) {
         if (agent == null) {
             throw new PayrollException("流程节点引用的智能体不存在：" + node.agentId());
         }
@@ -521,6 +545,16 @@ public final class PayrollChatService implements PayrollChat {
                 .userId(String.valueOf(userId))
                 .sessionId(sessionId + ":" + node.id())
                 .put(ToolTraceRecorder.class, recorder)
+                .put(
+                        TraceScope.class,
+                        new TraceScope(
+                                runScope.runId(),
+                                runScope.planId(),
+                                node.id(),
+                                node.agentId(),
+                                role,
+                                runScope.mode(),
+                                node.id()))
                 .build();
         PayrollAgentFactory.NodeAgent runtime =
                 PayrollAgentFactory.sharedFlowNodeAgent(engine, agent);
@@ -604,6 +638,7 @@ public final class PayrollChatService implements PayrollChat {
             ChatStreamListener listener,
             boolean answerStage,
             Set<String> allTools) {
+        sessionContext.put(TraceScope.class, stageScope(stageKey));
         return runStage(
                 stageKey,
                 stageLabel,
@@ -614,6 +649,97 @@ public final class PayrollChatService implements PayrollChat {
                 allTools,
                 traceRecorder,
                 sessionContext);
+    }
+
+    /** 本轮团队运行坐标；P0-3 在创建静态运行后注入，未启用时保持 none。 */
+    public void useRunScope(TraceScope scope) {
+        this.runScope = scope == null ? TraceScope.none() : scope;
+    }
+
+    /**
+     * 影子模式执行动态计划：复用现有 DAG 执行器与节点级上下文，但不写会话上下文、
+     * 不向用户推送事件，返回阶段与工具追溯供落库。
+     *
+     * <p>调用方必须为本次运行使用独立的服务实例，避免与用户主链路共享阶段列表。
+     */
+    public DynamicFlowResult executeDynamicFlow(
+            TeamPlan plan,
+            FlowDefinition flow,
+            Map<String, AgentDefinition> agents,
+            String input,
+            TraceScope scope) {
+        if (flow == null) {
+            throw new PayrollException("动态流程不能为空");
+        }
+        synchronized (lock) {
+            collectedTraces.clear();
+            stageRuns.clear();
+            traceRecorder.clear();
+            useRunScope(scope);
+            Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
+            Map<String, String> roles = new LinkedHashMap<>();
+            if (plan != null) {
+                for (TeamPlan.PlanNode node : plan.agentNodes()) {
+                    roles.put(node.id(), node.role());
+                }
+            }
+            try {
+                AgentFlowExecutor.Outcome outcome =
+                        AgentFlowExecutor.execute(
+                                flow,
+                                input,
+                                ChatStreamListener.NOOP,
+                                (node, nodeInput, listener) ->
+                                        executeFlowNode(
+                                                node,
+                                                agents.get(node.agentId()),
+                                                nodeInput,
+                                                listener,
+                                                tools,
+                                                roles.getOrDefault(node.id(), roleOf(node.id()))));
+                return new DynamicFlowResult(
+                        outcome.reply() == null ? "" : outcome.reply().trim(),
+                        outcome.targets(),
+                        List.copyOf(stageRuns),
+                        List.copyOf(collectedTraces),
+                        List.copyOf(tools),
+                        outcome.nodeResults());
+            } finally {
+                useRunScope(TraceScope.none());
+            }
+        }
+    }
+
+    private TraceScope stageScope(String stageKey) {
+        return new TraceScope(
+                runScope.runId(),
+                runScope.planId(),
+                stageKey,
+                builtInAgentId(stageKey),
+                roleOf(stageKey),
+                runScope.mode(),
+                stageKey);
+    }
+
+    private static String roleOf(String stageKey) {
+        if (stageKey == null) {
+            return "AGENT";
+        }
+        return switch (stageKey) {
+            case "calculator" -> "CALCULATOR";
+            case "validator" -> "VALIDATOR";
+            case "accountant" -> "ACCOUNTANT";
+            default -> stageKey.toUpperCase(Locale.ROOT);
+        };
+    }
+
+    private static String builtInAgentId(String stageKey) {
+        return switch (stageKey == null ? "" : stageKey) {
+            case "calculator" -> "PayrollCalculatorAgent";
+            case "validator" -> "PayrollValidatorAgent";
+            case "accountant" -> "PayrollAccountantAgent";
+            default -> stageKey;
+        };
     }
 
     /**
@@ -645,6 +771,7 @@ public final class PayrollChatService implements PayrollChat {
         Map<String, StringBuilder> argsByCall = new LinkedHashMap<>();
         List<CalcTarget> targets = new ArrayList<>();
         Set<String> stageTools = new LinkedHashSet<>();
+        int[] toolCalls = {0};
         boolean[] toolError = {false};
         String[] lastToolSignature = {null};
         int[] repeatedToolCalls = {0};
@@ -654,6 +781,7 @@ public final class PayrollChatService implements PayrollChat {
                     .doOnNext(
                             event -> {
                                 if (event instanceof ToolCallStartEvent call) {
+                                    toolCalls[0]++;
                                     allTools.add(call.getToolCallName());
                                     stageTools.add(call.getToolCallName());
                                     argsByCall.putIfAbsent(
@@ -701,7 +829,12 @@ public final class PayrollChatService implements PayrollChat {
                                         toolError[0] = true;
                                     }
                                     ChatToolTrace trace =
-                                            traceOf(recorder, stageKey, result, args);
+                                            traceOf(
+                                                    recorder,
+                                                    stageKey,
+                                                    result,
+                                                    args,
+                                                    callContext);
                                     collectedTraces.add(trace);
                                     log.info(
                                             "[多智能体][{}] 工具结束：{}，state={}，耗时={}ms，参数={}，金额={}，员工={}，期间={}",
@@ -738,7 +871,20 @@ public final class PayrollChatService implements PayrollChat {
                     .timeout(STAGE_TIMEOUT)
                     .blockLast();
         } catch (RuntimeException e) {
-            if (Exceptions.unwrap(e) instanceof TimeoutException) {
+            boolean timeout = Exceptions.unwrap(e) instanceof TimeoutException;
+            recordStage(
+                    stageKey,
+                    timeout ? AgentRunRecord.STATUS_TIMEOUT : AgentRunRecord.STATUS_FAILED,
+                    toolCalls[0],
+                    toolError[0] ? 1 : 0,
+                    validationPassed(stageKey, toolError[0]),
+                    streamed.length(),
+                    System.currentTimeMillis() - startedAt,
+                    timeout
+                            ? "阶段超过 " + STAGE_TIMEOUT.toSeconds() + " 秒未完成"
+                            : rootMessage(e),
+                    callContext);
+            if (timeout) {
                 throw new PayrollException(
                         "智能体阶段超过 "
                                 + STAGE_TIMEOUT.toSeconds()
@@ -768,8 +914,76 @@ public final class PayrollChatService implements PayrollChat {
             }
         }
         log.debug("[多智能体][{}] 输出：\n{}", stageKey, text);
-        return new StageResult(
-                text, List.copyOf(targets), System.currentTimeMillis() - startedAt, toolError[0]);
+        long elapsedMs = System.currentTimeMillis() - startedAt;
+        recordStage(
+                stageKey,
+                text.isBlank() ? AgentRunRecord.STATUS_EMPTY : AgentRunRecord.STATUS_SUCCESS,
+                toolCalls[0],
+                toolError[0] ? 1 : 0,
+                validationPassed(stageKey, toolError[0]),
+                text.length(),
+                elapsedMs,
+                null,
+                callContext);
+        return new StageResult(text, List.copyOf(targets), elapsedMs, toolError[0]);
+    }
+
+    private void recordStage(
+            String stageKey,
+            String status,
+            int toolCalls,
+            int toolErrors,
+            Boolean validationPassed,
+            int outputChars,
+            long durationMs,
+            String errorMessage,
+            RuntimeContext callContext) {
+        TraceScope scope = callContext == null ? null : callContext.get(TraceScope.class);
+        String nodeId =
+                scope != null && scope.nodeId() != null && !scope.nodeId().isBlank()
+                        ? scope.nodeId()
+                        : stageKey;
+        String agentId =
+                scope != null && scope.agentId() != null && !scope.agentId().isBlank()
+                        ? scope.agentId()
+                        : builtInAgentId(stageKey);
+        String role =
+                scope != null && scope.role() != null && !scope.role().isBlank()
+                        ? scope.role()
+                        : roleOf(stageKey);
+        stageRuns.add(
+                new PayrollChat.StageRun(
+                        nodeId,
+                        stageKey,
+                        agentId,
+                        role,
+                        status,
+                        toolCalls,
+                        toolErrors,
+                        validationPassed,
+                        outputChars,
+                        Math.max(0L, durationMs),
+                        errorMessage));
+    }
+
+    private void recordSkippedStage(String stageKey, int outputChars) {
+        stageRuns.add(
+                new PayrollChat.StageRun(
+                        stageKey,
+                        stageKey,
+                        builtInAgentId(stageKey),
+                        roleOf(stageKey),
+                        AgentRunRecord.STATUS_SKIPPED,
+                        0,
+                        0,
+                        null,
+                        Math.max(0, outputChars),
+                        0L,
+                        null));
+    }
+
+    private static Boolean validationPassed(String stageKey, boolean toolError) {
+        return "validator".equals(stageKey) ? !toolError : null;
     }
 
     /**
@@ -986,37 +1200,44 @@ public final class PayrollChatService implements PayrollChat {
      * 内置工具优先使用采集到的参数与结果；MCP 等外部工具没有采集记录，退化为事件里的参数。
      */
     private ChatToolTrace traceOf(
-            ToolTraceRecorder recorder, String stageKey, ToolResultEndEvent result, String args) {
+            ToolTraceRecorder recorder,
+            String stageKey,
+            ToolResultEndEvent result,
+            String args,
+            RuntimeContext callContext) {
+        TraceScope scope = callContext == null ? null : callContext.get(TraceScope.class);
         ToolTraceRecorder.Entry entry = recorder.take(result.getToolCallName());
         if (entry != null) {
             return ChatToolTrace.draft(
-                    result.getToolCallId(),
-                    entry.toolName(),
-                    stageKey,
-                    entry.argsJson(),
-                    entry.resultJson(),
-                    entry.truncated(),
-                    result.getState().name(),
-                    entry.durationMs(),
-                    entry.employees(),
-                    entry.period(),
-                    entry.department(),
-                    entry.amounts());
+                            result.getToolCallId(),
+                            entry.toolName(),
+                            stageKey,
+                            entry.argsJson(),
+                            entry.resultJson(),
+                            entry.truncated(),
+                            result.getState().name(),
+                            entry.durationMs(),
+                            entry.employees(),
+                            entry.period(),
+                            entry.department(),
+                            entry.amounts())
+                    .withScope(scope);
         }
         ToolTraceExtractor.Evidence evidence = ToolTraceExtractor.extract(args, null);
         return ChatToolTrace.draft(
-                result.getToolCallId(),
-                result.getToolCallName(),
-                stageKey,
-                args,
-                null,
-                false,
-                result.getState().name(),
-                0,
-                evidence.employees(),
-                evidence.period(),
-                evidence.department(),
-                evidence.amounts());
+                        result.getToolCallId(),
+                        result.getToolCallName(),
+                        stageKey,
+                        args,
+                        null,
+                        false,
+                        result.getState().name(),
+                        0,
+                        evidence.employees(),
+                        evidence.period(),
+                        evidence.department(),
+                        evidence.amounts())
+                .withScope(scope);
     }
 
     @Override
@@ -1029,6 +1250,7 @@ public final class PayrollChatService implements PayrollChat {
         synchronized (lock) {
             context = new ConversationContext("", 0);
             collectedTraces.clear();
+            stageRuns.clear();
             traceRecorder.clear();
             persistContext(context);
             if (team != null) {
@@ -1118,7 +1340,25 @@ public final class PayrollChatService implements PayrollChat {
      * 图编排的节点状态默认按 Java 序列化克隆，阶段结果必须可序列化；
      * 手写编排下这两个 record 仅作为进程内值对象使用，不受影响。
      */
-    record CalcTarget(String employeeId, String period) implements java.io.Serializable {
+    public record CalcTarget(String employeeId, String period) implements java.io.Serializable {
+    }
+
+    /** 动态流程执行结果：只含运行期数据，由调用方决定是否落库。 */
+    public record DynamicFlowResult(
+            String reply,
+            List<CalcTarget> targets,
+            List<PayrollChat.StageRun> stages,
+            List<ChatToolTrace> traces,
+            List<String> tools,
+            Map<String, AgentFlowExecutor.NodeResult> nodeResults) {
+
+        public DynamicFlowResult {
+            targets = targets == null ? List.of() : List.copyOf(targets);
+            stages = stages == null ? List.of() : List.copyOf(stages);
+            traces = traces == null ? List.of() : List.copyOf(traces);
+            tools = tools == null ? List.of() : List.copyOf(tools);
+            nodeResults = nodeResults == null ? Map.of() : Map.copyOf(nodeResults);
+        }
     }
 
     record StageResult(String text, List<CalcTarget> targets, long elapsedMs, boolean toolError)

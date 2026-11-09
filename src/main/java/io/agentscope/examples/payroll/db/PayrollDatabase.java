@@ -407,6 +407,101 @@ public final class PayrollDatabase {
             """
             CREATE INDEX IF NOT EXISTS idx_audit_resource
                 ON audit_log (resource_type, resource_id, occurred_at)
+            """,
+            // 动态团队数据地基。run_mode / agent_role / comment_text 避开 H2 关键字。
+            """
+            CREATE TABLE IF NOT EXISTS agent_team_runs (
+                run_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                plan_id VARCHAR(64) NOT NULL,
+                session_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                run_mode VARCHAR(16) NOT NULL,
+                task_type VARCHAR(32),
+                template_id VARCHAR(64),
+                plan_json CLOB NOT NULL,
+                catalog_snapshot_json CLOB,
+                score_snapshot_json CLOB,
+                status VARCHAR(24) NOT NULL,
+                fallback_reason VARCHAR(256),
+                baseline_run_id BIGINT,
+                fallback_of_run_id BIGINT,
+                retry_of_run_id BIGINT,
+                is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+                total_ms BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP,
+                archived_at TIMESTAMP,
+                deleted_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS agent_run_records (
+                record_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                run_id BIGINT NOT NULL,
+                node_id VARCHAR(64) NOT NULL,
+                stage_key VARCHAR(64),
+                agent_id VARCHAR(64),
+                agent_role VARCHAR(32),
+                status VARCHAR(24) NOT NULL,
+                tool_calls INT NOT NULL DEFAULT 0,
+                tool_errors INT NOT NULL DEFAULT 0,
+                validation_passed BOOLEAN,
+                output_chars INT NOT NULL DEFAULT 0,
+                duration_ms BIGINT NOT NULL DEFAULT 0,
+                trace_ids_json CLOB,
+                input_digest VARCHAR(64),
+                message_json CLOB,
+                error_message VARCHAR(512),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_feedback (
+                feedback_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                message_id BIGINT NOT NULL,
+                session_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                rating VARCHAR(8) NOT NULL,
+                tags_json CLOB,
+                comment_text VARCHAR(1000),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_chat_feedback_message_user UNIQUE (message_id, user_id)
+            )
+            """,
+            """
+            ALTER TABLE chat_tool_traces ADD COLUMN IF NOT EXISTS run_id BIGINT
+            """,
+            """
+            ALTER TABLE chat_tool_traces ADD COLUMN IF NOT EXISTS node_id VARCHAR(64)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_message
+                ON agent_team_runs (message_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_session
+                ON agent_team_runs (session_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_primary
+                ON agent_team_runs (message_id, is_primary)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_run_records_run
+                ON agent_run_records (run_id, node_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_run_records_agent
+                ON agent_run_records (agent_id, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_feedback_message
+                ON chat_feedback (message_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_run
+                ON chat_tool_traces (run_id, node_id)
             """);
 
     private static final Map<String, PayrollPolicy> DEMO_CITY_POLICIES = demoCityPolicies();

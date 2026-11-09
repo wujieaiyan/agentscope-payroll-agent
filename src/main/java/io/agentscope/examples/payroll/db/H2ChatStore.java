@@ -172,6 +172,7 @@ public final class H2ChatStore implements ChatContextStore {
                     statement.setLong(1, sessionId);
                     statement.executeUpdate();
                 }
+                deleteTeamData(connection, sessionId);
                 try (PreparedStatement statement =
                         connection.prepareStatement(
                                 "DELETE FROM chat_sessions WHERE session_id = ?")) {
@@ -203,6 +204,24 @@ public final class H2ChatStore implements ChatContextStore {
                     messages.add(mapMessage(rs));
                 }
                 return List.copyOf(messages);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询会话消息失败：" + e.getMessage(), e);
+        }
+    }
+
+    public Optional<ChatMessage> message(long sessionId, long messageId) {
+        String sql =
+                """
+                SELECT message_id, session_id, role, content, tools_json, model, created_at
+                FROM chat_messages WHERE session_id = ? AND message_id = ?
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, sessionId);
+            statement.setLong(2, messageId);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? Optional.of(mapMessage(rs)) : Optional.empty();
             }
         } catch (SQLException e) {
             throw new IllegalStateException("查询会话消息失败：" + e.getMessage(), e);
@@ -298,8 +317,7 @@ public final class H2ChatStore implements ChatContextStore {
                     for (ChatToolTrace trace : traces) {
                         insertTrace(connection, sessionId, id, trace, now);
                     }
-                }
-                connection.commit();
+                }                connection.commit();
             } catch (SQLException | RuntimeException e) {
                 connection.rollback();
                 throw e;
@@ -311,7 +329,7 @@ public final class H2ChatStore implements ChatContextStore {
         return new ChatMessage(id, sessionId, ROLE_ASSISTANT, content, tools, model, now);
     }
 
-    private static void insertTrace(
+    private static long insertTrace(
             Connection connection,
             long sessionId,
             long messageId,
@@ -321,32 +339,116 @@ public final class H2ChatStore implements ChatContextStore {
         String sql =
                 """
                 INSERT INTO chat_tool_traces (message_id, session_id, tool_call_id, tool_name,
-                    agent, args_json, result_json, truncated, result_state, duration_ms,
-                    employees_json, period, department, amounts_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    agent, run_id, node_id, args_json, result_json, truncated, result_state,
+                    duration_ms, employees_json, period, department, amounts_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (PreparedStatement statement =
+                connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             statement.setLong(1, messageId);
             statement.setLong(2, sessionId);
             statement.setString(3, trace.toolCallId());
             statement.setString(4, trace.toolName());
             statement.setString(5, trace.agent());
-            statement.setString(6, trace.argsJson());
-            statement.setString(7, trace.resultJson());
-            statement.setBoolean(8, trace.truncated());
-            statement.setString(9, trace.resultState());
-            statement.setLong(10, trace.durationMs());
+            if (trace.runId() > 0) {
+                statement.setLong(6, trace.runId());
+            } else {
+                statement.setNull(6, java.sql.Types.BIGINT);
+            }
+            statement.setString(7, trace.nodeId());
+            statement.setString(8, trace.argsJson());
+            statement.setString(9, trace.resultJson());
+            statement.setBoolean(10, trace.truncated());
+            statement.setString(11, trace.resultState());
+            statement.setLong(12, trace.durationMs());
             statement.setString(
-                    11,
+                    13,
                     trace.employees().isEmpty()
                             ? null
                             : JsonSupport.toJson(trace.employees()));
-            statement.setString(12, trace.period());
-            statement.setString(13, trace.department());
+            statement.setString(14, trace.period());
+            statement.setString(15, trace.department());
             statement.setString(
-                    14, trace.amounts().isEmpty() ? null : JsonSupport.toJson(trace.amounts()));
-            statement.setObject(15, now);
+                    16, trace.amounts().isEmpty() ? null : JsonSupport.toJson(trace.amounts()));
+            statement.setObject(17, now);
             statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                return keys.next() ? keys.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /**
+     * 影子运行没有助手消息，追溯以 message_id=0 单独落库，通过 run_id 查询；
+     * 不写入主消息，避免污染聊天页的计算依据。
+     */
+    public List<ChatToolTrace> appendTraces(
+            long sessionId, long messageId, List<ChatToolTrace> traces) {
+        if (traces == null || traces.isEmpty()) {
+            return List.of();
+        }
+        LocalDateTime now = LocalDateTime.now();
+        List<ChatToolTrace> persisted = new ArrayList<>();
+        try (Connection connection = database.connection()) {
+            connection.setAutoCommit(false);
+            try {
+                for (ChatToolTrace trace : traces) {
+                    long id = insertTrace(connection, sessionId, messageId, trace, now);
+                    persisted.add(
+                            new ChatToolTrace(
+                                    id,
+                                    messageId,
+                                    sessionId,
+                                    trace.toolCallId(),
+                                    trace.toolName(),
+                                    trace.agent(),
+                                    trace.runId(),
+                                    trace.nodeId(),
+                                    trace.argsJson(),
+                                    trace.resultJson(),
+                                    trace.truncated(),
+                                    trace.resultState(),
+                                    trace.durationMs(),
+                                    trace.employees(),
+                                    trace.period(),
+                                    trace.department(),
+                                    trace.amounts(),
+                                    now));
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("保存工具追溯失败：" + e.getMessage(), e);
+        }
+        return List.copyOf(persisted);
+    }
+
+    /** 按运行读取 shadow/回退运行的工具追溯；主消息追溯仍走 {@link #traces(long, long)}。 */
+    public List<ChatToolTrace> tracesForRun(long runId) {
+        String sql =
+                """
+                SELECT trace_id, message_id, session_id, tool_call_id, tool_name, agent,
+                       run_id, node_id, args_json, result_json, truncated, result_state,
+                       duration_ms, employees_json, period, department, amounts_json, created_at
+                FROM chat_tool_traces
+                WHERE run_id = ?
+                ORDER BY trace_id
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, runId);
+            try (ResultSet rs = statement.executeQuery()) {
+                List<ChatToolTrace> traces = new ArrayList<>();
+                while (rs.next()) {
+                    traces.add(mapTrace(rs));
+                }
+                return List.copyOf(traces);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询运行工具追溯失败：" + e.getMessage(), e);
         }
     }
 
@@ -355,8 +457,8 @@ public final class H2ChatStore implements ChatContextStore {
         String sql =
                 """
                 SELECT trace_id, message_id, session_id, tool_call_id, tool_name, agent,
-                       args_json, result_json, truncated, result_state, duration_ms,
-                       employees_json, period, department, amounts_json, created_at
+                       run_id, node_id, args_json, result_json, truncated, result_state,
+                       duration_ms, employees_json, period, department, amounts_json, created_at
                 FROM chat_tool_traces
                 WHERE session_id = ? AND message_id = ?
                 ORDER BY trace_id
@@ -464,6 +566,7 @@ public final class H2ChatStore implements ChatContextStore {
                 statement.setLong(1, sessionId);
                 statement.executeUpdate();
             }
+            deleteTeamData(connection, sessionId);
             try (PreparedStatement statement =
                     connection.prepareStatement(
                             """
@@ -476,6 +579,31 @@ public final class H2ChatStore implements ChatContextStore {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("清空会话消息失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 会话清空/删除时同步清理团队运行、节点记录与反馈，避免孤儿数据。 */
+    private static void deleteTeamData(Connection connection, long sessionId) throws SQLException {
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        """
+                        DELETE FROM agent_run_records
+                        WHERE run_id IN (SELECT run_id FROM agent_team_runs WHERE session_id = ?)
+                        """)) {
+            statement.setLong(1, sessionId);
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "DELETE FROM agent_team_runs WHERE session_id = ?")) {
+            statement.setLong(1, sessionId);
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "DELETE FROM chat_feedback WHERE session_id = ?")) {
+            statement.setLong(1, sessionId);
+            statement.executeUpdate();
         }
     }
 
@@ -511,6 +639,8 @@ public final class H2ChatStore implements ChatContextStore {
                 rs.getString("tool_call_id"),
                 rs.getString("tool_name"),
                 rs.getString("agent"),
+                rs.getLong("run_id"),
+                rs.getString("node_id"),
                 rs.getString("args_json"),
                 rs.getString("result_json"),
                 rs.getBoolean("truncated"),

@@ -558,6 +558,22 @@ public final class PayrollAgentFactory {
                 6);
     }
 
+    /**
+     * 无工具的单轮 JSON 智能体，供动态团队的意图/计划生成使用。
+     *
+     * <p>maxIters=1 保证不会进入工具循环；调用方负责 10 秒超时与规则兜底。
+     */
+    public static HarnessAgent createUtilityAgent(
+            String name, String sysPrompt, int maxIters) {
+        return createAgent(
+                name,
+                name,
+                sysPrompt,
+                sharedModel(),
+                new Toolkit(),
+                Math.max(1, maxIters));
+    }
+
     private static HarnessAgent createAgent(
             String name,
             String description,

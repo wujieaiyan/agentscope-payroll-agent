@@ -1,8 +1,10 @@
 package io.agentscope.examples.payroll.config;
 
 import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2AuditStore;
+import io.agentscope.examples.payroll.db.H2ChatFeedbackStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
@@ -10,9 +12,11 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.memory.VectorMemorySettings;
+import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.ChatFeedbackService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
@@ -23,9 +27,15 @@ import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.service.StaticRunRecorder;
+import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
+import io.agentscope.examples.payroll.team.ShadowReportService;
+import io.agentscope.examples.payroll.team.ShadowTeamService;
+import io.agentscope.examples.payroll.team.TeamMode;
+import io.agentscope.examples.payroll.team.TeamSettings;
 import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
@@ -218,12 +228,93 @@ public class PayrollConfiguration {
         return new H2ChatStore(database);
     }
 
+    @Bean
+    public H2AgentTeamStore agentTeamStore(PayrollDatabase database) {
+        return new H2AgentTeamStore(database);
+    }
+
+    @Bean
+    public H2ChatFeedbackStore chatFeedbackStore(PayrollDatabase database) {
+        return new H2ChatFeedbackStore(database);
+    }
+
+    @Bean
+    public ChatFeedbackService chatFeedbackService(
+            H2ChatStore chatStore, H2ChatFeedbackStore feedbackStore) {
+        return new ChatFeedbackService(chatStore, feedbackStore);
+    }
+
+    @Bean
+    public TeamRunQueryService teamRunQueryService(
+            H2AgentTeamStore teamStore,
+            H2ChatStore chatStore,
+            ChatFeedbackService feedbackService) {
+        return new TeamRunQueryService(teamStore, chatStore, feedbackService);
+    }
+
+    @Bean
+    public AgentStatsService agentStatsService(
+            H2AgentTeamStore teamStore,
+            H2ChatFeedbackStore feedbackStore,
+            TeamSettings teamSettings,
+            NacosAgentRegistry agentRegistry) {
+        return new AgentStatsService(teamStore, feedbackStore, teamSettings, agentRegistry::list);
+    }
+
+    @Bean
+    public TeamSettings teamSettings(
+            @Value("${payroll.team.mode:OFF}") String mode,
+            @Value("${payroll.team.retention-days:180}") int retentionDays,
+            @Value("${payroll.team.stats-window-days:30}") int statsWindowDays,
+            @Value("${payroll.team.shadow-sample-rate:0.15}") double shadowSampleRate) {
+        TeamMode parsed = TeamMode.from(mode);
+        if (mode != null && !mode.isBlank() && !parsed.name().equalsIgnoreCase(mode.trim())) {
+            log.warn("[动态团队] 未知模式 {}，按 OFF 处理", mode);
+        }
+        log.info("[动态团队] 模式：{}", parsed);
+        return new TeamSettings(parsed, retentionDays, statsWindowDays, shadowSampleRate);
+    }
+
+    @Bean
+    public ShadowReportService shadowReportService(
+            H2AgentTeamStore agentTeamStore, TeamSettings teamSettings) {
+        return new ShadowReportService(agentTeamStore, teamSettings);
+    }
+
+    @Bean(destroyMethod = "close")
+    public ShadowTeamService shadowTeamService(
+            TeamSettings teamSettings,
+            H2AgentTeamStore agentTeamStore,
+            H2ChatStore chatStore,
+            AgentStatsService agentStatsService,
+            NacosAgentRegistry agentRegistry,
+            PayrollChatFactory payrollChatFactory) {
+        ShadowTeamService service =
+                new ShadowTeamService(
+                        teamSettings,
+                        agentTeamStore,
+                        chatStore,
+                        agentStatsService,
+                        agentRegistry::list,
+                        payrollChatFactory);
+        log.info("[动态团队] 影子服务：{}", service.enabled() ? "已启用" : "未启用");
+        return service;
+    }
+
     @Bean(destroyMethod = "close")
     public ChatSessionManager chatSessionManager(
             H2ChatStore chatStore,
             PayrollChatFactory chatFactory,
-            VectorMemoryService memory) {
-        return new ChatSessionManager(chatStore, chatFactory, memory);
+            VectorMemoryService memory,
+            H2AgentTeamStore agentTeamStore,
+            TeamSettings teamSettings,
+            ShadowTeamService shadowTeamService) {
+        return new ChatSessionManager(
+                chatStore,
+                chatFactory,
+                memory,
+                new StaticRunRecorder(agentTeamStore, teamSettings),
+                shadowTeamService);
     }
 
     @Bean
@@ -275,6 +366,25 @@ public class PayrollConfiguration {
                 }
             } catch (RuntimeException e) {
                 log.warn("[审计] 清理过期日志失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    /** 启动时软归档超过保留期的团队运行；节点与 trace 保留，供审计按 run_id 追溯。 */
+    @Bean
+    public ApplicationRunner teamRetentionRunner(
+            H2AgentTeamStore teamStore, TeamSettings teamSettings) {
+        return args -> {
+            try {
+                int archived = teamStore.archiveExpired(teamSettings.retentionDays());
+                if (archived > 0) {
+                    log.info(
+                            "[动态团队] 归档过期运行 {} 条（保留 {} 天）",
+                            archived,
+                            teamSettings.retentionDays());
+                }
+            } catch (RuntimeException e) {
+                log.warn("[动态团队] 归档过期运行失败：{}", e.getMessage());
             }
         };
     }

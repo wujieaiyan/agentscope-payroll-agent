@@ -443,6 +443,40 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 完整交接说明（契约、排障、限制）见 [`docs/multi-agent-handoff.md`](docs/multi-agent-handoff.md)。
 
+## 运行追溯、反馈与评分（P0）
+
+动态团队的数据地基已先行落地，当前仍由静态三阶段链路提供服务，默认不改变对话与金额。
+
+- 开关：`PAYROLL_TEAM_MODE=OFF`（默认）保持旧链路；`STATIC` 在一轮对话旁路写入
+  1 条团队运行（run）与计算/验证/核算各 1 条节点记录（node），成功、失败、中断都会落库；
+  记录失败只写日志，不影响回答。`SHADOW` 额外启用影子组队（见下节），`ACTIVE` 留给 P2。
+- 影子组队（P1，`PAYROLL_TEAM_MODE=SHADOW`）：主链路回答落库后按
+  `PAYROLL_TEAM_SHADOW_SAMPLE_RATE`（默认 0.15）异步采样。每轮最多两次轻量模型调用
+  （意图抽取 + 计划选角）和一次动态 DAG 执行；计划只能从 Top-3 短名单内选人，
+  使用固定模板（核算→复核、核算→复核→入账、查询、知识、查询+核算→复核），最多 5 个
+  智能体节点。`PlanValidator` 校验 DAG、强制复核、智能体可用性与角色能力等 8 类约束，
+  失败先做一次 Top-1 确定性修复，仍失败则记录 `L2` 回退。影子运行只写
+  `mode=SHADOW`、`is_primary=false` 的 run 与节点/trace，`baseline_run_id` 指向本轮
+  静态运行，不向用户展示、不改变回答或 SSE 事件。
+- 影子报告：`GET /api/admin/team/shadow-report?days=7`（需 `agent:manage`，`days=0`
+  取统计窗口）。返回计划率、成功率、`L0`–`L4` 回退分布、模板/任务/选角分布，
+  以及相对静态基线（`baseline_run_id`）的成功率与耗时差异。
+- 追溯链：`message_id → run_id → node_id → trace_id`。工具追溯新增 `run_id`/`node_id`，
+  `GET /api/chat/sessions/{id}/messages/{messageId}/team` 返回主运行、全部运行、节点摘要、
+  trace 引用与当前反馈；跨用户访问返回 403。
+- 团队面板：助手消息下可展开「团队运行」，显示 `STATIC · 固定链路` / `SHADOW · 影子组队` /
+  `ACTIVE · 动态组队` 徽标、节点与智能体、状态、工具/复核/trace 数、耗时，以及组队评分快照；
+  `SHADOW`/`ACTIVE` 新回答会自动展开，`OFF` 记录显示“未记录团队运行”。
+- 反馈：助手消息下方 👍/👎；差评可选 `WRONG_AMOUNT`/`INCOMPLETE`/`SLOW`/`OFF_TOPIC`/`OTHER`。
+  同一用户重复提交覆盖原记录，最多 5 个标签、说明不超过 500 字；仅可对助手消息提交。
+- 评分：`GET /api/admin/agent-stats?days=30`（需 `agent:manage`）按窗口聚合。综合分由客观分 O
+  （Wilson 成功率下界、工具/复核下界、时延分、稳定性）与反馈分 F 加权，再按样本量向角色先验
+  收缩；样本少于 5 标记冷启动，零样本显示先验分而不除零，结果缓存 5 分钟。
+- 保留：运行记录默认保留 180 天，启动时软归档超期数据（`deleted_at`）；节点与 trace 保留，
+  统计与追溯默认忽略已归档运行。
+
+完整设计、公式与后续阶段拆分见 [`docs/dynamic-agent-team-spec.md`](docs/dynamic-agent-team-spec.md)。
+
 ## Excel 导入
 
 员工、考核、考勤三个页签均提供“导入 Excel”和“下载导入模板”。接口接收原始二进制
@@ -501,6 +535,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
 | `PAYROLL_AUDIT_RETENTION_DAYS` | `180` | 审计日志保留天数，启动时清理更早记录 |
+| `PAYROLL_TEAM_MODE` | `OFF` | 动态团队开关：`OFF` 保持旧链路；`STATIC` 记录静态运行；`SHADOW` 采样旁路动态组队 |
+| `PAYROLL_TEAM_RETENTION_DAYS` | `180` | 团队运行保留天数，启动时软归档更早记录 |
+| `PAYROLL_TEAM_STATS_WINDOW_DAYS` | `30` | 评分榜默认统计窗口（天） |
+| `PAYROLL_TEAM_SHADOW_SAMPLE_RATE` | `0.15` | `SHADOW` 模式采样率；设 0 关闭影子执行 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
 | `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |
@@ -565,6 +603,9 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | DELETE | `/api/chat/sessions/{id}` | 删除会话及其全部消息 |
 | GET | `/api/chat/sessions/{id}/messages` | 会话历史消息（含角色、内容、工具与模型） |
 | GET | `/api/chat/sessions/{id}/messages/{messageId}/traces` | 单条助手消息的工具调用依据（参数、结果、金额、员工） |
+| GET | `/api/chat/sessions/{id}/messages/{messageId}/team` | 团队运行、节点摘要、trace 引用与当前反馈 |
+| GET | `/api/chat/sessions/{id}/messages/{messageId}/feedback` | 当前用户对该助手消息的反馈 |
+| POST | `/api/chat/sessions/{id}/messages/{messageId}/feedback` | 提交或覆盖反馈，body `{"rating":"UP"\|"DOWN","tags":[...],"comment":"..."}` |
 | POST | `/api/chat/sessions/{id}/messages` | 非流式对话，body `{"message":"..."}` |
 | POST | `/api/chat/sessions/{id}/reset` | 清空会话消息并重置智能体上下文 |
 | POST | `/api/chat/sessions/{id}/stream` | 会话 SSE 流式对话（事件协议见上一节） |
@@ -586,6 +627,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | GET | `/api/admin/flows/meta` | 存储可写性、Nacos 位置与可选智能体 |
 | PUT/DELETE | `/api/admin/flows/{id}` | 更新 / 删除流程（默认流程不可删） |
 | PUT | `/api/admin/flows/{id}/active` | 设为全局默认流程，下一轮对话生效 |
+| GET | `/api/admin/agent-stats?days=30` | 智能体评分榜：窗口内样本、综合分、客观/反馈分、时延与稳定性（需 `agent:manage`） |
 | GET | `/api/audit` | 审计日志分页查询，支持 `from`/`to`/`actor`/`action`/`resource_type`/`resource_id`/`result`/`keyword`/`page`/`size`（需 `audit:read`） |
 | GET | `/api/audit/export` | 按相同条件导出 CSV（含 BOM，最多 1 万条，需 `audit:read`） |
 
@@ -704,7 +746,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 mvn test
 ```
 
-共 227 个测试，覆盖：
+共 294 个测试，覆盖：
 
 - 个税档位边界连续性（36,000 / 144,000 / 300,000 / 960,000）
 - 社保基数上下限封顶，以及不同城市政策差异
@@ -750,6 +792,10 @@ mvn test
   Nacos 搜索列表解析与技能仓库发现，列表失败回退内置；服务地址带 `/nacos` 时归一化避免重复前缀
 - 技能仓库容错：列表接口抖动时沿用上次成功快照、单个技能拉取异常时沿用上次成功内容，
   Nacos 瞬断不再让自定义技能消失 60 秒；首次失败仍回退纯内置清单
+- 动态团队 P1：意图规则分类与写操作拦截、内置/推断能力画像、候选 Top-3 与零样本角色先验、
+  模板计划校验（复核顺序、环、重复智能体、私有/下架）、Top-1 去重选角与回退、计划编译为流程、
+  上游消息渲染与金额只取工具追溯、SHADOW L0/L2/L3 回退落库、影子报告聚合与基线差异、
+  影子 trace 按 `run_id` 读取且不污染消息依据
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；

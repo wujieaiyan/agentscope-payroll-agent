@@ -1890,6 +1890,44 @@ const CHAT_AGENT_LABELS = {
   accountant: '③ 核算智能体',
 };
 
+const CHAT_TEAM_ROLE_LABELS = {
+  CALCULATOR: '计算',
+  VALIDATOR: '复核',
+  ACCOUNTANT: '核算',
+  QUERY: '查询',
+  KNOWLEDGE: '知识',
+};
+
+const CHAT_TEAM_STATUS = {
+  SUCCESS: { label: '成功', cls: 'ok' },
+  FAILED: { label: '失败', cls: 'bad' },
+  TIMEOUT: { label: '超时', cls: 'bad' },
+  EMPTY: { label: '空输出', cls: 'bad' },
+  SKIPPED: { label: '跳过', cls: 'muted' },
+  RUNNING: { label: '运行中', cls: '' },
+  PLANNED: { label: '已计划', cls: '' },
+  INTERRUPTED: { label: '已中断', cls: 'bad' },
+  CANCELLED: { label: '已取消', cls: 'muted' },
+  FALLBACK: { label: '已回退', cls: '' },
+  REJECTED: { label: '已拒绝', cls: 'bad' },
+  CLOSED: { label: '已关闭', cls: 'muted' },
+};
+
+const CHAT_TEAM_MODES = {
+  STATIC: 'STATIC · 固定链路',
+  SHADOW: 'SHADOW · 影子组队',
+  ACTIVE: 'ACTIVE · 动态组队',
+  OFF: 'OFF',
+};
+
+const CHAT_FEEDBACK_TAGS = [
+  ['WRONG_AMOUNT', '金额错误'],
+  ['INCOMPLETE', '内容不完整'],
+  ['SLOW', '太慢'],
+  ['OFF_TOPIC', '答非所问'],
+  ['OTHER', '其他'],
+];
+
 const CHAT_AMOUNT_LABELS = {
   base_salary: '基本工资',
   gross_pay: '应发工资',
@@ -2060,13 +2098,461 @@ async function loadMessageTraces(sessionId, messageId, main) {
     if (!traces || !traces.length) return;
     if (state.chatSessionId !== sessionId || !main.isConnected) return;
     if (main.querySelector('.chat-traces')) return;
-    main.append(buildTracePanel(traces));
+    const panel = buildTracePanel(traces);
+    const team = main.querySelector('.chat-team');
+    const feedback = main.querySelector('.chat-feedback');
+    if (team) {
+      main.insertBefore(panel, team);
+    } else if (feedback) {
+      main.insertBefore(panel, feedback);
+    } else {
+      main.append(panel);
+    }
   } catch (error) {
     console.warn('[计算依据] 加载失败：', error.message);
   }
 }
 
-function appendStreamingMessage() {
+function teamStatusMeta(status) {
+  return CHAT_TEAM_STATUS[status] || { label: status || '—', cls: '' };
+}
+
+function teamRoleLabel(node) {
+  const role = node.role || '';
+  return CHAT_TEAM_ROLE_LABELS[role] || role || '—';
+}
+
+function teamNodeLabel(node) {
+  return CHAT_AGENT_LABELS[node.node_id] || node.node_id || node.stage_key || '节点';
+}
+
+function teamDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`;
+}
+
+function teamBoolLabel(value) {
+  if (value === true) return '通过';
+  if (value === false) return '未通过';
+  return '—';
+}
+
+function teamTextSpan(text) {
+  const span = document.createElement('span');
+  span.textContent = text;
+  return span;
+}
+
+function teamChip(label, value, title) {
+  const chip = document.createElement('span');
+  chip.className = 'chat-team-chip';
+  const strong = document.createElement('b');
+  strong.textContent = label;
+  chip.append(strong, document.createTextNode(` ${value == null || value === '' ? '—' : value}`));
+  if (title) chip.title = title;
+  return chip;
+}
+
+function teamEmpty(text, extraClass) {
+  const span = document.createElement('span');
+  span.className = 'chat-team-empty' + (extraClass ? ` ${extraClass}` : '');
+  span.textContent = text;
+  return span;
+}
+
+function buildTeamNode(node) {
+  const item = document.createElement('div');
+  item.className = 'chat-team-node';
+  const head = document.createElement('div');
+  head.className = 'chat-team-node-head';
+  const name = document.createElement('span');
+  name.className = 'chat-team-node-name';
+  name.textContent = teamNodeLabel(node);
+  const role = document.createElement('span');
+  role.className = 'chat-team-node-role';
+  role.textContent = teamRoleLabel(node);
+  const status = teamStatusMeta(node.status);
+  const state = document.createElement('span');
+  state.className = 'chat-team-node-status' + (status.cls ? ` ${status.cls}` : '');
+  state.textContent = status.label;
+  const duration = document.createElement('span');
+  duration.className = 'chat-team-node-duration';
+  duration.textContent = teamDuration(node.duration_ms);
+  head.append(name, role, state, duration);
+
+  const meta = document.createElement('div');
+  meta.className = 'chat-team-node-meta';
+  const agent = document.createElement('span');
+  agent.append(teamTextSpan('智能体 '));
+  const agentCode = document.createElement('code');
+  agentCode.textContent = node.agent_id || '—';
+  agent.append(agentCode);
+  meta.append(
+    agent,
+    teamTextSpan(`工具 ${node.tool_calls || 0} 次`),
+    teamTextSpan(`复核 ${teamBoolLabel(node.validation_passed)}`),
+    teamTextSpan(`输出 ${node.output_chars || 0} 字`),
+    teamTextSpan(`trace ${(node.trace_ids || []).length}`)
+  );
+  if (node.tool_errors) {
+    meta.append(teamTextSpan(`错误 ${node.tool_errors} 次`));
+  }
+  item.append(head, meta);
+  if (node.error_message) {
+    const error = document.createElement('span');
+    error.className = 'chat-team-error';
+    error.textContent = node.error_message;
+    item.append(error);
+  }
+  return item;
+}
+
+function buildTeamRuns(runs) {
+  const section = document.createElement('div');
+  section.className = 'chat-team-runs';
+  const title = document.createElement('div');
+  title.className = 'chat-team-section-title';
+  title.textContent = `运行历史 · ${runs.length}`;
+  section.append(title);
+  runs.forEach((run) => {
+    const status = teamStatusMeta(run.status);
+    const row = document.createElement('div');
+    row.className = 'chat-team-run';
+    row.append(
+      teamChip('模式', run.mode || '—'),
+      teamChip('状态', status.label),
+      teamChip('主运行', run.primary ? '是' : '否'),
+      teamChip('计划', run.plan_id || '—', run.plan_id || '')
+    );
+    if (run.baseline_run_id) row.append(teamChip('基线 run', `#${run.baseline_run_id}`));
+    if (run.fallback_of_run_id) row.append(teamChip('回退自', `#${run.fallback_of_run_id}`));
+    if (run.retry_of_run_id) row.append(teamChip('重试自', `#${run.retry_of_run_id}`));
+    section.append(row);
+  });
+  return section;
+}
+
+function buildTeamRaw(primary) {
+  const sections = [];
+  if (primary.plan_json && primary.plan_json !== '{}') {
+    sections.push(['运行计划 JSON', primary.plan_json]);
+  }
+  if (primary.catalog_snapshot_json) {
+    sections.push(['组队智能体快照', primary.catalog_snapshot_json]);
+  }
+  if (primary.score_snapshot_json) {
+    sections.push(['组队评分快照', primary.score_snapshot_json]);
+  }
+  if (!sections.length) return null;
+  const details = document.createElement('details');
+  details.className = 'chat-team-raw';
+  const summary = document.createElement('summary');
+  summary.textContent = '原始计划 / 快照';
+  details.append(summary);
+  sections.forEach(([label, json]) => {
+    const title = document.createElement('div');
+    title.className = 'chat-team-raw-label';
+    title.textContent = label;
+    const pre = document.createElement('pre');
+    pre.textContent = prettyTraceJson(json);
+    details.append(title, pre);
+  });
+  return details;
+}
+
+function renderTeamPanel(panel, view) {
+  const body = panel.querySelector('.chat-team-body');
+  const modeEl = panel.querySelector('.chat-team-mode');
+  const hint = panel.querySelector('.chat-team-hint');
+  const primary = view && view.primary_run;
+  const runs = (view && view.runs) || [];
+  const nodes = (view && view.nodes) || [];
+  const traces = (view && view.traces) || [];
+  if (!primary) {
+    modeEl.hidden = false;
+    modeEl.dataset.mode = 'OFF';
+    modeEl.textContent = CHAT_TEAM_MODES.OFF;
+    hint.textContent = '未记录';
+    body.replaceChildren(
+      teamEmpty('本轮未记录团队运行；PAYROLL_TEAM_MODE=OFF 时不写运行数据。')
+    );
+    return;
+  }
+  const mode = primary.mode || 'STATIC';
+  modeEl.hidden = false;
+  modeEl.dataset.mode = mode;
+  modeEl.textContent = CHAT_TEAM_MODES[mode] || mode;
+  hint.textContent = `${nodes.length} 节点 · ${traces.length} trace`;
+
+  body.replaceChildren();
+  const meta = document.createElement('div');
+  meta.className = 'chat-team-meta';
+  const planId = primary.plan_id || '';
+  meta.append(
+    teamChip('状态', teamStatusMeta(primary.status).label),
+    teamChip('模板', primary.template_id || '—'),
+    teamChip('总耗时', teamDuration(primary.total_ms)),
+    teamChip('节点', String(nodes.length)),
+    teamChip('工具追溯', String(traces.length)),
+    teamChip('计划', planId || '—', planId)
+  );
+  body.append(meta);
+
+  const hasLinks =
+    primary.baseline_run_id || primary.fallback_of_run_id || primary.retry_of_run_id;
+  if (runs.length > 1 || hasLinks) {
+    body.append(buildTeamRuns(runs));
+  }
+
+  if (!nodes.length) {
+    body.append(teamEmpty('未采集到节点摘要。'));
+  } else {
+    const list = document.createElement('div');
+    list.className = 'chat-team-nodes';
+    nodes.forEach((node) => list.append(buildTeamNode(node)));
+    body.append(list);
+  }
+
+  const raw = buildTeamRaw(primary);
+  if (raw) body.append(raw);
+}
+
+async function loadTeamPanel(panel, sessionId, messageId) {
+  if (panel.dataset.loaded === '1' || panel.dataset.loaded === 'loading') return;
+  panel.dataset.loaded = 'loading';
+  const body = panel.querySelector('.chat-team-body');
+  body.replaceChildren(teamEmpty('加载中…'));
+  try {
+    const view = await api(`/api/chat/sessions/${sessionId}/messages/${messageId}/team`);
+    if (state.chatSessionId !== sessionId || !panel.isConnected) {
+      panel.dataset.loaded = '';
+      return;
+    }
+    panel.dataset.loaded = '1';
+    renderTeamPanel(panel, view);
+    const mode = view && view.primary_run ? view.primary_run.mode : '';
+    if (mode === 'SHADOW' || mode === 'ACTIVE') panel.open = true;
+  } catch (error) {
+    panel.dataset.loaded = '';
+    body.replaceChildren(teamEmpty(`团队运行加载失败：${error.message}`, 'error'));
+    console.warn('[团队运行] 加载失败：', error.message);
+  }
+}
+
+function attachMessageTeam(main, sessionId, messageId) {
+  if (!main || !sessionId || !messageId || !main.isConnected) return null;
+  const existing = main.querySelector('.chat-team');
+  if (existing && existing.dataset.messageId === String(messageId)) return existing;
+
+  const panel = document.createElement('details');
+  panel.className = 'chat-team';
+  panel.dataset.messageId = String(messageId);
+  panel.dataset.sessionId = String(sessionId);
+
+  const summary = document.createElement('summary');
+  summary.className = 'chat-team-summary';
+  const title = document.createElement('span');
+  title.className = 'chat-team-title';
+  title.textContent = '团队运行';
+  const mode = document.createElement('span');
+  mode.className = 'chat-team-mode';
+  mode.hidden = true;
+  const hint = document.createElement('span');
+  hint.className = 'chat-team-hint';
+  hint.textContent = '点击展开';
+  summary.append(title, mode, hint);
+
+  const body = document.createElement('div');
+  body.className = 'chat-team-body';
+  body.append(teamEmpty('展开后加载团队构成'));
+  panel.append(summary, body);
+  panel.addEventListener('toggle', () => {
+    if (panel.open && panel.dataset.loaded !== '1') {
+      loadTeamPanel(panel, sessionId, messageId);
+    }
+  });
+
+  const feedback = main.querySelector('.chat-feedback');
+  if (feedback) {
+    main.insertBefore(panel, feedback);
+  } else {
+    main.append(panel);
+  }
+  return panel;
+}
+
+function loadMessageTeam(sessionId, messageId, main, autoLoad) {
+  const panel = attachMessageTeam(main, sessionId, messageId);
+  if (panel && autoLoad) {
+    loadTeamPanel(panel, sessionId, messageId);
+  }
+  return panel;
+}
+
+function feedbackPath(sessionId, messageId) {
+  return `/api/chat/sessions/${sessionId}/messages/${messageId}/feedback`;
+}
+
+function attachMessageFeedback(main, sessionId, messageId) {
+  if (!main || !sessionId || !messageId || !main.isConnected) return null;
+  const existing = main.querySelector('.chat-feedback');
+  if (existing && existing.dataset.messageId === String(messageId)) return existing;
+
+  const bar = document.createElement('div');
+  bar.className = 'chat-feedback';
+  bar.dataset.messageId = String(messageId);
+  bar.dataset.sessionId = String(sessionId);
+
+  const up = document.createElement('button');
+  up.type = 'button';
+  up.className = 'chat-fb-btn';
+  up.dataset.rating = 'UP';
+  up.title = '有帮助';
+  up.setAttribute('aria-label', '有帮助');
+  up.textContent = '👍';
+
+  const down = document.createElement('button');
+  down.type = 'button';
+  down.className = 'chat-fb-btn';
+  down.dataset.rating = 'DOWN';
+  down.title = '需改进';
+  down.setAttribute('aria-label', '需改进');
+  down.textContent = '👎';
+
+  const status = document.createElement('span');
+  status.className = 'chat-fb-status';
+
+  const pop = document.createElement('div');
+  pop.className = 'chat-fb-pop hidden';
+  const tagList = document.createElement('div');
+  tagList.className = 'chat-fb-tags';
+  CHAT_FEEDBACK_TAGS.forEach(([code, label]) => {
+    const tag = document.createElement('button');
+    tag.type = 'button';
+    tag.className = 'chat-fb-tag';
+    tag.dataset.tag = code;
+    tag.textContent = label;
+    tag.setAttribute('aria-pressed', 'false');
+    tag.addEventListener('click', () => {
+      const active = tag.classList.toggle('active');
+      tag.setAttribute('aria-pressed', String(active));
+    });
+    tagList.append(tag);
+  });
+  const comment = document.createElement('textarea');
+  comment.className = 'chat-fb-comment';
+  comment.maxLength = 500;
+  comment.rows = 2;
+  comment.placeholder = '补充说明（可选）';
+  const actions = document.createElement('div');
+  actions.className = 'chat-fb-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'ghost';
+  cancel.textContent = '取消';
+  const submit = document.createElement('button');
+  submit.type = 'button';
+  submit.className = 'primary';
+  submit.textContent = '提交';
+  actions.append(cancel, submit);
+  pop.append(tagList, comment, actions);
+
+  bar.append(up, down, status, pop);
+  main.append(bar);
+
+  up.addEventListener('click', () => {
+    pop.classList.add('hidden');
+    submitChatFeedback(bar, 'UP', [], '');
+  });
+  down.addEventListener('click', () => {
+    if (pop.classList.contains('hidden')) {
+      prefillFeedbackPop(bar, pop);
+      pop.classList.remove('hidden');
+    } else {
+      pop.classList.add('hidden');
+    }
+  });
+  cancel.addEventListener('click', () => pop.classList.add('hidden'));
+  submit.addEventListener('click', () => {
+    const tags = Array.from(pop.querySelectorAll('.chat-fb-tag.active')).map(
+      (tag) => tag.dataset.tag
+    );
+    submitChatFeedback(bar, 'DOWN', tags, comment.value.trim()).then(() => {
+      pop.classList.add('hidden');
+    });
+  });
+  return bar;
+}
+
+function prefillFeedbackPop(bar, pop) {
+  const tags = new Set(JSON.parse(bar.dataset.tags || '[]'));
+  pop.querySelectorAll('.chat-fb-tag').forEach((tag) => {
+    const active = tags.has(tag.dataset.tag);
+    tag.classList.toggle('active', active);
+    tag.setAttribute('aria-pressed', String(active));
+  });
+  pop.querySelector('.chat-fb-comment').value = bar.dataset.comment || '';
+  pop.classList.remove('hidden');
+}
+
+function renderFeedbackState(bar, feedback) {
+  bar.dataset.tags = JSON.stringify((feedback && feedback.tags) || []);
+  bar.dataset.comment = (feedback && feedback.comment) || '';
+  bar.querySelectorAll('.chat-fb-btn').forEach((button) => {
+    button.classList.toggle(
+      'active',
+      Boolean(feedback) && button.dataset.rating === feedback.rating
+    );
+  });
+  const status = bar.querySelector('.chat-fb-status');
+  if (!feedback) {
+    status.textContent = '';
+  } else if (feedback.rating === 'UP') {
+    status.textContent = '已标记有帮助';
+  } else {
+    status.textContent = '已记录改进意见';
+  }
+}
+
+async function submitChatFeedback(bar, rating, tags, comment) {
+  const sessionId = bar.dataset.sessionId;
+  const messageId = bar.dataset.messageId;
+  bar.classList.add('busy');
+  bar.querySelectorAll('button').forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    const saved = await api(feedbackPath(sessionId, messageId), {
+      method: 'POST',
+      body: { rating, tags, comment },
+    });
+    renderFeedbackState(bar, saved);
+    toast(rating === 'UP' ? '已记录：有帮助' : '已记录改进意见', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    bar.classList.remove('busy');
+    bar.querySelectorAll('button').forEach((button) => {
+      button.disabled = false;
+    });
+  }
+}
+
+async function loadMessageFeedback(sessionId, messageId, main) {
+  const bar = attachMessageFeedback(main, sessionId, messageId);
+  if (!bar || bar.dataset.loaded === '1') return;
+  bar.dataset.loaded = '1';
+  try {
+    const feedback = await api(feedbackPath(sessionId, messageId));
+    if (state.chatSessionId !== sessionId || !bar.isConnected) return;
+    renderFeedbackState(bar, feedback);
+  } catch (error) {
+    console.warn('[反馈] 加载失败：', error.message);
+  }
+}
+
+function appendStreamingMessage(sessionId) {
   const container = $('#chat-messages');
   const empty = container.querySelector('.chat-empty');
   if (empty) empty.remove();
@@ -2292,7 +2778,9 @@ function appendStreamingMessage() {
         toolsLine.classList.remove('hidden');
       }
       if (reply && reply.message_id) {
-        loadMessageTraces(state.chatSessionId, reply.message_id, main);
+        loadMessageTraces(sessionId, reply.message_id, main);
+        loadMessageFeedback(sessionId, reply.message_id, main);
+        loadMessageTeam(sessionId, reply.message_id, main, true);
       }
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       summaryState.textContent = '已完成 · ' + seconds + 's';
@@ -2503,6 +2991,16 @@ function appendStoredMessage(message) {
       message.id,
       row.querySelector('.chat-main')
     );
+    loadMessageFeedback(
+      message.session_id || state.chatSessionId,
+      message.id,
+      row.querySelector('.chat-main')
+    );
+    attachMessageTeam(
+      row.querySelector('.chat-main'),
+      message.session_id || state.chatSessionId,
+      message.id
+    );
   }
 }
 
@@ -2553,7 +3051,7 @@ async function sendChat(override) {
   state.chatBusy = true;
   const button = $('#chat-send');
   button.disabled = true;
-  const view = appendStreamingMessage();
+  const view = appendStreamingMessage(sessionId);
   const controller = new AbortController();
   state.chatController = controller;
   let done = false;

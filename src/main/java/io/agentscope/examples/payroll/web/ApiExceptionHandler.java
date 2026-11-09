@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.web;
 
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.support.AuditContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +35,8 @@ public class ApiExceptionHandler {
         return error(HttpStatus.UNAUTHORIZED, e.getMessage());
     }
 
-    @ExceptionHandler(ForbiddenException.class)
-    public ResponseEntity<ApiResponse> handleForbidden(ForbiddenException e) {
+    @ExceptionHandler(PayrollForbiddenException.class)
+    public ResponseEntity<ApiResponse> handleForbidden(PayrollForbiddenException e) {
         return error(HttpStatus.FORBIDDEN, e.getMessage());
     }
 
