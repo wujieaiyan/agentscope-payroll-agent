@@ -1,11 +1,16 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.domain.ChatFeedback;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.ChatFeedbackService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.PayrollChat;
+import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import org.slf4j.Logger;
@@ -32,14 +37,23 @@ public class ChatSessionController {
     private static final long SSE_TIMEOUT_MS = 600_000L;
 
     private final ChatSessionManager manager;
+    private final ChatFeedbackService feedbackService;
+    private final TeamRunQueryService teamQueryService;
+    private final AuditService auditService;
     private final AuthService authService;
     private final Executor chatStreamExecutor;
 
     public ChatSessionController(
             ChatSessionManager manager,
+            ChatFeedbackService feedbackService,
+            TeamRunQueryService teamQueryService,
+            AuditService auditService,
             AuthService authService,
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
         this.manager = manager;
+        this.feedbackService = feedbackService;
+        this.teamQueryService = teamQueryService;
+        this.auditService = auditService;
         this.authService = authService;
         this.chatStreamExecutor = chatStreamExecutor;
     }
@@ -83,6 +97,49 @@ public class ChatSessionController {
             @PathVariable long messageId,
             HttpServletRequest request) {
         return ApiResponse.ok(manager.traces(userId(request), sessionId, messageId));
+    }
+
+    /** 单条助手消息的团队运行、节点摘要、追溯引用与当前反馈。 */
+    @GetMapping("/{sessionId}/messages/{messageId}/team")
+    public ApiResponse team(
+            @PathVariable long sessionId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+        return ApiResponse.ok(teamQueryService.view(userId(request), sessionId, messageId));
+    }
+
+    @GetMapping("/{sessionId}/messages/{messageId}/feedback")
+    public ApiResponse feedback(
+            @PathVariable long sessionId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+        return ApiResponse.ok(
+                feedbackService.find(userId(request), sessionId, messageId).orElse(null));
+    }
+
+    @PostMapping("/{sessionId}/messages/{messageId}/feedback")
+    public ApiResponse submitFeedback(
+            @PathVariable long sessionId,
+            @PathVariable long messageId,
+            @RequestBody(required = false) ChatFeedbackRequest body,
+            HttpServletRequest request) {
+        ChatFeedbackRequest values =
+                body == null ? new ChatFeedbackRequest(null, null, null) : body;
+        ChatFeedback saved =
+                feedbackService.submit(
+                        userId(request),
+                        sessionId,
+                        messageId,
+                        values.rating(),
+                        values.tags(),
+                        values.comment());
+        auditService.record(
+                "chat.feedback.recorded",
+                "chat_message",
+                Long.toString(messageId),
+                null,
+                saved);
+        return ApiResponse.ok(saved);
     }
 
     @PostMapping("/{sessionId}/messages")
@@ -198,5 +255,8 @@ public class ChatSessionController {
     }
 
     public record ChatMessageRequest(String message) {
+    }
+
+    public record ChatFeedbackRequest(String rating, List<String> tags, String comment) {
     }
 }

@@ -20,6 +20,8 @@ function initAgentsTab() {
         activating: false,
         agents: [],
         skills: [],
+        stats: { window_days: 0, cached: false, record_count: 0, feedback_count: 0, agents: [] },
+        statsLoading: false,
         meta: { writable: false, location: '', tags: [] },
         active: { agentId: '', name: '', configured: '' },
         filters: { keyword: '', tag: '', skillId: '', status: '', visibility: '' },
@@ -82,6 +84,18 @@ function initAgentsTab() {
           showError(error);
         } finally {
           this.loading = false;
+        }
+        await this.loadStats();
+      },
+      async loadStats() {
+        this.statsLoading = true;
+        try {
+          const stats = await api('/api/admin/agent-stats');
+          this.stats = stats || { window_days: 0, cached: false, record_count: 0, feedback_count: 0, agents: [] };
+        } catch (error) {
+          showError(error);
+        } finally {
+          this.statsLoading = false;
         }
       },
       openCreate() {
@@ -171,6 +185,28 @@ function initAgentsTab() {
       statusText(status) {
         return status === 'ONLINE' ? '已上架' : '已下架';
       },
+      roleText(role) {
+        const labels = {
+          CALCULATOR: '计算', VALIDATOR: '复核', ACCOUNTANT: '入账',
+          QUERY: '查询', KNOWLEDGE: '知识',
+        };
+        return labels[role] || role || '—';
+      },
+      percent(value) {
+        return `${(Number(value || 0) * 100).toFixed(1)}%`;
+      },
+      scoreText(value) {
+        return Number(value || 0).toFixed(1);
+      },
+      latencyText(value) {
+        const ms = Number(value || 0);
+        return ms > 0 ? `${(ms / 1000).toFixed(1)}s` : '—';
+      },
+      statsHint() {
+        const s = this.stats;
+        const cache = s.cached ? ' · 缓存' : '';
+        return `窗口 ${s.window_days || 0} 天 · 样本 ${s.record_count || 0} · 反馈 ${s.feedback_count || 0}${cache}`;
+      },
       visibilityText(v) {
         return v === 'PUBLIC' ? '公开' : '私有';
       },
@@ -247,6 +283,67 @@ function initAgentsTab() {
               <button type="button" class="tiny danger" @click="remove(agent)" :disabled="!meta.writable">删除</button>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="card agent-stats-card">
+        <div class="panel-head">
+          <h2>智能体评分榜</h2>
+          <div class="actions">
+            <span class="hint">{{ statsHint() }}</span>
+            <button type="button" @click="loadStats" :disabled="statsLoading">
+              {{ statsLoading ? '加载中…' : '刷新统计' }}
+            </button>
+          </div>
+        </div>
+        <p class="hint">综合分 = 客观轨迹 60% + 用户反馈 40%，再按样本量向角色先验收缩；样本少于 5 条标记冷启动。</p>
+        <p v-if="statsLoading && !stats.agents.length" class="hint">加载中…</p>
+        <p v-else-if="!stats.agents.length" class="hint">还没有运行样本</p>
+        <div v-else class="table-wrap">
+          <table class="agent-stats-table">
+            <thead>
+              <tr>
+                <th>智能体</th>
+                <th>角色</th>
+                <th class="num">样本</th>
+                <th class="num">综合分</th>
+                <th class="num">客观分 O</th>
+                <th class="num">反馈分 F</th>
+                <th class="num">成功率下界</th>
+                <th class="num">工具下界</th>
+                <th class="num">复核下界</th>
+                <th class="num">P50 时延</th>
+                <th class="num">稳定性</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in stats.agents" :key="row.agent_id">
+                <td>
+                  <strong>{{ row.name }}</strong>
+                  <span v-if="row.name !== row.agent_id" class="hint"> · {{ row.agent_id }}</span>
+                </td>
+                <td>{{ roleText(row.role) }}</td>
+                <td class="num">
+                  {{ row.samples }}
+                  <span v-if="row.cold_start" class="tag cold">冷启动</span>
+                </td>
+                <td class="num">
+                  <strong>{{ scoreText(row.final_score) }}</strong>
+                  <span class="hint">先验 {{ scoreText(row.prior_score) }}</span>
+                </td>
+                <td class="num">{{ scoreText(row.objective_score) }}</td>
+                <td class="num">
+                  {{ scoreText(row.feedback_score) }}
+                  <span class="hint">👍{{ row.up_votes }} 👎{{ row.down_weight }}</span>
+                </td>
+                <td class="num">{{ row.samples ? percent(row.success_lower_bound) : '—' }}</td>
+                <td class="num">{{ row.samples ? percent(row.tool_ok_lower_bound) : '—' }}</td>
+                <td class="num">{{ row.samples ? percent(row.validation_lower_bound) : '—' }}</td>
+                <td class="num">{{ latencyText(row.p50_latency_ms) }}</td>
+                <td class="num">{{ row.samples ? percent(row.stability_score) : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 

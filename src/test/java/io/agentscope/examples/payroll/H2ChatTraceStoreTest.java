@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.H2ChatStore;
@@ -8,6 +9,7 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.TraceScope;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +93,50 @@ class H2ChatTraceStoreTest {
         assertEquals(1, store.traces(session.id(), again.id()).size());
         store.delete(session.id());
         assertTrue(store.traces(session.id(), again.id()).isEmpty());
+    }
+
+    @Test
+    @DisplayName("同一阶段 key 在不同运行中按 run_id/node_id 隔离")
+    void persistsRunAndNodeAttribution() {
+        ChatSession session = store.create(1L, "归因会话");
+        ChatToolTrace first =
+                trace("call-1", "calculate_payroll", "100")
+                        .withScope(
+                                new TraceScope(
+                                        11L,
+                                        "plan-a",
+                                        "calculator",
+                                        "PayrollCalculatorAgent",
+                                        "CALCULATOR",
+                                        "STATIC",
+                                        "calculator"));
+        ChatToolTrace second =
+                trace("call-2", "calculate_payroll", "200")
+                        .withScope(
+                                new TraceScope(
+                                        12L,
+                                        "plan-b",
+                                        "calculator-retry",
+                                        "PayrollCalculatorAgent",
+                                        "CALCULATOR",
+                                        "STATIC",
+                                        "calculator"));
+
+        ChatMessage saved =
+                store.appendAssistant(
+                        session.id(), "回答", List.of(), "stub:test", List.of(first, second));
+
+        List<ChatToolTrace> loaded = store.traces(session.id(), saved.id());
+        assertEquals(2, loaded.size());
+        assertEquals(11L, loaded.get(0).runId());
+        assertEquals("calculator", loaded.get(0).nodeId());
+        assertEquals(12L, loaded.get(1).runId());
+        assertEquals("calculator-retry", loaded.get(1).nodeId());
+        assertEquals("calculator", loaded.get(1).agent());
+
+        ChatToolTrace unbound = trace("call-3", "t", "1");
+        assertEquals(0L, unbound.runId());
+        assertNull(unbound.nodeId());
     }
 
     private static ChatToolTrace trace(String callId, String toolName, String netPay) {

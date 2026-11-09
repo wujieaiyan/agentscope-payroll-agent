@@ -36,6 +36,12 @@ payroll:
   # 审计日志保留天数，启动时清理更早的记录。
   audit:
     retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"
+  # 动态团队：OFF=保持旧链路；STATIC=只记录静态运行；SHADOW/ACTIVE 由后续阶段启用。
+  team:
+    mode: "${PAYROLL_TEAM_MODE:SHADOW}"
+    retention-days: "${PAYROLL_TEAM_RETENTION_DAYS:180}"
+    stats-window-days: "${PAYROLL_TEAM_STATS_WINDOW_DAYS:30}"
+    shadow-sample-rate: "${PAYROLL_TEAM_SHADOW_SAMPLE_RATE:0.15}"
   # 向量记忆：只索引用户问题与压缩摘要；默认只在当前会话内召回，避免不同角色串线。
   memory:
     enabled: "${PAYROLL_MEMORY_ENABLED:true}"

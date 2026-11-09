@@ -1360,3 +1360,180 @@ core `ReActAgent` + `DynamicSkillMiddleware` 全部切换到 `HarnessAgent`，�
   生成就超过 150 秒，调低 `PAYROLL_OLLAMA_NUM_PREDICT`（如 512）或换更大的模型。
 - 护栏触发会记录 `检测到重复工具调用，中止阶段`，附带工具名与参数，便于判断是模型
   随机性还是技能/工具绑定错误。
+
+## 29. 动态团队 P0：运行记录、追溯、反馈与评分（2026-11-09）
+
+分支 `feature/dynamic-agent-team-p0`。P0 只落地数据地基与旁路能力，**不改变现有对话、
+金额与 SSE 事件**；动态组队、影子运行与策略切换留给 P1/P2。完整规格见
+[`dynamic-agent-team-spec.md`](dynamic-agent-team-spec.md)。
+
+### 边界与开关
+
+- `payroll.team.mode` / `PAYROLL_TEAM_MODE`：`OFF`（默认）完全不写团队数据；`STATIC`
+  在静态三阶段旁路记录；`SHADOW`/`ACTIVE` 已能解析，但当前行为与 `STATIC` 相同。
+- 记录失败只写 WARN 日志，不影响回答、金额或 SSE；共享 `HarnessAgent` 不会被关闭。
+- 运行保留默认 180 天，启动时 `teamRetentionRunner` 软归档超期 run（写 `archived_at`/
+  `deleted_at`），节点与 trace 保留供审计。
+
+### 数据与契约
+
+- `PayrollDatabase` 新增 `agent_team_runs`、`agent_run_records`、`chat_feedback`，
+  并为 `chat_tool_traces` 增量增加 `run_id`、`node_id`。全部为 `CREATE TABLE IF NOT EXISTS`
+  与 `ADD COLUMN IF NOT EXISTS`，旧库重启即完成升级。
+- 追溯链：`message_id → run_id → node_id → trace_id`。同一消息可有多条 run，
+  以 `is_primary` 标记主运行；统计与追溯默认只看未归档数据。
+- `TraceScope` 随 `RuntimeContext` 传入智能体，`ChatToolTrace` 透传 run/node；
+  静态流程节点的角色取 `roleOf(node.id())`（CALCULATOR/VALIDATOR/ACCOUNTANT），
+  避免历史数据落成笼统的 `AGENT`。
+- `GET /api/chat/sessions/{id}/messages/{messageId}/team` 返回
+  `primary_run`、`runs`、`nodes`、`traces`、`feedback`；先校验会话归属与助手消息，
+  跨用户 403。
+- `POST .../feedback`：`rating=UP|DOWN`；差评标签
+  `WRONG_AMOUNT/INCOMPLETE/SLOW/OFF_TOPIC/OTHER`，最多 5 个；说明 ≤500 字；
+  `(message_id, user_id)` 唯一，重复提交覆盖；审计事件 `chat.feedback.recorded`。
+- `GET /api/admin/agent-stats?days=30`（`agent:manage`）：返回
+  `window_days/generated_at/cached/record_count/feedback_count/agents[]`，
+  字段为 snake_case。公式与规格 §7.3–7.6 一致：
+  Wilson 成功率下界、工具/复核下界、时延分、稳定性 → 客观分 O；点赞/差评平滑 → F；
+  `0.6*O + 0.4*F` 后按样本向角色先验收缩；样本 <5 标记冷启动，零样本不除零；
+  结果缓存 5 分钟。
+
+### 修改文件
+
+- 领域：`AgentTeamRun`、`AgentRunRecord`、`ChatFeedback`、`TraceScope`、
+  `MessageTeamView`、`AgentStats`、`AgentStatsSnapshot`、`PayrollForbiddenException`。
+- 存储：`PayrollDatabase`、`H2AgentTeamStore`（run/node 写入、按窗口取记录、
+  主运行执行智能体映射、软归档）、`H2ChatFeedbackStore`（upsert、按窗口取反馈）、
+  `H2ChatStore`（trace 读写带 run/node）。
+- 服务：`StaticRunRecorder`、`ChatFeedbackService`、`TeamRunQueryService`、
+  `AgentStatsService`；`ChatSessionManager`/`PayrollChatService` 负责在保存回答或失败后
+  绑定 message 并落运行记录。
+- Web：`ChatSessionController` 增加 team/feedback 接口；`AgentStatsController`
+  提供只读统计。
+- 配置：`TeamSettings`/`TeamMode`、`application.yml`、`PayrollConfiguration`
+  （记录器、统计服务、启动归档）。
+- 前端：`app.js` 助手消息 👍/👎 与差评标签弹层，以及可展开的「团队运行」面板
+  （模式徽标、节点/智能体/角色/状态、工具与 trace 数、耗时、运行历史、原始计划与快照；
+  流式新回答自动加载，`SHADOW`/`ACTIVE` 自动展开，历史消息首次展开时加载）；
+  `agents.js` 的“智能体评分榜”卡片（窗口、样本、冷启动、综合/先验、O/F、三个下界、
+  P50、稳定性）；`style.css` 补充样式。
+
+### 日志
+
+- 启动：`[动态团队] 模式：STATIC`；未知模式会 WARN 后按 OFF 处理。
+- 每轮 STATIC 对话：
+  `[动态团队] 静态运行已保存：runId=...，messageId=...，status=...，节点=3，trace=...，耗时=...ms`。
+- 旁路失败：`[动态团队] 保存静态运行失败...`、`[动态团队] 保存失败运行失败...`、
+  `[动态团队] 读取本次追溯失败...`、`[动态团队] 归档过期运行失败...`，均不影响主链路。
+- 统计接口不打印逐行日志；排查“为什么分数没变”先看 5 分钟缓存与 `days` 参数。
+
+### 测试与本机验收（2026-11-09）
+
+- 全量 `mvn -o test`：**262 通过，0 失败**（原 241 + P0 新增 21）。
+- 新增测试：`H2AgentTeamStoreTest`、`H2ChatFeedbackStoreTest`、`StaticRunRecorderTest`、
+  `AgentStatsServiceTest`、`ChatFeedbackWebTest`、`TeamSettingsTest`，
+  并扩展 `H2ChatTraceStoreTest`。
+- 旧库升级：用项目原有 H2 文件库（仅 19 张旧表）启动，`PayrollDatabase.initialize()`
+  自动补齐 P0 表与列，`/api/admin/agent-stats`、`/team`、`/feedback` 均可用。
+- 本机 E2E：`PAYROLL_TEAM_MODE=STATIC` 启动后发一轮“calculate payroll for EMP001”，
+  产生 1 条 run + 3 条节点；统计 `record_count=1`，
+  `payroll-calculator CALCULATOR n=1 final=76.87 prior=78.0 p50=13845`；
+  管理台“Agent 管理 → 智能体评分榜”显示样本 1、冷启动、综合分 76.9、客观分 40.3、
+  反馈分 75.0、成功率下界 20.6%、P50 13.8s、稳定性 100%。
+  零样本的注册智能体显示先验分 65、冷启动，比率列显示 `—`。
+- 反馈链路：UP/DOWN 提交、覆盖、按消息读取通过；VIEWER 跨用户访问返回 403；
+  team 视图包含 run、节点、trace 引用与当前反馈。
+- 现有对话金额与 SSE 事件无变化；`OFF` 模式下不产生任何团队数据。
+
+### 已知限制
+
+- 动态组队、SHADOW 影子执行、ACTIVE 策略切换尚未实现；`PAYROLL_TEAM_SHADOW_SAMPLE_RATE`
+  当前仅解析不生效。
+- 评分中的差评归因到主运行内所有真正执行的节点（反馈针对整条回答，而非单节点）；
+  若后续需要节点级反馈，需要新增节点维度评价。
+- 注册表里的智能体没有角色字段时，统计表“角色”显示 `—`，先验按默认 65 处理。
+- 统计为只读聚合，没有手动重算按钮；缓存 5 分钟，改变 `days` 会使用独立缓存键。
+- 旧历史 trace 可能没有 `run_id`，team 视图只展示主运行关联的 trace；旧数据仍可在
+  `/traces` 接口查看。
+
+### 排查提示
+
+- 记录数为 0：先确认 `PAYROLL_TEAM_MODE` 不是 `OFF`，启动日志应有
+  `[动态团队] 模式：STATIC`。
+- 有 run 无节点：查看 `[动态团队] 保存静态运行失败` 或阶段摘要是否为空的
+  `未采集到阶段摘要` 节点。
+- 统计分数未更新：等待 5 分钟缓存，或换 `?days=` 参数触发新缓存键。
+- 跨用户 403：team/feedback 都走会话归属校验，属预期行为。
+
+## 30. 动态团队 P1：SHADOW 影子模式（2026-11-09）
+
+P1 在 P0 数据地基上实现「意图 → 候选评分 → 计划 → 校验 → 动态执行」旁路，只记录、
+不改变用户回答。默认开关仍为 `OFF`；`PAYROLL_TEAM_MODE=SHADOW` 且
+`PAYROLL_TEAM_SHADOW_SAMPLE_RATE>0` 时启用。
+
+### 30.1 代码结构（`io.agentscope.examples.payroll.team`）
+
+| 类 | 职责 |
+| --- | --- |
+| `TeamIntent` / `TeamIntentExtractor` | 任务分类、槽位与能力抽取；LLM 10s 单轮，失败/超时用规则兜底；`confidence<0.6`、写操作、`OTHER` 直接 L0 |
+| `TeamLlmClient` | 无工具单轮 JSON 客户端，同步串行；调用失败返回 null，不重试 |
+| `CapabilityIndex` | 内置角色能力映射优先，非内置智能体才做关键词推断；技能不可解析的智能体不进入候选 |
+| `TeamCandidateSelector` | 硬条件过滤后计算 C/O/F 与 `rankScore`，每角色 Top-3；统计不可用时用角色先验（L4） |
+| `TeamTemplate` | 6 个固定拓扑；涉及金额强制 VALIDATOR 且在 CALCULATOR 下游；最多 5 个智能体节点 |
+| `TeamPlanGenerator` | 模型只能在短名单内选角；解析失败/越界/重复/校验失败时退化为 Top-1 去重选角 |
+| `PlanValidator` | DAG、条件边、START/END、节点类型、智能体 ONLINE/PUBLIC/技能/角色能力、强制复核、规模/深度/去重、写操作、模板角色一致性、角色绑定一致 |
+| `TeamPlanCompiler` | `TeamPlan → FlowDefinition`，复用 `AgentFlowExecutor` 与 `PayrollChatService.executeDynamicFlow` |
+| `TeamMessage` / `MessageAssembler` | 结构化节点消息（文本≤8000、traceIds≤50、金额只来自工具追溯）与【用户问题】/【上游记录】/【上游核算对象】/【上游结构化附件】渲染 |
+| `ShadowTeamService` | 采样、异步编排、L0–L4 回退记录、影子 trace 与节点落库；`runNow(...)` 同步入口供测试 |
+| `ShadowReportService` | `GET /api/admin/team/shadow-report?days=7`，输出计划率、成功率、回退分层、模板/任务/选角分布与相对基线差异 |
+
+### 30.2 执行与落库
+
+1. `ChatSessionManager.complete()` 保存助手消息与静态运行后调用 `ShadowTeamService.trigger`，
+   捕获本轮问题与 `baseline_run_id`；采样不中直接返回。
+2. 影子任务在独立单线程 planner 中执行：意图 → 模板 → 短名单 → 计划 → 校验；
+   动态 DAG 在独立 flow 线程池中执行，整体 300s 超时。
+3. 每次影子运行写 1 条 `agent_team_runs`：`run_mode=SHADOW`、`is_primary=false`、
+   `baseline_run_id` 指向静态主运行、`plan_json`/`score_snapshot_json`/`catalog_snapshot_json`
+   完整保存；节点写 `agent_run_records`，trace 以 `message_id=0` 写 `chat_tool_traces`，
+   通过 `run_id` 查询，不污染聊天页依据。
+4. 不调用影子实例的 `close()`：影子与主会话共享进程级智能体，`close/reset` 会清掉主链路上下文。
+5. 回退原因：`L0` 低置信度/写操作/OTHER；`L2` 无模板、候选不足、计划/校验失败；
+   `L3` 执行异常/超时/空答复。`L1` 由生成器内部 Top-1 修复覆盖，不单独落运行。
+
+### 30.3 配置、日志与排障
+
+- `PAYROLL_TEAM_MODE=SHADOW`；`PAYROLL_TEAM_SHADOW_SAMPLE_RATE=1.0` 可全量验证。
+- 启动日志：`[动态团队] 模式：SHADOW`、`[动态团队] 影子服务：已启用`。
+- 采样：`[动态团队] 影子未采样：session=...，message=...`；
+  计划：`[动态团队] 计划生成：plan=...，template=...，roles=...，来源=model|top1`；
+  完成：`[动态团队] 影子执行完成：runId=...，status=...，节点=...，trace=...`；
+  回退：`[动态团队] 影子回退记录：runId=...，reason=L2: ...`。
+- 查询：`SELECT * FROM agent_team_runs WHERE run_mode='SHADOW' ORDER BY run_id DESC`；
+  报告接口需 `agent:manage`。
+
+### 30.4 已知限制（P1）
+
+- 影子输入使用本轮原始问题，不含主链路的向量记忆与压缩上下文；对标时以计划和节点结果为主。
+- 能力来源仍是内置映射 + 技能/描述推断，Nacos 智能体暂未新增显式 `capabilities` 字段。
+- `TeamMessage` 仅用于文本渲染与审计结构，尚未以 `DataBlock` 挂到 AgentScope `Msg`。
+- 影子运行会进入评分样本池（与静态运行同权），如后续需要隔离，可在 `AgentStatsService`
+  按 `run_mode` 过滤。
+
+### 30.5 测试与本机验收
+
+- 全量 `mvn -o test`：**294 通过，0 失败**（P0 的 262 + P1 新增 32）。
+- 新增测试：
+  - `team/TeamIntentTest`：规则分类、期间/工号、写操作与 OTHER 不合格、模板选择。
+  - `team/TeamCapabilityIndexTest`：内置能力映射、关键词推断（仅辅助位）、技能可解析性。
+  - `team/TeamCandidateSelectorTest`：统计排序与 Top-3 上限、零样本回退角色先验。
+  - `team/TeamPlanValidatorTest`：合法计划、写操作/私有/下架/未知智能体、复核顺序、
+    环、重复智能体、角色绑定、缺少复核角色、空计划与未知模板。
+  - `team/TeamPlanGeneratorTest`：Top-1 选角与冷启动警告、跨角色去重、无候选/意图/模板回退、
+    编译流程图节点与连线。
+  - `team/MessageAssemblerTest`：角色标题、核算对象与 trace 摘要、无上游透传、
+    文本截断、金额只来自工具追溯、按运行组装节点消息。
+  - `team/ShadowTeamServiceTest`：L0 写操作、L2 空目录、L3 执行实例不可用、非 SHADOW/零采样关闭。
+  - `team/ShadowReportServiceTest`：计划率/成功率/分层回退/分布与基线差异、空窗口零值。
+  - `H2ChatShadowTraceStoreTest`：影子 trace 以 `message_id=0` 落库、按 `run_id` 读取且不污染消息依据。
+- 修复：候选评分对 `samples=0` 的统计条目改用角色先验，避免零样本候选被按 0 分排序。
