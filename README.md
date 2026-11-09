@@ -495,6 +495,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_MODEL` | `ollama:qwen2.5:3b-instruct` | 模型标识；Ollama 用 `ollama:<模型名>`，DashScope 用 `dashscope:<模型名>` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
 | `PAYROLL_OLLAMA_NUM_CTX` | `8192` | Ollama 上下文窗口 |
+| `PAYROLL_OLLAMA_NUM_PREDICT` | `1024` | 单轮最大生成 token，防止小模型重复输出导致阶段超时 |
 | `PAYROLL_OLLAMA_TEMPERATURE` | `0.1` | 采样温度，核算场景建议保持低温度 |
 | `PAYROLL_OLLAMA_THINK` | 自动检测 | `true`/`false`/`low`/`medium`/`high`；未设置时按模型的 thinking 能力自动启用 |
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |

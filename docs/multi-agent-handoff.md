@@ -1320,3 +1320,43 @@ core `ReActAgent` + `DynamicSkillMiddleware` 全部切换到 `HarnessAgent`，�
   harness 升级新增默认工具时只会被移除，不会暴露给模型。
 - 上下文串话：确认 `streamEvents` / `call` 都传了会话级 `RuntimeContext`；不要依赖
   harness 自动注入的上下文副本保存追溯记录器。
+
+## 28. 计算阶段长耗时与重复调用护栏（2026-11-09）
+
+### 现象
+
+管理台对话在计算阶段长时间无响应，前端“思考过程”最终显示失败。H2 中的错误消息为：
+
+```
+流程节点「① 计算智能体」执行失败：Timeout on blocking read for 150000000000 NANOSECONDS
+```
+
+复现序列：用户问“上个月张伟那个部门发了多少”，模型答“研发部，请确认期间”；用户回复
+“可以”后，计算节点运行满 150 秒被 `STAGE_TIMEOUT` 中止。并非代码死循环，而是模型侧
+长时间不结束（单轮重复生成，或反复调用同一工具直到超时）。
+
+### 修改
+
+- `PayrollAgentFactory`：Ollama 增加 `numPredict`（默认 1024，环境变量
+  `PAYROLL_OLLAMA_NUM_PREDICT`），限制单轮生成长度，避免小模型重复输出拖满 150 秒。
+- `PayrollChatService.runStage`：
+  - 连续 3 次以相同参数调用同一工具时立即抛错并取消流：
+    `智能体连续 3 次以相同参数调用 <tool>，已中止本轮；请重试或更换模型`。
+  - 用 Reactor `timeout(STAGE_TIMEOUT)` 产生明确的 `TimeoutException`，按异常类型
+    （`Exceptions.unwrap(e) instanceof TimeoutException`）转换为可读提示：
+    `智能体阶段超过 150 秒未完成，已中止；模型可能陷入重复生成或工具循环…`。
+    不按异常 message 文本匹配，避免 Reactor/底层文案变化导致判断失效。
+- `README.md` 环境变量表补充 `PAYROLL_OLLAMA_NUM_PREDICT`。
+
+### 验证
+
+- 全量 `mvn -o test`：241 通过，0 失败。
+- 未改变 `maxIters`（计算/流程 12、验证 8、核算 4）与 150 秒阶段上限，护栏只负责
+  提前止损并给出明确原因。
+
+### 排查提示
+
+- 若仍出现超时：查看服务端 `[多智能体][calculator] 调用工具` 的重复频率；若单轮
+  生成就超过 150 秒，调低 `PAYROLL_OLLAMA_NUM_PREDICT`（如 512）或换更大的模型。
+- 护栏触发会记录 `检测到重复工具调用，中止阶段`，附带工具名与参数，便于判断是模型
+  随机性还是技能/工具绑定错误。

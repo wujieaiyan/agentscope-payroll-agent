@@ -48,6 +48,7 @@ public final class PayrollAgentFactory {
     private static final Logger log = LoggerFactory.getLogger(PayrollAgentFactory.class);
     private static final String OLLAMA_PREFIX = "ollama:";
     private static final int DEFAULT_OLLAMA_NUM_CTX = 8192;
+    private static final int DEFAULT_OLLAMA_NUM_PREDICT = 1024;
     private static final double DEFAULT_OLLAMA_TEMPERATURE = 0.1;
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -710,6 +711,11 @@ public final class PayrollAgentFactory {
         OllamaOptions.Builder builder =
                 OllamaOptions.builder()
                         .numCtx(intEnv("PAYROLL_OLLAMA_NUM_CTX", DEFAULT_OLLAMA_NUM_CTX))
+                        // 限制单轮生成长度，避免小模型重复输出直到阶段超时。
+                        .numPredict(
+                                intEnv(
+                                        "PAYROLL_OLLAMA_NUM_PREDICT",
+                                        DEFAULT_OLLAMA_NUM_PREDICT))
                         .temperature(
                                 doubleEnv(
                                         "PAYROLL_OLLAMA_TEMPERATURE",

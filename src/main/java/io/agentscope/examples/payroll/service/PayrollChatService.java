@@ -35,10 +35,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.Exceptions;
 
 /**
  * 管理台对话实现：固定编排「计算智能体 → 验证智能体 → 核算智能体」三段流水线。
@@ -50,6 +52,7 @@ public final class PayrollChatService implements PayrollChat {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollChatService.class);
     private static final Duration STAGE_TIMEOUT = Duration.ofSeconds(150);
+    private static final int MAX_REPEATED_TOOL_CALLS = 3;
     private static final Duration SUMMARY_TIMEOUT = Duration.ofSeconds(60);
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> CALCULATION_TOOLS =
@@ -643,6 +646,8 @@ public final class PayrollChatService implements PayrollChat {
         List<CalcTarget> targets = new ArrayList<>();
         Set<String> stageTools = new LinkedHashSet<>();
         boolean[] toolError = {false};
+        String[] lastToolSignature = {null};
+        int[] repeatedToolCalls = {0};
 
         try {
             agent.streamEvents(new UserMessage(input), callContext)
@@ -671,6 +676,26 @@ public final class PayrollChatService implements PayrollChat {
                                             delta.getToolCallId(), delta.getDelta());
                                 } else if (event instanceof ToolResultEndEvent result) {
                                     String args = argsOf(argsByCall, result.getToolCallId());
+                                    String signature = result.getToolCallName() + "|" + args;
+                                    if (signature.equals(lastToolSignature[0])) {
+                                        repeatedToolCalls[0]++;
+                                    } else {
+                                        lastToolSignature[0] = signature;
+                                        repeatedToolCalls[0] = 1;
+                                    }
+                                    if (repeatedToolCalls[0] >= MAX_REPEATED_TOOL_CALLS) {
+                                        log.error(
+                                                "[多智能体][{}] 检测到重复工具调用，中止阶段：{}，参数={}",
+                                                stageKey,
+                                                result.getToolCallName(),
+                                                preview(args, 200));
+                                        throw new PayrollException(
+                                                "智能体连续 "
+                                                        + repeatedToolCalls[0]
+                                                        + " 次以相同参数调用 "
+                                                        + result.getToolCallName()
+                                                        + "，已中止本轮；请重试或更换模型");
+                                    }
                                     collectTargets(result.getToolCallName(), args, targets);
                                     if (!"SUCCESS".equals(result.getState().name())) {
                                         toolError[0] = true;
@@ -710,7 +735,17 @@ public final class PayrollChatService implements PayrollChat {
                                     log.warn("[多智能体][{}] 达到最大工具调用轮次", stageKey);
                                 }
                             })
-                    .blockLast(STAGE_TIMEOUT);
+                    .timeout(STAGE_TIMEOUT)
+                    .blockLast();
+        } catch (RuntimeException e) {
+            if (Exceptions.unwrap(e) instanceof TimeoutException) {
+                throw new PayrollException(
+                        "智能体阶段超过 "
+                                + STAGE_TIMEOUT.toSeconds()
+                                + " 秒未完成，已中止；模型可能陷入重复生成或工具循环，请重试或更换模型",
+                        e);
+            }
+            throw e;
         } finally {
             log.info(
                     "[多智能体][{}] 阶段结束：耗时={}ms，工具={}",
