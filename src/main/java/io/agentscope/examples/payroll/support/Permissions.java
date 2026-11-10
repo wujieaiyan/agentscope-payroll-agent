@@ -32,6 +32,9 @@ public final class Permissions {
     public static final String AGENT_MANAGE = "agent:manage";
     public static final String SKILL_MANAGE = "skill:manage";
     public static final String FLOW_MANAGE = "flow:manage";
+    public static final String KB_READ = "kb:read";
+    public static final String KB_CREATE = "kb:create";
+    public static final String KB_MANAGE = "kb:manage";
 
     public static final String ROLE_ADMIN = "ADMIN";
     public static final String ROLE_HR = "HR";
@@ -55,7 +58,9 @@ public final class Permissions {
                     IMPORT_USE,
                     CHAT_USE,
                     DEPARTMENT_READ,
-                    ROLE_READ);
+                    ROLE_READ,
+                    KB_READ,
+                    KB_CREATE);
 
     private static final Set<String> VIEWER =
             Set.of(
@@ -66,7 +71,8 @@ public final class Permissions {
                     PAYROLL_READ,
                     DEPARTMENT_READ,
                     ROLE_READ,
-                    CHAT_USE);
+                    CHAT_USE,
+                    KB_READ);
 
     private Permissions() {
     }
@@ -100,6 +106,9 @@ public final class Permissions {
         labels.put(AGENT_MANAGE, "管理智能体");
         labels.put(SKILL_MANAGE, "管理技能");
         labels.put(FLOW_MANAGE, "管理流程编排");
+        labels.put(KB_READ, "查看知识库");
+        labels.put(KB_CREATE, "新建知识库");
+        labels.put(KB_MANAGE, "管理知识库");
         return labels;
     }
 

@@ -309,6 +309,10 @@ public final class AgentFlowExecutor {
             Map<String, NodeResult> results,
             Map<String, FlowNode> nodes,
             Map<String, Integer> ranks) {
+        String contextMode = FlowValidator.upper(node.contextMode());
+        if (FlowNode.CONTEXT_NONE.equals(contextMode)) {
+            return baseInput == null ? "" : baseInput;
+        }
         Set<String> upstream = new LinkedHashSet<>();
         Set<String> visited = new HashSet<>();
         Deque<String> stack = new ArrayDeque<>();
@@ -330,6 +334,15 @@ public final class AgentFlowExecutor {
             }
         }
         if (upstream.isEmpty()) {
+            return baseInput == null ? "" : baseInput;
+        }
+        // 自动策略只传递带核算对象的数据流水线；纯文本角色串联默认隔离，
+        // 需要串联时由管理员显式选择 UPSTREAM。
+        if (!FlowNode.CONTEXT_UPSTREAM.equals(contextMode)
+                && upstream.stream().noneMatch(id -> {
+                    NodeResult result = results.get(id);
+                    return result != null && !result.targets().isEmpty();
+                })) {
             return baseInput == null ? "" : baseInput;
         }
         StringBuilder input = new StringBuilder("【用户问题】\n");

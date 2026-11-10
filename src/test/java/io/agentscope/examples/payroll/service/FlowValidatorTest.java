@@ -179,7 +179,7 @@ class FlowValidatorTest {
                         List.of(start(), agent("a", "custom-agent"), end()),
                         List.of(edge("e1", "start", "a"), edge("e2", "a", "end")));
 
-        assertFalse(FlowValidator.validate(flow, null).stream()
+        assertFalse(FlowValidator.validate(flow, (java.util.Map<String, io.agentscope.examples.payroll.domain.AgentDefinition>) null).stream()
                 .anyMatch(error -> error.contains("不存在")));
     }
 

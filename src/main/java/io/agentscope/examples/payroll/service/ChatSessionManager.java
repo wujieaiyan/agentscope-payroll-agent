@@ -9,6 +9,7 @@ import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.memory.MemorySeed;
 import io.agentscope.examples.payroll.memory.MemorySource;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.ShadowTeamService;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +35,7 @@ public final class ChatSessionManager implements AutoCloseable {
     private final VectorMemoryService memory;
     private final StaticRunRecorder runs;
     private final ShadowTeamService shadow;
+    private final ActiveTeamService activeTeams;
     private final Map<Long, PayrollChat> chats = new ConcurrentHashMap<>();
     private final Map<Long, StaticRunRecorder.ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<Long, String> questions = new ConcurrentHashMap<>();
@@ -62,11 +64,22 @@ public final class ChatSessionManager implements AutoCloseable {
             VectorMemoryService memory,
             StaticRunRecorder runs,
             ShadowTeamService shadow) {
+        this(store, chatFactory, memory, runs, shadow, ActiveTeamService.disabled());
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowTeamService shadow,
+            ActiveTeamService activeTeams) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
         this.runs = runs == null ? StaticRunRecorder.disabled() : runs;
         this.shadow = shadow == null ? ShadowTeamService.disabled() : shadow;
+        this.activeTeams = activeTeams == null ? ActiveTeamService.disabled() : activeTeams;
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -192,13 +205,26 @@ public final class ChatSessionManager implements AutoCloseable {
                     sessionId,
                     saved.id(),
                     reply.traces() == null ? 0 : reply.traces().size());
-            succeedRun(run, sessionId, saved.id());
-            shadow.trigger(
-                    userId,
-                    sessionId,
-                    saved.id(),
-                    question,
-                    run == null ? null : run.runId());
+            PayrollChat.TeamReply team = reply.team();
+            if (team != null && team.runId() > 0) {
+                if (team.succeeded()) {
+                    activeTeams.completeSuccess(
+                            team, saved.id(), stagesOf(sessionId), tracesOf(sessionId, saved.id()));
+                    cancelRun(run, sessionId, "动态团队已接管本轮回答");
+                } else {
+                    succeedRun(run, sessionId, saved.id());
+                    activeTeams.completeFallback(
+                            team, saved.id(), run == null ? 0L : run.runId());
+                }
+            } else {
+                succeedRun(run, sessionId, saved.id());
+                shadow.trigger(
+                        userId,
+                        sessionId,
+                        saved.id(),
+                        question,
+                        run == null ? null : run.runId());
+            }
             return saved.id();
         } catch (RuntimeException e) {
             log.error("[会话] 保存回答失败：sessionId={}", sessionId, e);
@@ -281,17 +307,30 @@ public final class ChatSessionManager implements AutoCloseable {
         if (run == null) {
             return;
         }
-        List<ChatToolTrace> traces;
         try {
-            traces = store.traces(sessionId, messageId);
-        } catch (RuntimeException e) {
-            traces = List.of();
-            log.warn("[动态团队] 读取本次追溯失败：sessionId={}，原因={}", sessionId, e.getMessage());
-        }
-        try {
-            runs.succeed(run, messageId, stagesOf(sessionId), traces);
+            runs.succeed(run, messageId, stagesOf(sessionId), tracesOf(sessionId, messageId));
         } catch (RuntimeException e) {
             log.warn("[动态团队] 保存静态运行失败：sessionId={}，原因={}", sessionId, e.getMessage());
+        }
+    }
+
+    private void cancelRun(StaticRunRecorder.ActiveRun run, long sessionId, String reason) {
+        if (run == null) {
+            return;
+        }
+        try {
+            runs.cancelled(run, reason);
+        } catch (RuntimeException e) {
+            log.warn("[动态团队] 取消静态运行失败：sessionId={}，原因={}", sessionId, e.getMessage());
+        }
+    }
+
+    private List<ChatToolTrace> tracesOf(long sessionId, long messageId) {
+        try {
+            return store.traces(sessionId, messageId);
+        } catch (RuntimeException e) {
+            log.warn("[动态团队] 读取本次追溯失败：sessionId={}，原因={}", sessionId, e.getMessage());
+            return List.of();
         }
     }
 

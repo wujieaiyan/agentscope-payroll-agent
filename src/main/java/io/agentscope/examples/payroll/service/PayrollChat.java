@@ -42,7 +42,11 @@ public interface PayrollChat extends AutoCloseable {
 
     /** 一次对话结果；tools 为本次回答调用过的工具名，traces 为逐次调用的依据快照。 */
     record Reply(
-            String reply, List<String> tools, String model, List<ChatToolTrace> traces) {
+            String reply,
+            List<String> tools,
+            String model,
+            List<ChatToolTrace> traces,
+            TeamReply team) {
 
         public Reply {
             tools = tools == null ? List.of() : List.copyOf(tools);
@@ -50,7 +54,35 @@ public interface PayrollChat extends AutoCloseable {
         }
 
         public Reply(String reply, List<String> tools, String model) {
-            this(reply, tools, model, List.of());
+            this(reply, tools, model, List.of(), null);
+        }
+
+        public Reply(
+                String reply, List<String> tools, String model, List<ChatToolTrace> traces) {
+            this(reply, tools, model, traces, null);
+        }
+    }
+
+    /** ACTIVE 模式本轮团队的运行坐标；静态链路回答时为 null。 */
+    record TeamReply(
+            long runId,
+            String planId,
+            String mode,
+            String status,
+            String templateId,
+            String fallbackReason,
+            List<String> agentIds) {
+
+        public TeamReply {
+            planId = planId == null ? "" : planId;
+            mode = mode == null ? "" : mode;
+            status = status == null ? "" : status;
+            templateId = templateId == null ? "" : templateId;
+            agentIds = agentIds == null ? List.of() : List.copyOf(agentIds);
+        }
+
+        public boolean succeeded() {
+            return "SUCCESS".equals(status);
         }
     }
 

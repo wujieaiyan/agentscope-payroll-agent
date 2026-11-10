@@ -561,6 +561,9 @@ public final class PayrollDatabase {
                 for (String ddl : SCHEMA) {
                     statement.execute(ddl);
                 }
+                for (String ddl : io.agentscope.examples.payroll.kb.KbSchema.DDL) {
+                    statement.execute(ddl);
+                }
             }
             seedCityPolicies(connection);
             seedReferenceData(connection);

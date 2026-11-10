@@ -129,6 +129,13 @@ public final class NacosFlowRegistry {
         log.info("[流程编排] 默认流程已设置为 {}（{}）", flow.name(), id);
     }
 
+    /** 取消全局默认流程：对话回到单个核算智能体或内置三段流水线。 */
+    public synchronized void clearActiveFlow() {
+        requireWritable();
+        publishSettings("");
+        log.info("[流程编排] 已取消全局默认流程，对话回到智能体链路");
+    }
+
     public synchronized FlowDefinition save(FlowDefinition input, String operator) {
         requireWritable();
         List<FlowDefinition> flows = new ArrayList<>(list());
@@ -178,7 +185,7 @@ public final class NacosFlowRegistry {
             throw new PayrollException("内置标准流程不能删除");
         }
         if (id.equals(activeFlowId())) {
-            throw new PayrollException("默认流程不能删除，请先把其他流程设为默认");
+            throw new PayrollException("默认流程不能删除，请先取消默认流程或把其他流程设为默认");
         }
         List<FlowDefinition> flows = new ArrayList<>(list());
         boolean removed = flows.removeIf(flow -> flow.id().equals(id));

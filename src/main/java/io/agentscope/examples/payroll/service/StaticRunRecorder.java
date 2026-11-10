@@ -103,6 +103,21 @@ public final class StaticRunRecorder {
         finish(run, messageId, AgentTeamRun.STATUS_FAILED, reason, stages, traces);
     }
 
+    /** 动态团队接管后静态运行没有执行，关闭记录但不占用主运行。 */
+    public void cancelled(ActiveRun run, String reason) {
+        long totalMs = Math.max(0L, System.currentTimeMillis() - run.startedAt());
+        store.finishRun(
+                run.runId(),
+                AgentTeamRun.STATUS_CANCELLED,
+                truncate(reason, FALLBACK_REASON_LIMIT),
+                totalMs);
+        log.info(
+                "[动态团队] 静态运行已取消：runId={}，原因={}，耗时={}ms",
+                run.runId(),
+                reason,
+                totalMs);
+    }
+
     public void interrupted(
             ActiveRun run,
             long messageId,

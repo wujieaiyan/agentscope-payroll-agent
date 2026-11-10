@@ -103,20 +103,42 @@ public class FlowAdminController {
         return ApiResponse.ok(Map.of("deleted", id));
     }
 
-    /** 设为全局默认流程；激活前要求所有节点引用的智能体已上架。 */
+    /** 设为全局默认流程；激活前要求所有节点引用的智能体已上架，同时取消默认核算智能体。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.FLOW_MANAGE)
     public ApiResponse activate(@PathVariable String id) {
         FlowDefinition flow = find(id);
         validate(flow, true);
+        String clearedAgent = agentRegistry.configuredAgentId();
+        if (clearedAgent == null) {
+            clearedAgent = "";
+        }
+        if (!clearedAgent.isBlank()) {
+            agentRegistry.clearActiveAgent();
+        }
         flowRegistry.setActiveFlow(id);
         auditService.record(
                 "flow.activate",
                 "flow_definition",
                 id,
                 null,
-                Map.of("activeFlowId", id));
-        return ApiResponse.ok(Map.of("activeFlowId", id));
+                Map.of("activeFlowId", id, "clearedAgentId", clearedAgent));
+        return ApiResponse.ok(Map.of("activeFlowId", id, "clearedAgentId", clearedAgent));
+    }
+
+    /** 取消全局默认流程：下一轮对话回到核算智能体或内置三段流水线。 */
+    @DeleteMapping("/active")
+    @RequirePermission(Permissions.FLOW_MANAGE)
+    public ApiResponse clearActive() {
+        String previous = flowRegistry.activeFlowId();
+        flowRegistry.clearActiveFlow();
+        auditService.record(
+                "flow.clear-active",
+                "flow_definition",
+                previous,
+                null,
+                Map.of("activeFlowId", ""));
+        return ApiResponse.ok(Map.of("activeFlowId", ""));
     }
 
     private FlowDefinition find(String id) {
@@ -133,7 +155,7 @@ public class FlowAdminController {
         for (AgentDefinition agent : agents) {
             byId.put(agent.id(), agent);
         }
-        List<String> errors = FlowValidator.validate(flow, byId.keySet());
+        List<String> errors = FlowValidator.validate(flow, byId);
         if (!errors.isEmpty()) {
             throw new PayrollException(String.join("；", errors));
         }
@@ -160,7 +182,8 @@ public class FlowAdminController {
                         FlowValidator.upper(node.condition()),
                         trim(node.conditionValue()),
                         node.x() == null ? 0.0 : node.x(),
-                        node.y() == null ? 0.0 : node.y()))
+                        node.y() == null ? 0.0 : node.y(),
+                        blankToNull(FlowValidator.upper(node.contextMode()))))
                 .toList();
         List<FlowEdge> edges = input.edges().stream().map(edge -> new FlowEdge(
                         trim(edge.id()),

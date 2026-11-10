@@ -104,9 +104,16 @@ class DynamicSkillWiringTest {
     @Test
     @DisplayName("自定义技能智能体的提示词不注入薪酬口径")
     void customSkillPromptHasNoPayrollFraming() {
+        AgentSkill codingSkill =
+                AgentSkill.builder()
+                        .name("ai-coding")
+                        .description("编码规范")
+                        .skillContent("## 绝对规则\n只输出代码，不解释。")
+                        .source("nacos")
+                        .build();
         String prompt =
                 PayrollAgentFactory.activeAgentPrompt(
-                        agentDefinition(List.of("ai-coding")), "ai-coding_nacos");
+                        agentDefinition(List.of("ai-coding")), List.of(codingSkill));
 
         assertTrue(prompt.contains("ai-coding_nacos"));
         assertTrue(prompt.contains("测试智能体"));

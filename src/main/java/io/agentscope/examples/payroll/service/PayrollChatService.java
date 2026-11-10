@@ -25,6 +25,7 @@ import io.agentscope.examples.payroll.domain.FlowNode;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.TraceScope;
 import io.agentscope.examples.payroll.support.ToolTraceExtractor;
+import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.TeamPlan;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
@@ -41,6 +42,7 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,6 +65,11 @@ public final class PayrollChatService implements PayrollChat {
             Set.of("calculate_payroll", "calculate_department_payroll", "generate_payslip");
     private static final int BATCH_VALIDATION_LIMIT = 3;
     private static final int LOG_PREVIEW_LIMIT = 400;
+    /** 小模型会把“应加载技能/应调用工具”当成正文输出，甚至触发技能重试话术。 */
+    private static final Pattern PSEUDO_TOOL_CALL = Pattern.compile(
+            "(?is)(load_skill_through_path\\s*\\(|\"tool_calls\"\\s*:|<tool_call>|<function_call>"
+                    + "|请求使用其他相关技能"
+                    + "|由于[^\\n]{0,40}技能[^\\n]{0,20}(?:无法|不能)[^\\n]{0,20}(?:满足|完成))");
 
     private final PayrollEngine engine;
     private final ChatContextStore contextStore;
@@ -74,6 +81,7 @@ public final class PayrollChatService implements PayrollChat {
     private final Supplier<FlowDefinition> activeFlowSupplier;
     private final Supplier<String> activeFlowIdSupplier;
     private final Supplier<List<AgentDefinition>> agentCatalogSupplier;
+    private final ActiveTeamService activeTeam;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final List<ChatToolTrace> collectedTraces = new CopyOnWriteArrayList<>();
@@ -143,7 +151,8 @@ public final class PayrollChatService implements PayrollChat {
                 activeAgentSupplier,
                 () -> null,
                 () -> "",
-                () -> List.of());
+                () -> List.of(),
+                ActiveTeamService.disabled());
     }
 
     /**
@@ -161,7 +170,8 @@ public final class PayrollChatService implements PayrollChat {
             Supplier<AgentDefinition> activeAgentSupplier,
             Supplier<FlowDefinition> activeFlowSupplier,
             Supplier<String> activeFlowIdSupplier,
-            Supplier<List<AgentDefinition>> agentCatalogSupplier) {
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -172,6 +182,7 @@ public final class PayrollChatService implements PayrollChat {
         this.activeFlowSupplier = activeFlowSupplier;
         this.activeFlowIdSupplier = activeFlowIdSupplier;
         this.agentCatalogSupplier = agentCatalogSupplier;
+        this.activeTeam = activeTeam == null ? ActiveTeamService.disabled() : activeTeam;
         this.sessionContext =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
@@ -210,7 +221,6 @@ public final class PayrollChatService implements PayrollChat {
         }
         ChatStreamListener events = listener == null ? ChatStreamListener.NOOP : listener;
         synchronized (lock) {
-            PayrollAgentFactory.Team current = team();
             String question = message.trim();
             long startedAt = System.currentTimeMillis();
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
@@ -220,6 +230,7 @@ public final class PayrollChatService implements PayrollChat {
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             ResolvedFlow resolvedFlow = resolveActiveFlow();
+            PayrollAgentFactory.Team current = team(resolvedFlow != null);
             String persona =
                     resolvedFlow != null
                             ? "flow:" + resolvedFlow.flow().id()
@@ -227,6 +238,14 @@ public final class PayrollChatService implements PayrollChat {
                                     ? "pipeline"
                                     : "agent:" + current.activeAgent().id();
             applyPersona(persona, events);
+            log.info(
+                    "[多智能体] 本轮生效角色：{}（{}）",
+                    persona,
+                    resolvedFlow != null
+                            ? "流程：" + resolvedFlow.flow().name()
+                            : current.pipeline()
+                                    ? "内置三段流水线"
+                                    : "单个智能体");
 
             prepareContext(context, events, current.summarizer());
             String memoryBlock = memory.recall(userId, sessionId, question);
@@ -234,6 +253,35 @@ public final class PayrollChatService implements PayrollChat {
                 log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
             }
             String calculatorInput = context.augment(question, memoryBlock);
+
+            ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
+            if (resolvedFlow == null && current.pipeline() && activeTeam.enabled()) {
+                teamAttempt =
+                        activeTeam.attempt(
+                                this, userId, sessionId, question, calculatorInput, events);
+                if (teamAttempt.succeeded()) {
+                    String teamReply = teamAttempt.reply();
+                    events.onText(teamReply);
+                    context.append(question, teamReply);
+                    log.info(
+                            "[动态团队] ACTIVE 答复：plan={}，template={}，智能体={}，工具={}，trace={}，耗时={}ms",
+                            teamAttempt.planId(),
+                            teamAttempt.templateId(),
+                            teamAttempt.agentIds(),
+                            teamAttempt.tools(),
+                            teamAttempt.traces().size(),
+                            System.currentTimeMillis() - startedAt);
+                    return new Reply(
+                            teamReply,
+                            teamAttempt.tools(),
+                            modelId(),
+                            teamAttempt.traces(),
+                            teamAttempt.teamReply());
+                }
+                if (teamAttempt.recorded()) {
+                    clearRoundState();
+                }
+            }
 
             String reply;
             if (resolvedFlow != null) {
@@ -258,8 +306,19 @@ public final class PayrollChatService implements PayrollChat {
                     collectedTraces.size(),
                     collectedTraces.stream().filter(trace -> !trace.amounts().isEmpty()).count());
             return new Reply(
-                    reply, List.copyOf(tools), modelId(), List.copyOf(collectedTraces));
+                    reply,
+                    List.copyOf(tools),
+                    modelId(),
+                    List.copyOf(collectedTraces),
+                    teamAttempt.teamReply());
         }
+    }
+
+    /** 动态尝试失败后清空本轮缓冲，避免半套动态阶段混入静态运行的追溯。 */
+    private void clearRoundState() {
+        collectedTraces.clear();
+        stageRuns.clear();
+        traceRecorder.clear();
     }
 
     /** 原有确定性流水线：计算 → 验证 → 核算，阶段顺序写死在代码里。 */
@@ -417,7 +476,7 @@ public final class PayrollChatService implements PayrollChat {
         for (AgentDefinition agent : catalog) {
             agents.put(agent.id(), agent);
         }
-        List<String> errors = FlowValidator.validate(flow, agents.keySet());
+        List<String> errors = FlowValidator.validate(flow, agents);
         if (!errors.isEmpty()) {
             log.warn("[流程编排] 默认流程 {} 校验失败：{}", flow.id(), errors);
             throw new PayrollException(
@@ -508,7 +567,19 @@ public final class PayrollChatService implements PayrollChat {
         }
         String reply = outcome.reply().trim();
         if (reply.isBlank()) {
-            throw new PayrollException("流程执行完成但没有产生答复内容，请检查智能体节点");
+            String nodes = outcome.nodeResults().entrySet().stream()
+                    .filter(entry -> !entry.getValue().text().isBlank())
+                    .map(Map.Entry::getKey)
+                    .collect(Collectors.joining("、"));
+            log.error(
+                    "[流程编排] 流程 {} 未产生答复：执行节点={}，有输出节点={}",
+                    resolved.flow().id(),
+                    outcome.nodeResults().keySet(),
+                    nodes);
+            throw new PayrollException(
+                    "流程「" + resolved.flow().name() + "」执行完成但没有产生答复内容"
+                            + (nodes.isBlank() ? "" : "（有输出的节点：" + nodes + "）")
+                            + "，请检查智能体节点输出或模型服务");
         }
         events.onText(reply);
         log.info(
@@ -668,6 +739,17 @@ public final class PayrollChatService implements PayrollChat {
             Map<String, AgentDefinition> agents,
             String input,
             TraceScope scope) {
+        return executeDynamicFlow(plan, flow, agents, input, scope, ChatStreamListener.NOOP);
+    }
+
+    /** 同 {@link #executeDynamicFlow}，但把节点进度与文本转发给 ACTIVE 模式的 SSE 监听器。 */
+    public DynamicFlowResult executeDynamicFlow(
+            TeamPlan plan,
+            FlowDefinition flow,
+            Map<String, AgentDefinition> agents,
+            String input,
+            TraceScope scope,
+            ChatStreamListener listener) {
         if (flow == null) {
             throw new PayrollException("动态流程不能为空");
         }
@@ -675,6 +757,7 @@ public final class PayrollChatService implements PayrollChat {
             collectedTraces.clear();
             stageRuns.clear();
             traceRecorder.clear();
+            TraceScope previous = runScope;
             useRunScope(scope);
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
             Map<String, String> roles = new LinkedHashMap<>();
@@ -688,13 +771,13 @@ public final class PayrollChatService implements PayrollChat {
                         AgentFlowExecutor.execute(
                                 flow,
                                 input,
-                                ChatStreamListener.NOOP,
-                                (node, nodeInput, listener) ->
+                                listener == null ? ChatStreamListener.NOOP : listener,
+                                (node, nodeInput, nodeListener) ->
                                         executeFlowNode(
                                                 node,
                                                 agents.get(node.agentId()),
                                                 nodeInput,
-                                                listener,
+                                                nodeListener,
                                                 tools,
                                                 roles.getOrDefault(node.id(), roleOf(node.id()))));
                 return new DynamicFlowResult(
@@ -705,7 +788,7 @@ public final class PayrollChatService implements PayrollChat {
                         List.copyOf(tools),
                         outcome.nodeResults());
             } finally {
-                useRunScope(TraceScope.none());
+                useRunScope(previous);
             }
         }
     }
@@ -915,6 +998,25 @@ public final class PayrollChatService implements PayrollChat {
         }
         log.debug("[多智能体][{}] 输出：\n{}", stageKey, text);
         long elapsedMs = System.currentTimeMillis() - startedAt;
+        if (text.isBlank()) {
+            log.error(
+                    "[多智能体][{}] 模型未返回文本：工具调用={}，流式字数={}，最终事件文本={}",
+                    stageKey,
+                    toolCalls[0],
+                    streamed.length(),
+                    finalText[0] == null ? "null" : finalText[0].length() + "字");
+        }
+        boolean pseudoToolCall = toolCalls[0] == 0 && PSEUDO_TOOL_CALL.matcher(text).find();
+        if (pseudoToolCall) {
+            log.error(
+                    "[多智能体][{}] 输出疑似伪工具调用/技能重试文本：{}",
+                    stageKey,
+                    preview(text, 300));
+        }
+        String stageError =
+                text.isBlank()
+                        ? "模型未返回文本（工具调用 " + toolCalls[0] + " 次）"
+                        : pseudoToolCall ? "输出疑似伪工具调用或技能重试文本，已拦截" : null;
         recordStage(
                 stageKey,
                 text.isBlank() ? AgentRunRecord.STATUS_EMPTY : AgentRunRecord.STATUS_SUCCESS,
@@ -923,8 +1025,13 @@ public final class PayrollChatService implements PayrollChat {
                 validationPassed(stageKey, toolError[0]),
                 text.length(),
                 elapsedMs,
-                null,
+                stageError,
                 callContext);
+        if (pseudoToolCall) {
+            throw new PayrollException(
+                    "智能体「" + stageLabel + "」返回了工具或技能调用说明而不是答复；角色技能已由系统预加载，"
+                            + "无需再次加载。请重试，或改用更大的模型（当前 " + modelId() + "）");
+        }
         return new StageResult(text, List.copyOf(targets), elapsedMs, toolError[0]);
     }
 
@@ -1269,9 +1376,11 @@ public final class PayrollChatService implements PayrollChat {
 
     /**
      * 按智能体定义取进程级缓存实例；管理员修改定义后签名变化，下一轮自动切换到新实例。
+     *
+     * @param flowMode 流程生效时不参与核算智能体配置，避免已取消的智能体干扰流程链路
      */
-    private PayrollAgentFactory.Team team() {
-        AgentDefinition active = resolveActiveAgent();
+    private PayrollAgentFactory.Team team(boolean flowMode) {
+        AgentDefinition active = flowMode ? null : resolveActiveAgent();
         long startedAt = System.currentTimeMillis();
         PayrollAgentFactory.Team current = PayrollAgentFactory.sharedTeam(engine, active);
         if (team != current) {
@@ -1294,6 +1403,9 @@ public final class PayrollChatService implements PayrollChat {
         }
         try {
             return activeAgentSupplier.get();
+        } catch (PayrollException e) {
+            // 配置了智能体但不可用时必须失败，不能静默回退到薪酬流水线。
+            throw e;
         } catch (RuntimeException e) {
             log.warn("[Agent] 读取核算智能体配置失败，回退默认流水线：{}", rootMessage(e));
             return null;

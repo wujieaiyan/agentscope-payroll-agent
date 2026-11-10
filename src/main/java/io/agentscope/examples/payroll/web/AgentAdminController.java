@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
@@ -40,13 +41,17 @@ public class AgentAdminController {
 
     private final NacosAgentRegistry registry;
     private final AgentSkillRepository skillRepository;
+    private final NacosFlowRegistry flowRegistry;
     private final AuthService authService;
     private final AuditService auditService;
 
     @Autowired
     public AgentAdminController(
-            NacosAgentRegistry registry, AuthService authService, AuditService auditService) {
-        this(registry, SkillRepositories.create(), authService, auditService);
+            NacosAgentRegistry registry,
+            NacosFlowRegistry flowRegistry,
+            AuthService authService,
+            AuditService auditService) {
+        this(registry, SkillRepositories.create(), flowRegistry, authService, auditService);
     }
 
     AgentAdminController(
@@ -54,8 +59,18 @@ public class AgentAdminController {
             AgentSkillRepository skillRepository,
             AuthService authService,
             AuditService auditService) {
+        this(registry, skillRepository, null, authService, auditService);
+    }
+
+    AgentAdminController(
+            NacosAgentRegistry registry,
+            AgentSkillRepository skillRepository,
+            NacosFlowRegistry flowRegistry,
+            AuthService authService,
+            AuditService auditService) {
         this.registry = registry;
         this.skillRepository = skillRepository;
+        this.flowRegistry = flowRegistry;
         this.authService = authService;
         this.auditService = auditService;
     }
@@ -108,26 +123,58 @@ public class AgentAdminController {
         return ApiResponse.ok(meta);
     }
 
-    /** 当前全局核算智能体；配置的智能体不可用时返回实际生效的兜底智能体。 */
+    /** 当前全局核算智能体；配置的智能体不可用时标记 available=false，不参与对话路由。 */
     @GetMapping("/active")
     @RequirePermission(Permissions.AGENT_MANAGE)
     public ApiResponse active() {
+        String configured = registry.configuredAgentId();
         AgentDefinition effective = registry.activeAgent();
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("agentId", effective.id());
         result.put("name", effective.name());
-        result.put("configured", registry.activeAgentId());
+        result.put("configured", configured);
+        result.put(
+                "available",
+                configured.isBlank() || effective.id().equals(configured));
         return ApiResponse.ok(result);
     }
 
-    /** 管理员指定全局核算智能体，所有会话下一轮对话生效。 */
+    /** 管理员指定全局核算智能体；设置后自动取消全局默认流程，避免流程与智能体同时生效。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.AGENT_MANAGE)
     public ApiResponse setActive(@PathVariable String id) {
         AgentDefinition before = find(id);
         String agentId = registry.setActiveAgent(id);
-        auditService.record("agent.activate", "agent_definition", agentId, null, before);
-        return ApiResponse.ok(Map.of("activeAgentId", agentId));
+        String clearedFlow = "";
+        if (flowRegistry != null) {
+            clearedFlow = flowRegistry.activeFlowId();
+            if (!clearedFlow.isBlank()) {
+                flowRegistry.clearActiveFlow();
+            }
+        }
+        Map<String, Object> audit = new LinkedHashMap<>();
+        audit.put("activeAgentId", agentId);
+        audit.put("clearedFlowId", clearedFlow);
+        auditService.record("agent.activate", "agent_definition", agentId, null, audit);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("activeAgentId", agentId);
+        result.put("clearedFlowId", clearedFlow);
+        return ApiResponse.ok(result);
+    }
+
+    /** 取消全局核算智能体：对话回到内置三段流水线。 */
+    @DeleteMapping("/active")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse clearActive() {
+        String previous = registry.configuredAgentId();
+        registry.clearActiveAgent();
+        auditService.record(
+                "agent.clear-active",
+                "agent_definition",
+                previous,
+                null,
+                Map.of("activeAgentId", ""));
+        return ApiResponse.ok(Map.of("activeAgentId", ""));
     }
 
     /** 可绑定技能清单，供编辑表单的技能多选。 */

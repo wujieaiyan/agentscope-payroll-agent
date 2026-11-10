@@ -254,7 +254,7 @@ class AgentAdminControllerTest {
     }
 
     @Test
-    @DisplayName("设置为核算智能体写入审计")
+    @DisplayName("设置为核算智能体写入审计并返回被取消的默认流程")
     void setActiveWritesAudit() {
         AgentDefinition before = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
         when(registry.list()).thenReturn(List.of(before));
@@ -262,23 +262,51 @@ class AgentAdminControllerTest {
 
         ApiResponse response = controller.setActive("agent-1");
 
-        assertEquals(Map.of("activeAgentId", "agent-1"), response.data());
+        Map<?, ?> data = (Map<?, ?>) response.data();
+        assertEquals("agent-1", data.get("activeAgentId"));
+        assertEquals("", data.get("clearedFlowId"));
+        ArgumentCaptor<Map<String, Object>> audit = ArgumentCaptor.forClass(Map.class);
         verify(auditService)
-                .record("agent.activate", "agent_definition", "agent-1", null, before);
+                .record(
+                        eq("agent.activate"),
+                        eq("agent_definition"),
+                        eq("agent-1"),
+                        eq(null),
+                        audit.capture());
+        assertEquals("agent-1", audit.getValue().get("activeAgentId"));
     }
 
     @Test
-    @DisplayName("active 返回实际生效与配置的核算智能体")
+    @DisplayName("active 返回实际生效、配置与可用状态")
     void activeReportsEffectiveAgent() {
         AgentDefinition effective = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
         when(registry.activeAgent()).thenReturn(effective);
-        when(registry.activeAgentId()).thenReturn("configured-9");
+        when(registry.configuredAgentId()).thenReturn("configured-9");
 
         Map<?, ?> data = (Map<?, ?>) controller.active().data();
 
         assertEquals("agent-1", data.get("agentId"));
         assertEquals("个税顾问", data.get("name"));
         assertEquals("configured-9", data.get("configured"));
+        assertEquals(false, data.get("available"));
+    }
+
+    @Test
+    @DisplayName("取消核算智能体写入审计")
+    void clearActiveWritesAudit() {
+        when(registry.configuredAgentId()).thenReturn("agent-1");
+
+        ApiResponse response = controller.clearActive();
+
+        assertEquals(Map.of("activeAgentId", ""), response.data());
+        verify(registry).clearActiveAgent();
+        verify(auditService)
+                .record(
+                        eq("agent.clear-active"),
+                        eq("agent_definition"),
+                        eq("agent-1"),
+                        eq(null),
+                        any());
     }
 
     private static List<AgentDefinition> ids(ApiResponse response) {

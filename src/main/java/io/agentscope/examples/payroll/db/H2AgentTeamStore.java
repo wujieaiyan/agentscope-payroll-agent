@@ -99,6 +99,19 @@ public final class H2AgentTeamStore {
         }
     }
 
+    /** 回退运行指向实际执行的静态运行，构成可追溯的回退链路。 */
+    public void linkFallback(long runId, long fallbackOfRunId) {
+        String sql = "UPDATE agent_team_runs SET fallback_of_run_id = ? WHERE run_id = ?";
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, fallbackOfRunId);
+            statement.setLong(2, runId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("记录回退链路失败：" + e.getMessage(), e);
+        }
+    }
+
     public void finishRun(long runId, String status, String fallbackReason, long totalMs) {
         String sql =
                 """
@@ -232,6 +245,41 @@ public final class H2AgentTeamStore {
             return mapRuns(statement);
         } catch (SQLException e) {
             throw new IllegalStateException("查询影子运行失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 管理台团队页签：指定时间窗内的运行，按模式/状态过滤，新的在前。 */
+    public List<AgentTeamRun> recentRuns(
+            LocalDateTime since, String mode, String status, int limit) {
+        StringBuilder sql =
+                new StringBuilder("SELECT ")
+                        .append(RUN_COLUMNS)
+                        .append(
+                                """
+                                 FROM agent_team_runs
+                                WHERE created_at >= ? AND deleted_at IS NULL
+                                """);
+        List<String> filters = new ArrayList<>();
+        if (mode != null && !mode.isBlank()) {
+            sql.append(" AND run_mode = ?");
+            filters.add(mode.trim());
+        }
+        if (status != null && !status.isBlank()) {
+            sql.append(" AND status = ?");
+            filters.add(status.trim());
+        }
+        sql.append(" ORDER BY run_id DESC LIMIT ?");
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int index = 1;
+            statement.setObject(index++, since);
+            for (String filter : filters) {
+                statement.setString(index++, filter);
+            }
+            statement.setInt(index, Math.max(1, Math.min(limit, 500)));
+            return mapRuns(statement);
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询近期团队运行失败：" + e.getMessage(), e);
         }
     }
 

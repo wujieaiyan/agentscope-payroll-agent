@@ -76,9 +76,9 @@ public final class NacosAgentRegistry {
         }
     }
 
-    /** 当前全局薪酬核算智能体；未配置、已下架或被删除时回退默认计算专家。 */
+    /** 管理台展示用的核算智能体；未配置或不可用时回退默认计算专家，不参与对话路由。 */
     public AgentDefinition activeAgent() {
-        String configured = activeAgentId();
+        String configured = configuredAgentId();
         List<AgentDefinition> agents = list();
         Optional<AgentDefinition> matched =
                 agents.stream()
@@ -88,17 +88,45 @@ public final class NacosAgentRegistry {
         if (matched.isPresent()) {
             return matched.get();
         }
-        log.warn("[Agent] 核算智能体 {} 不可用（未找到或已下架），回退 {}", configured, DEFAULT_ACTIVE_AGENT);
+        if (!configured.isBlank()) {
+            log.warn("[Agent] 配置的核算智能体 {} 不可用（未找到或已下架）", configured);
+        }
         return agents.stream()
                 .filter(a -> a.id().equals(DEFAULT_ACTIVE_AGENT))
                 .findFirst()
                 .orElseGet(() -> builtinAgents().get(0));
     }
 
-    /** 管理员配置的核算智能体 id；Nacos 未启用或配置缺失时返回默认计算专家。 */
-    public String activeAgentId() {
+    /**
+     * 对话实际生效的智能体：未配置返回 null（走内置三段流水线）；
+     * 配置了但不存在或已下架时抛出异常，禁止静默回退到薪酬计算智能体。
+     */
+    public AgentDefinition effectiveAgent() {
+        String configured = configuredAgentId();
+        if (configured.isBlank()) {
+            return null;
+        }
+        AgentDefinition agent = list().stream()
+                .filter(a -> a.id().equals(configured))
+                .findFirst()
+                .orElse(null);
+        if (agent == null) {
+            throw new PayrollException(
+                    "已配置的核算智能体「" + configured
+                            + "」不存在，已阻止回退薪酬流水线；请在 Agent 管理重新选择或取消默认智能体");
+        }
+        if (!AgentDefinition.STATUS_ONLINE.equals(agent.status())) {
+            throw new PayrollException(
+                    "已配置的核算智能体「" + agent.name()
+                            + "」已下架，已阻止回退薪酬流水线；请重新上架、改选或取消默认智能体");
+        }
+        return agent;
+    }
+
+    /** 管理员显式配置的智能体 id；未配置返回空串。 */
+    public String configuredAgentId() {
         if (!settings.enabled()) {
-            return DEFAULT_ACTIVE_AGENT;
+            return "";
         }
         long now = System.currentTimeMillis();
         String snapshot = cachedActiveAgent;
@@ -110,11 +138,17 @@ public final class NacosAgentRegistry {
             if (snapshot != null && now - settingsFetchedAt < ttlMillis) {
                 return snapshot;
             }
-            snapshot = loadActiveAgentId();
+            snapshot = loadActiveAgentId(snapshot);
             cachedActiveAgent = snapshot;
             settingsFetchedAt = now;
             return snapshot;
         }
+    }
+
+    /** 管理员配置的核算智能体 id；未配置时返回默认计算专家。 */
+    public String activeAgentId() {
+        String configured = configuredAgentId();
+        return configured.isBlank() ? DEFAULT_ACTIVE_AGENT : configured;
     }
 
     /** 设置全局核算智能体，只允许公开且已上架的智能体。 */
@@ -149,18 +183,37 @@ public final class NacosAgentRegistry {
         return id;
     }
 
-    private String loadActiveAgentId() {
+    /** 取消全局核算智能体：对话回到内置三段流水线，与全局默认流程互斥。 */
+    public synchronized void clearActiveAgent() {
+        requireWritable();
+        try {
+            String content = json.writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(Map.of("calculationAgentId", ""));
+            if (!client.publish(SETTINGS_DATA_ID, content)) {
+                throw new PayrollException(
+                        "写入 Nacos 配置 " + SETTINGS_DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
+            }
+        } catch (PayrollException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new PayrollException("序列化核算智能体配置失败：" + e.getMessage());
+        }
+        cachedActiveAgent = "";
+        settingsFetchedAt = System.currentTimeMillis();
+        log.info("[Agent] 已取消全局核算智能体，对话回到内置流水线");
+    }
+
+    private String loadActiveAgentId(String fallback) {
         Optional<String> body = client.fetch(SETTINGS_DATA_ID);
         if (body.isEmpty()) {
-            return DEFAULT_ACTIVE_AGENT;
+            return fallback == null ? "" : fallback;
         }
         try {
-            String id = json.readTree(body.get()).path("calculationAgentId").asText("").trim();
-            return id.isBlank() ? DEFAULT_ACTIVE_AGENT : id;
+            return json.readTree(body.get()).path("calculationAgentId").asText("").trim();
         } catch (Exception e) {
-            log.warn("[Agent] 解析 Nacos 配置 {} 失败，使用默认核算智能体：{}",
+            log.warn("[Agent] 解析 Nacos 配置 {} 失败，沿用上次核算智能体：{}",
                     SETTINGS_DATA_ID, e.getMessage());
-            return DEFAULT_ACTIVE_AGENT;
+            return fallback == null ? "" : fallback;
         }
     }
 

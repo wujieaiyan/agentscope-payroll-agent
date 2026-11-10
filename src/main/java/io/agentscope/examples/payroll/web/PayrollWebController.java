@@ -22,6 +22,7 @@ import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
@@ -78,6 +79,7 @@ public class PayrollWebController {
     private final AuthService authService;
     private final ApprovalService approvalService;
     private final NacosAgentRegistry agentRegistry;
+    private final NacosFlowRegistry flowRegistry;
 
     public PayrollWebController(
             PayrollServices services,
@@ -85,13 +87,15 @@ public class PayrollWebController {
             AuditService auditService,
             AuthService authService,
             ApprovalService approvalService,
-            NacosAgentRegistry agentRegistry) {
+            NacosAgentRegistry agentRegistry,
+            NacosFlowRegistry flowRegistry) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
         this.authService = authService;
         this.approvalService = approvalService;
         this.agentRegistry = agentRegistry;
+        this.flowRegistry = flowRegistry;
     }
 
     @GetMapping("/health")
@@ -102,7 +106,19 @@ public class PayrollWebController {
         payload.put("database", services.database().url());
         payload.put("email_mode", "DRY_RUN");
         payload.put("chat_model", services.chat().modelId());
-        payload.put("chat_agent", agentRegistry.activeAgent().name());
+        String flowId = flowRegistry.activeFlowId();
+        String configuredAgent = agentRegistry.configuredAgentId();
+        payload.put(
+                "chat_mode",
+                !flowId.isBlank() ? "FLOW" : configuredAgent.isBlank() ? "PIPELINE" : "AGENT");
+        payload.put("chat_flow", flowId);
+        payload.put(
+                "chat_agent",
+                !flowId.isBlank()
+                        ? "流程优先：" + flowId
+                        : configuredAgent.isBlank()
+                                ? "默认三段流水线"
+                                : agentRegistry.activeAgent().name());
         return ApiResponse.ok(payload);
     }
 

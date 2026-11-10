@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.team;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -7,14 +8,18 @@ import java.util.Set;
 /** 动态团队意图：只做任务分类与槽位抽取，不参与选角与金额计算。 */
 public record TeamIntent(
         String taskType,
-        List<String> employeeIds,
-        List<String> employeeNames,
-        List<String> departments,
+        @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
+                List<String> employeeIds,
+        @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
+                List<String> employeeNames,
+        @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
+                List<String> departments,
         String period,
         String riskLevel,
         boolean needsValidation,
         boolean writeAction,
-        List<String> requiredCapabilities,
+        @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
+                List<String> requiredCapabilities,
         double confidence,
         String rawText) {
 
