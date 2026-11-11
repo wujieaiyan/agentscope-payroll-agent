@@ -2,6 +2,5 @@ target/
 .idea/
 *.iml
 *.log
-data/*.mv.db
-data/*.trace.db
+data/
 output/

@@ -45,6 +45,7 @@ public final class McpToolRegistrar {
         if (configs.isEmpty()) {
             return List.of();
         }
+        Set<String> before = Set.copyOf(toolkit.getToolNames());
         List<McpClientWrapper> registered = new ArrayList<>();
         for (McpServerConfig config : configs) {
             McpClientWrapper raw = null;
@@ -64,7 +65,23 @@ public final class McpToolRegistrar {
                 log.warn("[MCP] 注册 {} 失败，已跳过：{}", config.name(), rootMessage(e));
             }
         }
+        wrapNewTools(toolkit, before);
         return List.copyOf(registered);
+    }
+
+    /** 只包新注册的 MCP 工具；内置工具仍在技能组里，替换会破坏激活语义。 */
+    private static void wrapNewTools(Toolkit toolkit, Set<String> before) {
+        for (String name : List.copyOf(toolkit.getToolNames())) {
+            if (before.contains(name)) {
+                continue;
+            }
+            io.agentscope.core.tool.AgentTool tool = toolkit.getTool(name);
+            if (tool == null || tool instanceof GuardedAgentTool) {
+                continue;
+            }
+            toolkit.removeTool(name);
+            toolkit.registerAgentTool(new GuardedAgentTool(tool));
+        }
     }
 
     private static McpClientWrapper buildClient(McpServerConfig config) {
@@ -135,6 +152,7 @@ public final class McpToolRegistrar {
                             tools ->
                                     tools.stream()
                                             .filter(this::visible)
+                                            .peek(McpToolHints::record)
                                             .toList());
         }
 

@@ -11,9 +11,24 @@ public record ChatMessage(
         String content,
         List<String> tools,
         String model,
+        ChatRouting routing,
+        List<ActionProposal> proposals,
         LocalDateTime createdAt) {
 
     public ChatMessage {
         tools = tools == null ? List.of() : List.copyOf(tools);
+        proposals = proposals == null ? List.of() : List.copyOf(proposals);
+    }
+
+    /** 升级前或普通消息：没有路由快照与提案。 */
+    public ChatMessage(
+            long id,
+            long sessionId,
+            String role,
+            String content,
+            List<String> tools,
+            String model,
+            LocalDateTime createdAt) {
+        this(id, sessionId, role, content, tools, model, null, List.of(), createdAt);
     }
 }

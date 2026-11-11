@@ -144,6 +144,52 @@ class McpToolRegistrarTest {
     }
 
     @Test
+    @DisplayName("解析 readOnlyTools，缺省时为空集")
+    void parsesReadOnlyTools() {
+        String json =
+                """
+                [
+                  {"name":"docs","transport":"sse","url":"http://localhost:9000/sse",
+                   "readOnlyTools":["search_doc","read_policy"]},
+                  {"name":"hr","transport":"sse","url":"http://localhost:9000/sse"}
+                ]
+                """;
+
+        List<McpServerConfig> configs = McpServerConfig.parse(json);
+
+        assertEquals(2, configs.size());
+        assertEquals(Set.of("search_doc", "read_policy"), configs.get(0).readOnlyTools());
+        assertTrue(configs.get(1).readOnlyTools().isEmpty());
+    }
+
+    @Test
+    @DisplayName("注册时缓存 MCP 注解供确认闸门判定只读与破坏性")
+    void recordsToolAnnotationsForGuard() {
+        McpSchema.ToolAnnotations readOnlyAnnotations =
+                new McpSchema.ToolAnnotations("查询文档", true, false, false, false, null);
+        McpSchema.ToolAnnotations destructiveAnnotations =
+                new McpSchema.ToolAnnotations("删除文档", false, true, false, false, null);
+        FakeMcpClient client =
+                new FakeMcpClient(
+                        "docs",
+                        tool("search_doc", "检索文档", readOnlyAnnotations),
+                        tool("delete_doc", "删除文档", destructiveAnnotations));
+        Toolkit toolkit = new Toolkit();
+
+        McpToolRegistrar.registerAll(
+                toolkit, List.of(sse("docs", Set.of())), config -> client);
+
+        McpToolHints.Hints search = McpToolHints.get("search_doc");
+        assertNotNull(search);
+        assertTrue(search.readOnly());
+        assertFalse(search.destructive());
+        McpToolHints.Hints delete = McpToolHints.get("delete_doc");
+        assertNotNull(delete);
+        assertFalse(delete.readOnly());
+        assertTrue(delete.destructive());
+    }
+
+    @Test
     @DisplayName("未配置或 JSON 非法时返回空列表，不影响本地工具")
     void returnsEmptyWhenNotConfiguredOrMalformed() {
         assertTrue(McpServerConfig.parse(null).isEmpty());
@@ -165,10 +211,16 @@ class McpToolRegistrarTest {
     }
 
     private static McpSchema.Tool tool(String name, String description) {
+        return tool(name, description, null);
+    }
+
+    private static McpSchema.Tool tool(
+            String name, String description, McpSchema.ToolAnnotations annotations) {
         return McpSchema.Tool.builder()
                 .name(name)
                 .description(description)
                 .inputSchema(EMPTY_SCHEMA)
+                .annotations(annotations)
                 .build();
     }
 

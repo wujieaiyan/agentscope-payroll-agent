@@ -1,8 +1,10 @@
 package io.agentscope.examples.payroll.db;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
+import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -17,6 +19,7 @@ import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -160,6 +163,7 @@ public final class H2ChatStore implements ChatContextStore {
         try (Connection connection = database.connection()) {
             connection.setAutoCommit(false);
             try {
+                H2ActionProposalStore.deleteForSession(connection, sessionId);
                 try (PreparedStatement statement =
                         connection.prepareStatement(
                                 "DELETE FROM chat_tool_traces WHERE session_id = ?")) {
@@ -192,16 +196,22 @@ public final class H2ChatStore implements ChatContextStore {
     public List<ChatMessage> messages(long sessionId) {
         String sql =
                 """
-                SELECT message_id, session_id, role, content, tools_json, model, created_at
+                SELECT message_id, session_id, role, content, tools_json, model, routing_json,
+                       created_at
                 FROM chat_messages WHERE session_id = ? ORDER BY message_id
                 """;
+        Map<Long, List<ActionProposal>> proposals = proposalsByMessage(sessionId);
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, sessionId);
             try (ResultSet rs = statement.executeQuery()) {
                 List<ChatMessage> messages = new ArrayList<>();
                 while (rs.next()) {
-                    messages.add(mapMessage(rs));
+                    long messageId = rs.getLong("message_id");
+                    messages.add(
+                            mapMessage(
+                                    rs,
+                                    proposals.getOrDefault(messageId, List.of())));
                 }
                 return List.copyOf(messages);
             }
@@ -213,19 +223,36 @@ public final class H2ChatStore implements ChatContextStore {
     public Optional<ChatMessage> message(long sessionId, long messageId) {
         String sql =
                 """
-                SELECT message_id, session_id, role, content, tools_json, model, created_at
+                SELECT message_id, session_id, role, content, tools_json, model, routing_json,
+                       created_at
                 FROM chat_messages WHERE session_id = ? AND message_id = ?
                 """;
+        List<ActionProposal> proposals =
+                proposalsByMessage(sessionId).getOrDefault(messageId, List.of());
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, sessionId);
             statement.setLong(2, messageId);
             try (ResultSet rs = statement.executeQuery()) {
-                return rs.next() ? Optional.of(mapMessage(rs)) : Optional.empty();
+                return rs.next() ? Optional.of(mapMessage(rs, proposals)) : Optional.empty();
             }
         } catch (SQLException e) {
             throw new IllegalStateException("查询会话消息失败：" + e.getMessage(), e);
         }
+    }
+
+    /** 一次查询按消息分组，历史回放不产生 N+1。 */
+    private Map<Long, List<ActionProposal>> proposalsByMessage(long sessionId) {
+        Map<Long, List<ActionProposal>> grouped = new HashMap<>();
+        for (ActionProposal proposal :
+                new H2ActionProposalStore(database).forSession(sessionId)) {
+            if (proposal.messageId() <= 0) {
+                continue;
+            }
+            grouped.computeIfAbsent(proposal.messageId(), key -> new ArrayList<>())
+                    .add(proposal);
+        }
+        return grouped;
     }
 
     /** 会话内用户提问次数，用作向量记录的轮次索引。 */
@@ -285,10 +312,26 @@ public final class H2ChatStore implements ChatContextStore {
             List<String> tools,
             String model,
             List<ChatToolTrace> traces) {
+        return appendAssistant(sessionId, content, tools, model, traces, null, List.of());
+    }
+
+    /**
+     * 助手回复、路由快照、待确认提案与工具追溯在同一事务内落库，
+     * 避免出现“有卡片无消息”或“有消息无依据”的半条记录。
+     */
+    public ChatMessage appendAssistant(
+            long sessionId,
+            String content,
+            List<String> tools,
+            String model,
+            List<ChatToolTrace> traces,
+            ChatRouting routing,
+            List<ActionProposal> proposals) {
         String sql =
                 """
-                INSERT INTO chat_messages (session_id, role, content, tools_json, model, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO chat_messages (session_id, role, content, tools_json, model,
+                    routing_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """;
         LocalDateTime now = LocalDateTime.now();
         long id;
@@ -306,7 +349,12 @@ public final class H2ChatStore implements ChatContextStore {
                         statement.setString(4, JsonSupport.toJson(tools));
                     }
                     statement.setString(5, model);
-                    statement.setObject(6, now);
+                    if (routing == null) {
+                        statement.setNull(6, java.sql.Types.CLOB);
+                    } else {
+                        statement.setString(6, JsonSupport.toJson(routing));
+                    }
+                    statement.setObject(7, now);
                     statement.executeUpdate();
                     try (ResultSet keys = statement.getGeneratedKeys()) {
                         keys.next();
@@ -317,7 +365,14 @@ public final class H2ChatStore implements ChatContextStore {
                     for (ChatToolTrace trace : traces) {
                         insertTrace(connection, sessionId, id, trace, now);
                     }
-                }                connection.commit();
+                }
+                if (proposals != null) {
+                    for (ActionProposal proposal : proposals) {
+                        H2ActionProposalStore.insert(
+                                connection, sessionId, id, proposal, now);
+                    }
+                }
+                connection.commit();
             } catch (SQLException | RuntimeException e) {
                 connection.rollback();
                 throw e;
@@ -326,7 +381,8 @@ public final class H2ChatStore implements ChatContextStore {
             throw new IllegalStateException("保存会话消息失败：" + e.getMessage(), e);
         }
         touch(sessionId);
-        return new ChatMessage(id, sessionId, ROLE_ASSISTANT, content, tools, model, now);
+        return new ChatMessage(
+                id, sessionId, ROLE_ASSISTANT, content, tools, model, routing, proposals, now);
     }
 
     private static long insertTrace(
@@ -514,6 +570,11 @@ public final class H2ChatStore implements ChatContextStore {
     }
 
     @Override
+    public int cancelPendingActions(long sessionId) {
+        return new H2ActionProposalStore(database).cancelPendingForSession(sessionId);
+    }
+
+    @Override
     public ChatContextSnapshot loadContext(long sessionId) {
         String sql =
                 "SELECT context_summary, context_turns FROM chat_sessions WHERE session_id = ?";
@@ -554,6 +615,7 @@ public final class H2ChatStore implements ChatContextStore {
 
     public void clear(long sessionId) {
         try (Connection connection = database.connection()) {
+            H2ActionProposalStore.deleteForSession(connection, sessionId);
             try (PreparedStatement statement =
                     connection.prepareStatement(
                             "DELETE FROM chat_tool_traces WHERE session_id = ?")) {
@@ -653,7 +715,8 @@ public final class H2ChatStore implements ChatContextStore {
                 rs.getObject("created_at", LocalDateTime.class));
     }
 
-    private static ChatMessage mapMessage(ResultSet rs) throws SQLException {
+    private static ChatMessage mapMessage(ResultSet rs, List<ActionProposal> proposals)
+            throws SQLException {
         String toolsJson = rs.getString("tools_json");
         List<String> tools =
                 toolsJson == null || toolsJson.isBlank()
@@ -666,6 +729,20 @@ public final class H2ChatStore implements ChatContextStore {
                 rs.getString("content"),
                 tools,
                 rs.getString("model"),
+                routingOf(rs.getString("routing_json")),
+                proposals,
                 rs.getObject("created_at", LocalDateTime.class));
+    }
+
+    /** 旧消息没有路由列；损坏的快照按未记录处理，避免历史加载整体失败。 */
+    private static ChatRouting routingOf(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return JsonSupport.fromJson(json, ChatRouting.class);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 }

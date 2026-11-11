@@ -374,9 +374,43 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   ```bash
   PAYROLL_MCP_SERVERS='[
     {"name":"hr","transport":"sse","url":"http://localhost:9000/sse",
-     "allowedTools":["get_employee_profile","get_attendance_summary"],"timeoutSeconds":15}
+     "allowedTools":["get_employee_profile","get_attendance_summary"],
+     "readOnlyTools":["get_employee_profile"],"timeoutSeconds":15}
   ]' java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
   ```
+
+- **路由透明化与写操作确认**：每条助手消息都记录实际回答链路（`PIPELINE`/`AGENT`/`FLOW`/
+  `GRAPH`/`TEAM_ACTIVE`/`ACTION`），前端显示 chip，展开可看回退原因、模型与定义签名；
+  历史消息刷新后仍可查看，升级前的旧消息显示“未记录路由”。
+  开启 `PAYROLL_ACTION_CONFIRM_ENABLED=true` 后，模型调用**写工具**时本轮立即停止后续工具执行，
+  只生成一张会话内确认卡片；提案与发起人、消息绑定，仅本人可在有效期内确认或取消，
+  确认后由服务端执行并追加一条“操作结果”消息，不触发新的模型调用。
+
+  | 接口 | 说明 |
+  | --- | --- |
+  | `GET /api/chat/sessions/{id}/messages/{messageId}/routing` | 查询该条助手消息的路由快照，越权返回 404 |
+  | `GET /api/chat/actions/{proposalId}` | 查看提案当前状态，过期时原子落 `EXPIRED` 并返回 410 |
+  | `POST /api/chat/actions/{proposalId}/confirm` | body `{"decision":"CONFIRM"\|"CANCEL","idempotencyKey":"可选"}`；重复确认只返回既有终态 |
+
+  提案状态：`PENDING → CONFIRMED → EXECUTED/FAILED`，或 `PENDING → CANCELED/EXPIRED`。
+  提案不进入 `/api/approval/tasks`，确认也不会绕过批次审批、出账与发送的领域状态机；
+  会话角色切换会作废未确认提案，删除会话时提案与工具追溯一并清理，审计保留 180 天。
+  写工具分类优先级为：本地 `safety-overrides` > 服务端 `readOnlyHint` > 默认“写”。
+  内置只读工具直通并写 trace；MCP 工具未声明 `readOnlyHint` 时按写处理，
+  可在服务端补注解，或用 `readOnlyTools` 放行、用 `safety-overrides` 强制改判：
+
+  ```yaml
+  payroll:
+    mcp:
+      trust-read-only-hints: true   # false 时所有 MCP 工具一律确认
+    tools:
+      safety-overrides:
+        search_doc: MUTATING        # READ_ONLY / MUTATING，优先级最高
+  ```
+
+  提案生成、确认、执行、取消、过期以及分类覆盖都会写入 `audit_log`
+  （`chat.action.propose/confirm/execute/cancel/expire`、`chat.action.safety.override`）。
+  设计细节与决策记录见 [`docs/routing-action-confirm-spec.md`](docs/routing-action-confirm-spec.md)。
 
 - **角色 Skill 外置（可选）**：三个角色的提示词已拆成 AgentScope 动态技能，系统提示只保留
   金额安全规则与“第一步加载技能”的指令，模型通过 `load_skill_through_path` 按需读取角色说明。
@@ -557,7 +591,11 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_TEAM_SHADOW_SAMPLE_RATE` | `0.15` | `SHADOW` 模式采样率；设 0 关闭影子执行 |
 | `PAYROLL_TEAM_ACTIVE_USER_IDS` | 空 | `ACTIVE` 用户白名单（逗号分隔用户 id）；留空表示全部用户 |
 | `PAYROLL_TEAM_ACTIVE_SESSION_IDS` | 空 | `ACTIVE` 会话白名单（逗号分隔会话 id）；留空表示全部会话 |
-| `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
+| `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`readOnlyTools`、`timeoutSeconds` |
+| `PAYROLL_ROUTING_ENABLED` | `true` | 是否把本轮路由快照写入 `chat_messages.routing_json`；关闭后 SSE `done` 不带 `routing` |
+| `PAYROLL_ACTION_CONFIRM_ENABLED` | `false` | 写操作会话内确认开关；关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度 |
+| `PAYROLL_ACTION_PROPOSAL_TTL_MINUTES` | `15` | 提案有效期（分钟）；过期后卡片失效，确认返回 410 |
+| `PAYROLL_MCP_TRUST_READ_ONLY_HINTS` | `true` | 是否采纳 MCP 服务端 `readOnlyHint`；`false` 时所有 MCP 工具都需确认 |
 | `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |
 | `PAYROLL_NACOS_GROUP` | `payroll-agent` | 技能与 Agent 配置所在分组 |

@@ -58,6 +58,19 @@ payroll:
     # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
     cache-max-sessions: "${PAYROLL_CHAT_CACHE_MAX_SESSIONS:200}"
     cache-idle-minutes: "${PAYROLL_CHAT_CACHE_IDLE_MINUTES:60}"
+    # 写操作确认：关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度核对。
+    action-confirm:
+      enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
+      ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
+  # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
+  routing:
+    enabled: "${PAYROLL_ROUTING_ENABLED:true}"
+  mcp:
+    # 是否采纳外部服务的 readOnlyHint；false 时所有 MCP 工具一律视为写，逐个确认。
+    trust-read-only-hints: "${PAYROLL_MCP_TRUST_READ_ONLY_HINTS:true}"
+  tools:
+    # 单工具分类覆盖，优先级最高；键为工具名，值为 READ_ONLY 或 MUTATING。
+    safety-overrides: {}
   # 审计日志保留天数，启动时清理更早的记录。
   audit:
     retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"

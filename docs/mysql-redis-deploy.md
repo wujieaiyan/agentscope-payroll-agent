@@ -23,6 +23,10 @@ FLUSH PRIVILEGES;
 
 - `src/main/resources/db/migration/mysql/V1__payroll_core.sql`
 - `src/main/resources/db/migration/mysql/V2__knowledge_base.sql`
+- `src/main/resources/db/migration/mysql/V3__chat_routing.sql`：新增
+  `chat_messages.routing_json`（TEXT）与 `chat_action_proposals` 表（写操作提案，
+  含状态、有效期、快照哈希、执行结果与幂等键唯一索引）。`chat_action_proposals`
+  与消息同事务写入，删除会话时一并清理；过期只改状态，不做独立 TTL 删除。
 
 Flyway 未开启 `baselineOnMigrate`：目标库必须是空库，或已有 `flyway_schema_history` 且版本可继续。
 指向“非空但没有 Flyway 历史表”的库（例如手工建过表的旧库）会直接启动失败并提示
@@ -128,6 +132,14 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --migrate-to-mysql --fo
 ```bash
 # 健康检查：database 字段应显示 jdbc:mysql://...
 curl -s http://127.0.0.1:8099/api/health
+
+# 确认 V3 已应用（交互式输入数据库密码）：
+#   flyway_schema_history 应包含 3 - chat routing 且 success=1
+#   chat_messages 应存在 routing_json 列，chat_action_proposals 表应存在
+docker exec -it mysql mysql -upayroll -p payroll -e \
+  "select version,description,success from flyway_schema_history order by installed_rank;"
+docker exec -it mysql mysql -upayroll -p payroll -e \
+  "show columns from chat_messages like 'routing_json'; show tables like 'chat_action_proposals';"
 
 # 登录后端口令：应得到 200，且 Redis 出现 payroll:session:sessions:<id>
 curl -c /tmp/c.txt -H "Content-Type: application/json" \

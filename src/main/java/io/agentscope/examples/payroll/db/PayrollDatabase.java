@@ -108,6 +108,10 @@ public final class PayrollDatabase {
                 ADD COLUMN IF NOT EXISTS persona_key VARCHAR(128)
             """,
             """
+            ALTER TABLE chat_messages
+                ADD COLUMN IF NOT EXISTS routing_json CLOB
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_user
                 ON chat_sessions (user_id, updated_at)
             """,
@@ -474,6 +478,38 @@ public final class PayrollDatabase {
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT uq_chat_feedback_message_user UNIQUE (message_id, user_id)
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_action_proposals (
+                proposal_id VARCHAR(36) PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                session_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL DEFAULT 0,
+                agent_path VARCHAR(32),
+                tool_name VARCHAR(128) NOT NULL,
+                params_json CLOB,
+                summary VARCHAR(500) NOT NULL,
+                risk_level VARCHAR(16) NOT NULL DEFAULT 'NORMAL',
+                safety_source VARCHAR(32),
+                status VARCHAR(16) NOT NULL,
+                idempotency_key VARCHAR(128),
+                snapshot_hash VARCHAR(64),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                confirmed_by BIGINT,
+                confirmed_at TIMESTAMP,
+                executed_at TIMESTAMP,
+                result_json CLOB,
+                error_message VARCHAR(500)
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_action_proposals_idempotency
+                ON chat_action_proposals (user_id, idempotency_key)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_action_proposals_session
+                ON chat_action_proposals (session_id, status)
             """,
             """
             ALTER TABLE chat_tool_traces ADD COLUMN IF NOT EXISTS run_id BIGINT

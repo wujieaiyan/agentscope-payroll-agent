@@ -2081,6 +2081,11 @@ function appendChatMessage(role, text, tools, isError, options = {}) {
     main.append(toolLabel);
   }
 
+  if (role !== 'user') {
+    main.append(buildRoutingPanel(options.routing || null));
+    renderProposalCards(main, options.proposals || [], options.sessionId);
+  }
+
   if (role === 'user') {
     row.append(main, avatar);
   } else {
@@ -2283,6 +2288,346 @@ function buildTraceItem(trace) {
 
   item.append(summary, body);
   return item;
+}
+
+const CHAT_ROUTING_LABELS = {
+  PIPELINE: '流水线',
+  AGENT: '单智能体',
+  FLOW: '流程',
+  GRAPH: '图编排',
+  TEAM_ACTIVE: '动态团队',
+  ACTION: '操作执行',
+};
+
+function chatRoutingLabel(path) {
+  return CHAT_ROUTING_LABELS[path] || path || '未知链路';
+}
+
+function buildRoutingRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'chat-routing-row';
+  const key = document.createElement('span');
+  key.className = 'chat-routing-key';
+  key.textContent = label;
+  const text = document.createElement('span');
+  text.className = 'chat-routing-value';
+  text.textContent = value == null || value === '' ? '—' : String(value);
+  row.append(key, text);
+  return row;
+}
+
+function buildRoutingPanel(routing) {
+  const panel = document.createElement('details');
+  panel.className = 'chat-routing';
+  const summary = document.createElement('summary');
+  summary.className = 'chat-routing-summary';
+  const chip = document.createElement('span');
+  chip.className = 'chat-routing-chip';
+  const hint = document.createElement('span');
+  hint.className = 'chat-routing-hint';
+
+  if (!routing) {
+    panel.classList.add('missing');
+    chip.textContent = '未记录路由';
+    hint.textContent = '升级前产生的消息';
+    summary.append(chip, hint);
+    panel.append(summary);
+    return panel;
+  }
+
+  const fellBack = Boolean(routing.from_path);
+  panel.classList.toggle('fallback', fellBack);
+  chip.textContent = (fellBack ? '↩ ' : '') + chatRoutingLabel(routing.path);
+  hint.textContent = fellBack ? `由${chatRoutingLabel(routing.from_path)}回退` : '路由详情';
+  summary.append(chip, hint);
+
+  const body = document.createElement('div');
+  body.className = 'chat-routing-body';
+  body.append(buildRoutingRow('路径', chatRoutingLabel(routing.path)));
+  if (routing.reason) body.append(buildRoutingRow('说明', routing.reason));
+  if (fellBack) {
+    body.append(
+      buildRoutingRow(
+        '回退',
+        `由${chatRoutingLabel(routing.from_path)}回退${
+          routing.fallback_reason ? '：' + routing.fallback_reason : ''
+        }`
+      )
+    );
+  }
+  if (routing.model) body.append(buildRoutingRow('模型', routing.model));
+  if (routing.agent_ids && routing.agent_ids.length) {
+    body.append(buildRoutingRow('参与智能体', routing.agent_ids.join('、')));
+  }
+  if (routing.definition_signature) {
+    body.append(buildRoutingRow('定义签名', routing.definition_signature));
+  }
+  if (routing.stages && routing.stages.length) {
+    body.append(buildRoutingRow('阶段', routing.stages.join(' → ')));
+  }
+  if (Number(routing.elapsed_ms) >= 0) {
+    body.append(buildRoutingRow('耗时', teamDuration(routing.elapsed_ms)));
+  }
+  panel.append(summary, body);
+  return panel;
+}
+
+const CHAT_PROPOSAL_STATUS = {
+  PENDING: { label: '待确认', cls: 'pending' },
+  CONFIRMED: { label: '执行中', cls: 'pending' },
+  EXECUTED: { label: '已执行', cls: 'ok' },
+  FAILED: { label: '执行失败', cls: 'bad' },
+  CANCELED: { label: '已取消', cls: 'muted' },
+  EXPIRED: { label: '已过期', cls: 'muted' },
+};
+
+const CHAT_PROPOSAL_RISK = {
+  NORMAL: { label: '常规变更', cls: '' },
+  AMOUNT: { label: '涉及金额', cls: 'amount' },
+  IRREVERSIBLE: { label: '不可撤销', cls: 'irreversible' },
+};
+
+function parseProposalParams(paramsJson) {
+  if (!paramsJson) return {};
+  try {
+    const parsed = JSON.parse(paramsJson);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function proposalValueText(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      return String(value);
+    }
+  }
+  const text = String(value);
+  return text.length > 120 ? text.slice(0, 120) + '…' : text;
+}
+
+/** 确认/取消走独立请求：需要读取 HTTP 状态区分过期(410)、越权(403)与不存在(404)。 */
+async function submitProposalDecision(proposalId, decision) {
+  const response = await fetch(`/api/chat/actions/${encodeURIComponent(proposalId)}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision, idempotency_key: proposalId }),
+  });
+  if (response.status === 401) {
+    window.location.href = '/login.html';
+    throw new Error('未登录或会话已过期');
+  }
+  let payload = null;
+  const text = await response.text();
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      payload = null;
+    }
+  }
+  if (!response.ok || (payload && payload.status === 'ERROR')) {
+    const failure = new Error(
+      (payload && payload.message) || `请求失败：HTTP ${response.status}`
+    );
+    failure.status = response.status;
+    throw failure;
+  }
+  return payload ? payload.data : null;
+}
+
+function markProposalExpired(card, stateEl) {
+  card.dataset.status = 'EXPIRED';
+  card.classList.remove('pending', 'ok', 'bad');
+  card.classList.add('muted');
+  const actions = card.querySelector('.chat-proposal-actions');
+  if (actions) actions.remove();
+  const state = stateEl || card.querySelector('.chat-proposal-state');
+  if (state) state.textContent = '已过期';
+}
+
+function startProposalCountdown(card, stateEl, expiresAt) {
+  const expiry = expiresAt ? new Date(expiresAt).getTime() : NaN;
+  if (!Number.isFinite(expiry)) {
+    stateEl.textContent = '待确认';
+    return;
+  }
+  let timer = null;
+  const render = () => {
+    if (!card.isConnected) {
+      if (timer) clearInterval(timer);
+      return;
+    }
+    const remaining = expiry - Date.now();
+    if (remaining <= 0) {
+      if (timer) clearInterval(timer);
+      markProposalExpired(card, stateEl);
+      return;
+    }
+    const seconds = Math.floor(remaining / 1000);
+    const minutes = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const rest = String(seconds % 60).padStart(2, '0');
+    stateEl.textContent = `剩余 ${minutes}:${rest}`;
+  };
+  render();
+  timer = setInterval(render, 1000);
+}
+
+function refreshProposalCard(card, proposal, sessionId) {
+  const fresh = buildProposalCard(proposal, sessionId);
+  card.replaceWith(fresh);
+}
+
+function renderProposalCards(main, proposals, sessionId) {
+  if (!main || !Array.isArray(proposals)) return;
+  proposals.forEach((proposal) => {
+    if (!proposal || !proposal.proposal_id) return;
+    const selector = `[data-proposal-id="${CSS.escape(proposal.proposal_id)}"]`;
+    const existing = main.querySelector(selector);
+    if (existing) {
+      refreshProposalCard(existing, proposal, sessionId);
+      return;
+    }
+    main.append(buildProposalCard(proposal, sessionId));
+  });
+}
+
+async function decideProposal(card, proposal, decision, sessionId) {
+  const actions = card.querySelector('.chat-proposal-actions');
+  const buttons = actions ? Array.from(actions.querySelectorAll('button')) : [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  const stateEl = card.querySelector('.chat-proposal-state');
+  if (stateEl) {
+    stateEl.textContent = decision === 'CONFIRM' ? '正在执行…' : '正在取消…';
+  }
+  try {
+    const updated = await submitProposalDecision(proposal.proposal_id, decision);
+    if (updated && updated.proposal_id) {
+      refreshProposalCard(card, updated, sessionId);
+    }
+    toast(decision === 'CONFIRM' ? '操作已执行' : '操作已取消', 'success');
+  } catch (error) {
+    if (error.status === 410) {
+      markProposalExpired(card, stateEl);
+      toast(error.message || '提案已过期，请重新发起操作', 'error');
+      return;
+    }
+    buttons.forEach((button) => {
+      button.disabled = false;
+    });
+    if (stateEl && card.dataset.status === 'PENDING') {
+      const expiresAt = card.dataset.expiresAt;
+      startProposalCountdown(card, stateEl, expiresAt);
+    }
+    if (error.status === 403) {
+      toast(error.message || '当前账号无权执行该操作', 'error');
+      return;
+    }
+    showError(error);
+  }
+}
+
+function buildProposalCard(proposal, sessionId) {
+  const status = String(proposal.status || 'PENDING').toUpperCase();
+  const statusMeta = CHAT_PROPOSAL_STATUS[status] || { label: status, cls: '' };
+  const riskMeta = CHAT_PROPOSAL_RISK[proposal.risk_level] || CHAT_PROPOSAL_RISK.NORMAL;
+
+  const card = document.createElement('div');
+  card.className = 'chat-proposal ' + statusMeta.cls;
+  card.dataset.proposalId = proposal.proposal_id || '';
+  card.dataset.status = status;
+  card.dataset.expiresAt = proposal.expires_at || '';
+
+  const head = document.createElement('div');
+  head.className = 'chat-proposal-head';
+  const title = document.createElement('span');
+  title.className = 'chat-proposal-title';
+  title.textContent = status === 'PENDING' ? '待确认操作' : '操作提案';
+  const risk = document.createElement('span');
+  risk.className = 'chat-proposal-risk ' + riskMeta.cls;
+  risk.textContent = riskMeta.label;
+  const state = document.createElement('span');
+  state.className = 'chat-proposal-state';
+  head.append(title, risk, state);
+
+  const summary = document.createElement('div');
+  summary.className = 'chat-proposal-summary';
+  summary.textContent = proposal.summary || proposal.tool_name || '未命名操作';
+
+  const body = document.createElement('div');
+  body.className = 'chat-proposal-body';
+  const params = parseProposalParams(proposal.params_json);
+  const entries = Object.entries(params).slice(0, 8);
+  entries.forEach(([key, value]) => {
+    const row = document.createElement('div');
+    row.className = 'chat-proposal-row';
+    const name = document.createElement('span');
+    name.className = 'chat-proposal-key';
+    name.textContent = key;
+    const text = document.createElement('span');
+    text.className = 'chat-proposal-value';
+    text.textContent = proposalValueText(value);
+    row.append(name, text);
+    body.append(row);
+  });
+  if (!entries.length) {
+    const hint = document.createElement('div');
+    hint.className = 'chat-proposal-empty';
+    hint.textContent = '该操作没有参数';
+    body.append(hint);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'chat-proposal-meta';
+  const expires = proposal.expires_at ? ` · 有效期至 ${formatDateTime(proposal.expires_at)}` : '';
+  meta.textContent = `工具 ${proposal.tool_name || '—'}${expires}`;
+
+  card.append(head, summary);
+  if (entries.length) card.append(body);
+  card.append(meta);
+
+  if (status === 'PENDING') {
+    startProposalCountdown(card, state, proposal.expires_at);
+    const actions = document.createElement('div');
+    actions.className = 'chat-proposal-actions';
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'chat-proposal-btn primary';
+    confirm.textContent = '确认执行';
+    confirm.addEventListener('click', () => {
+      decideProposal(card, proposal, 'CONFIRM', sessionId);
+    });
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'chat-proposal-btn';
+    cancel.textContent = '取消';
+    cancel.addEventListener('click', () => {
+      decideProposal(card, proposal, 'CANCEL', sessionId);
+    });
+    actions.append(confirm, cancel);
+    card.append(actions);
+  } else {
+    state.textContent = statusMeta.label;
+    if (status === 'EXECUTED' && proposal.result_json) {
+      const result = document.createElement('div');
+      result.className = 'chat-proposal-result';
+      result.textContent = '结果：' + proposalValueText(proposal.result_json);
+      card.append(result);
+    }
+    if (status === 'FAILED' && proposal.error_message) {
+      const failure = document.createElement('div');
+      failure.className = 'chat-proposal-error';
+      failure.textContent = '原因：' + proposal.error_message;
+      card.append(failure);
+    }
+  }
+  return card;
 }
 
 function buildTracePanel(traces) {
@@ -3010,6 +3355,10 @@ function appendStreamingMessage(sessionId) {
       bubble.textContent = fullText;
       scroll();
     },
+    addProposal(proposal) {
+      renderProposalCards(main, [proposal], sessionId);
+      scroll();
+    },
     finish(reply) {
       if (finished) return;
       finished = true;
@@ -3024,6 +3373,11 @@ function appendStreamingMessage(sessionId) {
         toolsLine.textContent = '调用工具：' + reply.tools.join('、');
         toolsLine.classList.remove('hidden');
       }
+      if (reply && reply.routing) {
+        main.append(buildRoutingPanel(reply.routing));
+        main.querySelectorAll('.chat-proposal').forEach((card) => main.append(card));
+      }
+      renderProposalCards(main, (reply && reply.proposals) || [], sessionId);
       if (reply && reply.message_id) {
         loadMessageTraces(sessionId, reply.message_id, main);
         loadMessageFeedback(sessionId, reply.message_id, main);
@@ -3230,7 +3584,13 @@ function appendStoredMessage(message) {
     message.content,
     message.tools,
     message.role === 'ERROR',
-    { createdAt: message.created_at, animate: false }
+    {
+      createdAt: message.created_at,
+      animate: false,
+      routing: message.routing,
+      proposals: message.proposals,
+      sessionId: message.session_id || state.chatSessionId,
+    }
   );
   if (message.role === 'ASSISTANT' && row) {
     loadMessageTraces(
@@ -3334,6 +3694,9 @@ async function sendChat(override) {
           break;
         case 'text':
           view.appendText(data.text);
+          break;
+        case 'action_proposal':
+          view.addProposal(data.proposal);
           break;
         case 'done':
           done = true;

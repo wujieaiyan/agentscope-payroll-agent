@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.service.ChatStreamListener;
 import io.agentscope.examples.payroll.service.PayrollChat;
@@ -107,6 +108,11 @@ final class ChatSse {
             }
 
             @Override
+            public void onActionProposal(ActionProposal proposal) {
+                channel.send("action_proposal", payload("proposal", proposal));
+            }
+
+            @Override
             public void onDone(PayrollChat.Reply reply) {
                 Long messageId = onDone.apply(reply);
                 channel.send(
@@ -119,7 +125,12 @@ final class ChatSse {
                                 "trace_count",
                                         reply.traces().isEmpty()
                                                 ? null
-                                                : reply.traces().size()));
+                                                : reply.traces().size(),
+                                "routing", reply.routing(),
+                                "proposals",
+                                        reply.proposals().isEmpty()
+                                                ? null
+                                                : reply.proposals()));
             }
         };
     }

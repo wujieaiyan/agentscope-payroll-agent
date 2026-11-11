@@ -1,6 +1,8 @@
 package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.domain.ActionProposal;
+import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.TraceScope;
 import java.util.List;
@@ -40,26 +42,41 @@ public interface PayrollChat extends AutoCloseable {
     default void close() {
     }
 
-    /** 一次对话结果；tools 为本次回答调用过的工具名，traces 为逐次调用的依据快照。 */
+    /**
+     * 一次对话结果；tools 为本次回答调用过的工具名，traces 为逐次调用的依据快照，
+     * routing 为本轮路由快照，proposals 为待用户确认的写操作。
+     */
     record Reply(
             String reply,
             List<String> tools,
             String model,
             List<ChatToolTrace> traces,
-            TeamReply team) {
+            TeamReply team,
+            ChatRouting routing,
+            List<ActionProposal> proposals) {
 
         public Reply {
             tools = tools == null ? List.of() : List.copyOf(tools);
             traces = traces == null ? List.of() : List.copyOf(traces);
+            proposals = proposals == null ? List.of() : List.copyOf(proposals);
         }
 
         public Reply(String reply, List<String> tools, String model) {
-            this(reply, tools, model, List.of(), null);
+            this(reply, tools, model, List.of(), null, null, List.of());
         }
 
         public Reply(
                 String reply, List<String> tools, String model, List<ChatToolTrace> traces) {
-            this(reply, tools, model, traces, null);
+            this(reply, tools, model, traces, null, null, List.of());
+        }
+
+        public Reply(
+                String reply,
+                List<String> tools,
+                String model,
+                List<ChatToolTrace> traces,
+                TeamReply team) {
+            this(reply, tools, model, traces, team, null, List.of());
         }
     }
 

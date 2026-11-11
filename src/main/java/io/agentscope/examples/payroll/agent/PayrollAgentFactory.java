@@ -321,8 +321,8 @@ public final class PayrollAgentFactory {
         return engine == null ? "none" : "engine@" + System.identityHashCode(engine);
     }
 
-    /** 定义签名：任一字段变化都会生成新的缓存条目。 */
-    static String definitionSignature(AgentDefinition agent) {
+    /** 定义签名：任一字段变化都会生成新的缓存条目；同时写入路由快照供事后解释。 */
+    public static String definitionSignature(AgentDefinition agent) {
         if (agent == null) {
             return "";
         }

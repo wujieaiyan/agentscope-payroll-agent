@@ -103,6 +103,15 @@ public class ChatSessionController {
         return ApiResponse.ok(manager.traces(userId(request), sessionId, messageId));
     }
 
+    /** 单条助手消息的路由快照：路径、回退来源与参与智能体。 */
+    @GetMapping("/{sessionId}/messages/{messageId}/routing")
+    public ApiResponse routing(
+            @PathVariable long sessionId,
+            @PathVariable long messageId,
+            HttpServletRequest request) {
+        return ApiResponse.ok(manager.routing(userId(request), sessionId, messageId));
+    }
+
     /** 单条助手消息的团队运行、节点摘要、追溯引用与当前反馈。 */
     @GetMapping("/{sessionId}/messages/{messageId}/team")
     public ApiResponse team(
