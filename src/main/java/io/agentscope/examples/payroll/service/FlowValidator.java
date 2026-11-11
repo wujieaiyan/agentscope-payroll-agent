@@ -1,8 +1,10 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.FlowEdge;
 import io.agentscope.examples.payroll.domain.FlowNode;
+import io.agentscope.examples.payroll.skill.RoleSkills;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -42,6 +44,23 @@ public final class FlowValidator {
     }
 
     public static List<String> validate(FlowDefinition flow, Set<String> knownAgentIds) {
+        Map<String, AgentDefinition> agents = new LinkedHashMap<>();
+        if (knownAgentIds != null) {
+            for (String id : knownAgentIds) {
+                agents.put(id, null);
+            }
+        }
+        return validate(flow, agents);
+    }
+
+    /**
+     * 带智能体定义的校验：除结构外，还检查跨技能域串联是否显式声明了上下文策略。
+     *
+     * <p>不同角色的技能域互不兼容时，下游默认无法理解上游输出；如果没有明确选择
+     * “接收/不接收上游记录”，就应在保存/激活时阻断，避免情感专家把情绪文本喂给文书专家。
+     */
+    public static List<String> validate(
+            FlowDefinition flow, Map<String, AgentDefinition> agents) {
         List<String> errors = new ArrayList<>();
         if (flow == null) {
             return List.of("流程不能为空");
@@ -82,11 +101,17 @@ public final class FlowValidator {
                 errors.add("节点 " + id + " 类型非法：" + node.type());
                 continue;
             }
+            String contextMode = upper(node.contextMode());
+            if (!contextMode.isEmpty()
+                    && !FlowNode.CONTEXT_NONE.equals(contextMode)
+                    && !FlowNode.CONTEXT_UPSTREAM.equals(contextMode)) {
+                errors.add("节点 " + id + " 的上下文策略非法：" + node.contextMode());
+            }
             if (FlowNode.TYPE_AGENT.equals(type)) {
                 String agentId = trim(node.agentId());
                 if (agentId.isEmpty()) {
                     errors.add("智能体节点必须选择智能体：" + id);
-                } else if (knownAgentIds != null && !knownAgentIds.contains(agentId)) {
+                } else if (agents != null && !agents.containsKey(agentId)) {
                     errors.add("节点 " + id + " 引用的智能体不存在：" + agentId);
                 }
             } else if (FlowNode.TYPE_CONDITION.equals(type)) {
@@ -140,6 +165,39 @@ public final class FlowValidator {
             }
             outgoing.get(source).add(edge);
             incoming.get(target).add(edge);
+        }
+
+        // 跨技能域串联必须显式声明上下文策略，否则下游会误读上游角色输出。
+        if (agents != null && agents.values().stream().anyMatch(java.util.Objects::nonNull)) {
+            Set<String> reported = new HashSet<>();
+            for (FlowEdge edge : edges) {
+                FlowNode source = byId.get(trim(edge.source()));
+                FlowNode target = byId.get(trim(edge.target()));
+                if (source == null || target == null
+                        || !FlowNode.TYPE_AGENT.equals(upper(source.type()))
+                        || !FlowNode.TYPE_AGENT.equals(upper(target.type()))
+                        || !upper(target.contextMode()).isEmpty()) {
+                    continue;
+                }
+                AgentDefinition sourceAgent = agents.get(trim(source.agentId()));
+                AgentDefinition targetAgent = agents.get(trim(target.agentId()));
+                if (sourceAgent == null || targetAgent == null) {
+                    continue;
+                }
+                String sourceDomain = domain(sourceAgent);
+                String targetDomain = domain(targetAgent);
+                if (sourceDomain.isEmpty()
+                        || targetDomain.isEmpty()
+                        || sourceDomain.equals(targetDomain)) {
+                    continue;
+                }
+                if (reported.add(source.id() + ">" + target.id())) {
+                    errors.add(
+                            "节点「" + source.label() + "」→「" + target.label()
+                                    + "」属于跨角色串联（技能域不同），请在节点「" + target.label()
+                                    + "」的属性中明确选择“接收上游记录”或“不接收上游记录”");
+                }
+            }
         }
 
         long starts = nodes.stream().filter(n -> FlowNode.TYPE_START.equals(upper(n.type()))).count();
@@ -288,6 +346,20 @@ public final class FlowValidator {
             }
         }
         return visited < nodes.size();
+    }
+
+    /** 技能域：薪酬三角色视为同一域；其余按绑定技能集合精确比较。 */
+    private static String domain(AgentDefinition agent) {
+        List<String> skillIds = agent.skillIds();
+        if (skillIds == null || skillIds.isEmpty()) {
+            return "";
+        }
+        if (skillIds.contains(RoleSkills.CALCULATOR)
+                || skillIds.contains(RoleSkills.VALIDATOR)
+                || skillIds.contains(RoleSkills.ACCOUNTANT)) {
+            return "payroll";
+        }
+        return String.join(",", skillIds.stream().distinct().sorted().toList());
     }
 
     public static String trim(String value) {

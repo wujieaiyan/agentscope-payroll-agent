@@ -1370,7 +1370,7 @@ core `ReActAgent` + `DynamicSkillMiddleware` 全部切换到 `HarnessAgent`，�
 ### 边界与开关
 
 - `payroll.team.mode` / `PAYROLL_TEAM_MODE`：`OFF`（默认）完全不写团队数据；`STATIC`
-  在静态三阶段旁路记录；`SHADOW`/`ACTIVE` 已能解析，但当前行为与 `STATIC` 相同。
+  在静态三阶段旁路记录；`SHADOW` 旁路动态组队（P1）；`ACTIVE` 白名单内直接执行动态团队（P2）。
 - 记录失败只写 WARN 日志，不影响回答、金额或 SSE；共享 `HarnessAgent` 不会被关闭。
 - 运行保留默认 180 天，启动时 `teamRetentionRunner` 软归档超期 run（写 `archived_at`/
   `deleted_at`），节点与 trace 保留供审计。
@@ -1537,3 +1537,69 @@ P1 在 P0 数据地基上实现「意图 → 候选评分 → 计划 → 校验 
   - `team/ShadowReportServiceTest`：计划率/成功率/分层回退/分布与基线差异、空窗口零值。
   - `H2ChatShadowTraceStoreTest`：影子 trace 以 `message_id=0` 落库、按 `run_id` 读取且不污染消息依据。
 - 修复：候选评分对 `samples=0` 的统计条目改用角色先验，避免零样本候选被按 0 分排序。
+
+## 31. 动态团队 P2：ACTIVE 灰度与管理台团队页签（2026-11-10）
+
+P2 在 P1 的共享组队流水线上实现 ACTIVE 灰度：白名单内先尝试动态组队，成功直接接管
+回答，失败自动回退静态链路；同时新增只读管理台「团队运行」页签。默认开关仍为 `OFF`，
+生产建议按用户/会话白名单逐步放量。
+
+### 31.1 代码结构
+
+| 类 / 文件 | 职责 |
+| --- | --- |
+| `TeamPlanPipeline` | SHADOW/ACTIVE 共用的确定性流水线：意图 → 模板 → 短名单 → 计划 → 编译；返回 `Prepared`/`Fallback`，回退原因带 `L0`/`L2` 前缀 |
+| `TeamSettings` | 新增 `activeUserIds`/`activeSessionIds`；`activeAllowed(userId, sessionId)`：空名单表示全部放行 |
+| `ActiveTeamService` | 同步执行动态计划：`attempt(...)`、`completeSuccess(...)`、`completeFallback(...)`；负责主运行/回退落库与审计 |
+| `ChatSessionManager` | ACTIVE 成功时取消静态 run 并切换主运行；回退时保留静态主运行并关联 ACTIVE run；已记录 ACTIVE 尝试时不再触发 SHADOW |
+| `TeamAdminService` | 团队配置、运行列表（天/模式/状态/limit 与计数）、单次运行详情（摘要 + 节点记录） |
+| `TeamAdminController` | `/api/admin/team/config`、`/runs`、`/runs/{runId}`，均需 `agent:manage` |
+| `static/team.js` + `#tab-team` | Vue 3 只读页签：模式/白名单概览、筛选、运行表、节点详情与回退横幅 |
+
+### 31.2 触发与主运行语义
+
+1. 仅当本轮**未解析到全局默认流程**（`resolveActiveFlow()==null`）、当前为三段流水线、
+   且 `ActiveTeamService.enabled()`（ACTIVE + 白名单命中）时尝试动态组队；显式配置全局
+   默认流程时优先尊重人工流程。
+2. `attempt` 在请求线程的 `synchronized(lock)` 内同步执行（锁可重入），复用
+   `AgentFlowExecutor` 与 `executeDynamicFlow`，SSE 监听器照常转发节点进度。
+3. 成功：ACTIVE run `is_primary=true` 并绑定 `message_id`；静态 run 由
+   `StaticRunRecorder.cancelled` 记为 `CANCELLED`，不绑定消息；审计 `team.active.executed`。
+4. 回退：静态 run 正常落库并保持主运行；ACTIVE run 记 `FALLBACK`、
+   `fallback_of_run_id` 指向静态 run；审计 `team.active.fallback`；用户回答来自静态链路。
+5. 回退分层：`L0` 写操作/低置信度/OTHER/意图异常；`L2` 无模板/候选不足/计划校验失败；
+   `L3` 执行异常/超时/空答复。计划生成内的 Top-1 修复属 `L1`，不单独落运行。
+
+### 31.3 配置、日志与排障
+
+- `PAYROLL_TEAM_MODE=ACTIVE`；`PAYROLL_TEAM_ACTIVE_USER_IDS` /
+  `PAYROLL_TEAM_ACTIVE_SESSION_IDS` 逗号分隔，留空表示全部放行。
+- 启动日志：`[动态团队] 模式：ACTIVE，ACTIVE 白名单：用户=...，会话=...`、
+  `[动态团队] ACTIVE 编排已启用`、`[动态团队] ACTIVE 服务：已启用（按白名单生效）`。
+- 执行：`[动态团队] ACTIVE 答复：plan=...，template=...，智能体=...，工具=...`；
+  接管：`[动态团队] ACTIVE 主运行已绑定：runId=...` 与
+  `[动态团队] 静态运行已取消：runId=...，原因=动态团队已接管本轮回答`；
+  回退：`[动态团队] ACTIVE 回退已入栈：runId=...，reason=L0|L2|L3: ...`。
+- 有全局默认流程时 ACTIVE 不会触发：启动日志若出现
+  `[流程编排] 使用全局默认流程：...`，需先在「流程编排」清空/切换默认流程再验证。
+- 管理台：`GET /api/admin/team/config`、`/runs?days=7&mode=ACTIVE&status=FALLBACK`、
+  `/runs/{runId}`；页签「团队运行」需 `agent:manage`，只读，配置仍由环境变量/YAML 决定。
+
+### 31.4 本机验收（2026-11-10）
+
+- 全量 `mvn test`：**309 通过，0 失败**（P1 的 294 + P2 新增 15）。
+- 新增测试：`ActiveTeamServiceTest`（白名单用户/会话、STATIC 跳过、L0 写操作、
+  L2 空目录、成功绑定主运行、回退关联）、`ChatSessionManagerTeamTest`（ACTIVE 成功接管、
+  回退保留静态主运行、纯静态不变）、`TeamAdminServiceTest`（配置、筛选与计数、详情/缺失）。
+- 实测：清空 Nacos 默认流程后以 `PAYROLL_TEAM_MODE=ACTIVE` 启动 8099，提问
+  「帮我核算 EMP001 2026-10 的工资」触发 `CALC_VALIDATE`（calculator→validator，
+  2 节点、2 trace、约 32s），ACTIVE run #8 成为主运行并绑定消息 #9，静态 run #7
+  记 `CANCELLED`；`/api/admin/team/runs`、`/runs/8`、聊天团队面板与管理台页签均正常，
+  审计含 `team.active.executed`。验证后已恢复原默认流程 `flow-3a39f6a0`。
+
+### 31.5 已知限制（P2）
+
+- ACTIVE 目前只在没有全局默认流程时生效，避免覆盖人工编排的流程。
+- 管理台团队页签为只读，白名单/模式仍通过环境变量或 YAML 调整。
+- 同步执行会拉长本轮响应时延（实测约 32 秒），必要时可在 P3 改为异步等待 + SSE 进度。
+- 历史消息的团队卡片仍按需展开，只有新流式回答会自动展开 SHADOW/ACTIVE/回退卡片。

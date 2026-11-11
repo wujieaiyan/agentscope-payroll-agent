@@ -4,10 +4,30 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agentscope.examples.payroll.support.JsonSupport;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class TeamIntentTest {
+
+    @Test
+    @DisplayName("模型把数组字段输出成单个字符串时仍可解析")
+    void acceptsSingleValueForListFields() {
+        TeamIntent parsed =
+                JsonSupport.fromJson(
+                        """
+                        {"task_type":"CALCULATE","employee_ids":"EMP001",
+                         "employee_names":"张伟","departments":"研发部",
+                         "required_capabilities":"PAYROLL_CALC","confidence":0.9}
+                        """,
+                        TeamIntent.class);
+
+        assertEquals(List.of("EMP001"), parsed.employeeIds());
+        assertEquals(List.of("张伟"), parsed.employeeNames());
+        assertEquals(List.of("研发部"), parsed.departments());
+        assertEquals(List.of(TeamIntent.CAP_PAYROLL_CALC), parsed.requiredCapabilities());
+    }
 
     @Test
     @DisplayName("规则兜底识别核算任务、期间与工号")

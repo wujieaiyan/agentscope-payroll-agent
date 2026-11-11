@@ -1,6 +1,6 @@
 # 动态团队智能体规格（Dynamic Agent Team Spec）
 
-- 状态：**待确认**（本文件只定义方案，不含实现）
+- 状态：**P0–P2 已实现并验收（2026-11-10）**；P3 为后续增强。
 - 日期：2026-11-09
 - 适用系统：`agentscope-payroll-agent`
 - 关联文档：[agent-orchestration.md](agent-orchestration.md)、[agent-management.md](agent-management.md)、[agent-runtime-cache-spec.md](agent-runtime-cache-spec.md)、[multi-agent-handoff.md](multi-agent-handoff.md)
@@ -737,7 +737,9 @@ DEBUG 级别输出完整意图 JSON、候选清单、计划 JSON 与校验错误
 ## 19. 验收清单（Definition of Done）
 
 - [x] 「决策点」D1–D13 已确认并回填本文件（2026-11-09）；
-- [ ] P0 表结构、静态链路运行记录、反馈 API/UI 完成；
+- [x] P0 表结构、静态链路运行记录、反馈 API/UI 完成；
+- [x] P1 SHADOW 影子编排、报告与回退落库完成；
+- [x] P2 ACTIVE 白名单、回退链路与审计、管理台团队页签完成（2026-11-10）；
 - [ ] TeamIntent 解析准确率在黄金集 ≥ 90%；
 - [ ] PlanValidator 负例测试全部通过，危险计划 0；
 - [ ] 动态与静态在 5 条黄金问题上金额 100% 一致；

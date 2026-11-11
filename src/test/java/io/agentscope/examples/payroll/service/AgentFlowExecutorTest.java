@@ -24,7 +24,7 @@ class AgentFlowExecutorTest {
     private static final String QUESTION = "算一下张伟 2026-10 的工资";
 
     @Test
-    @DisplayName("线性流程把用户问题交给首个节点，并用最深节点文本作答")
+    @DisplayName("线性纯文本流程默认隔离上游，避免角色串联串线")
     void runsLinearFlow() {
         List<String> inputs = Collections.synchronizedList(new ArrayList<>());
         FlowDefinition flow =
@@ -43,6 +43,32 @@ class AgentFlowExecutorTest {
                                     node.id().toUpperCase(), List.of(), false);
                         });
 
+        assertEquals(List.of("a|" + QUESTION, "b|" + QUESTION), inputs);
+        assertEquals("B", outcome.reply());
+        assertTrue(outcome.nodeResults().containsKey("a"));
+        assertTrue(outcome.nodeResults().containsKey("b"));
+        assertTrue(outcome.nodeResults().containsKey("end"));
+    }
+
+    @Test
+    @DisplayName("显式选择接收上游记录时，下游拿到完整上游文本")
+    void upstreamContextModePassesRecords() {
+        List<String> inputs = Collections.synchronizedList(new ArrayList<>());
+        FlowDefinition flow =
+                flow(List.of(start(), agent("a", "A"), agentUpstream("b", "B"), end()),
+                        List.of(edge("e1", "start", "a"), edge("e2", "a", "b"),
+                                edge("e3", "b", "end")));
+
+        AgentFlowExecutor.execute(
+                flow,
+                QUESTION,
+                ChatStreamListener.NOOP,
+                (node, input, listener) -> {
+                    inputs.add(node.id() + "|" + input);
+                    return new AgentFlowExecutor.NodeResult(
+                            node.id().toUpperCase(), List.of(), false);
+                });
+
         assertEquals(
                 List.of(
                         "a|" + QUESTION,
@@ -50,10 +76,6 @@ class AgentFlowExecutorTest {
                                 + "\n\n【A记录】\nA"
                                 + "\n\n请按你的角色职责处理以上记录。"),
                 inputs);
-        assertEquals("B", outcome.reply());
-        assertTrue(outcome.nodeResults().containsKey("a"));
-        assertTrue(outcome.nodeResults().containsKey("b"));
-        assertTrue(outcome.nodeResults().containsKey("end"));
     }
 
     @Test
@@ -180,7 +202,7 @@ class AgentFlowExecutorTest {
         FlowDefinition flow =
                 flow(
                         List.of(start(), agent("calc", "CALC"), agent("a", "A"),
-                                agent("b", "B"), agent("join", "JOIN"), end()),
+                                agent("b", "B"), agentUpstream("join", "JOIN"), end()),
                         List.of(
                                 edge("e1", "start", "calc"),
                                 edge("e2", "calc", "a"),
@@ -397,6 +419,19 @@ class AgentFlowExecutorTest {
     private static FlowNode agent(String id, String name) {
         return new FlowNode(
                 id, FlowNode.TYPE_AGENT, name, "agent-" + id, null, null, 0.0, 0.0);
+    }
+
+    private static FlowNode agentUpstream(String id, String name) {
+        return new FlowNode(
+                id,
+                FlowNode.TYPE_AGENT,
+                name,
+                "agent-" + id,
+                null,
+                null,
+                0.0,
+                0.0,
+                FlowNode.CONTEXT_UPSTREAM);
     }
 
     private static FlowNode condition(String id) {

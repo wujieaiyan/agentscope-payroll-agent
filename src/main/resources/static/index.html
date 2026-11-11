@@ -24,6 +24,7 @@
       <div class="nav-group" data-nav-group="people">
         <button type="button" class="nav-group-title" aria-expanded="true">
           <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-icon" data-icon="ant:usergroup-add" aria-hidden="true"></span>
           <span class="nav-group-text">人事运营</span>
         </button>
         <div class="nav-children">
@@ -36,9 +37,20 @@
           <button data-tab="approval" data-permission="approval:manage" class="nav-item hidden" title="审批工作流"><span class="nav-icon" data-icon="ant:safety-certificate" aria-hidden="true"></span><span class="nav-text">审批工作流</span></button>
         </div>
       </div>
+      <div class="nav-group" data-nav-group="kb">
+        <button type="button" class="nav-group-title" aria-expanded="true">
+          <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-icon" data-icon="ant:database" aria-hidden="true"></span>
+          <span class="nav-group-text">知识库</span>
+        </button>
+        <div class="nav-children">
+          <button data-tab="kb" data-permission="kb:read" class="nav-item hidden" title="知识库"><span class="nav-icon" data-icon="ant:database" aria-hidden="true"></span><span class="nav-text">知识库</span></button>
+        </div>
+      </div>
       <div class="nav-group" data-nav-group="agent">
         <button type="button" class="nav-group-title" aria-expanded="true">
           <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-icon" data-icon="ant:robot" aria-hidden="true"></span>
           <span class="nav-group-text">智能体</span>
         </button>
         <div class="nav-children">
@@ -46,11 +58,13 @@
           <button data-tab="agents" data-permission="agent:manage" class="nav-item hidden" title="Agent 管理"><span class="nav-icon" data-icon="ant:robot" aria-hidden="true"></span><span class="nav-text">Agent 管理</span></button>
           <button data-tab="skills" data-permission="skill:manage" class="nav-item hidden" title="技能管理"><span class="nav-icon" data-icon="ant:tool" aria-hidden="true"></span><span class="nav-text">技能管理</span></button>
           <button data-tab="flows" data-permission="flow:manage" class="nav-item hidden" title="流程编排"><span class="nav-icon" data-icon="ant:branches" aria-hidden="true"></span><span class="nav-text">流程编排</span></button>
+          <button data-tab="team" data-permission="agent:manage" class="nav-item hidden" title="团队运行"><span class="nav-icon" data-icon="ant:deployment-unit" aria-hidden="true"></span><span class="nav-text">团队运行</span></button>
         </div>
       </div>
       <div class="nav-group" data-nav-group="system">
         <button type="button" class="nav-group-title" aria-expanded="true">
           <span class="nav-caret" aria-hidden="true"></span>
+          <span class="nav-group-icon" data-icon="ant:setting" aria-hidden="true"></span>
           <span class="nav-group-text">系统管理</span>
         </button>
         <div class="nav-children">
@@ -84,6 +98,8 @@
           <svg class="toggle-icon toggle-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         </button>
         <nav class="topbar-crumbs" aria-label="面包屑">
+          <span class="crumb home">首页</span>
+          <span class="crumb-sep">/</span>
           <span id="crumb-group">人事运营</span>
           <span class="crumb-sep">/</span>
           <span id="crumb-page" class="crumb current">员工档案</span>
@@ -96,6 +112,8 @@
         <button id="logout" class="ghost hidden">退出</button>
       </div>
     </header>
+
+    <div id="tab-strip" class="tab-strip" role="tablist" aria-label="已打开的页面"></div>
 
     <main>
       <div class="page-head">
@@ -116,12 +134,22 @@
   </div>
 
   <section id="tab-employees" class="tab active">
-    <div class="toolbar">
-      <button id="employee-new" class="primary hidden" data-permission="employee:write">新增员工</button>
-      <label class="button file-button hidden" data-permission="import:use">导入 Excel<input type="file" id="employee-import" accept=".xlsx,.xls" hidden></label>
-      <a class="button hidden" data-permission="import:use" href="/api/import/templates/employees">下载导入模板</a>
-      <label class="inline"><input type="checkbox" id="employee-include-inactive"> 显示停用员工</label>
-      <span class="hint">停用员工不再参与核算与批量出账，历史批次不受影响。</span>
+    <div id="employee-stats" class="stat-grid"></div>
+    <div class="toolbar filter-bar">
+      <label class="filter-field"><span>工号 / 姓名</span><input type="search" id="employee-filter-keyword" placeholder="输入工号或姓名"></label>
+      <label class="filter-field"><span>部门</span><select id="employee-filter-department"><option value="">全部部门</option></select></label>
+      <label class="filter-field"><span>状态</span><select id="employee-filter-status">
+        <option value="">全部状态</option>
+        <option value="active">在职</option>
+        <option value="inactive">停用</option>
+      </select></label>
+      <button id="employee-filter-query" class="primary">查询</button>
+      <button id="employee-filter-reset">重置</button>
+      <span class="filter-actions">
+        <button id="employee-new" class="success hidden" data-permission="employee:write">+ 新增员工</button>
+        <label class="button file-button hidden" data-permission="import:use">导入 Excel<input type="file" id="employee-import" accept=".xlsx,.xls" hidden></label>
+        <a class="button hidden" data-permission="import:use" href="/api/import/templates/employees">下载导入模板</a>
+      </span>
     </div>
     <form id="employee-form" class="card form hidden">
       <h2 id="employee-form-title">新增员工</h2>
@@ -145,17 +173,24 @@
         <button type="button" id="employee-cancel">取消</button>
       </div>
     </form>
-    <div class="card">
-      <table>
-        <thead>
-        <tr>
-          <th>工号</th><th>姓名</th><th>部门</th><th>岗位</th><th>城市</th>
-          <th class="num">基本工资</th><th class="num">岗位津贴</th><th>公积金</th>
-          <th>邮箱</th><th>状态</th><th>操作</th>
-        </tr>
-        </thead>
-        <tbody id="employee-rows"></tbody>
-      </table>
+    <div class="card table-card">
+      <div class="panel-head">
+        <h2>员工列表</h2>
+        <span class="panel-extra">停用员工不参与核算与批量出账，历史批次不受影响</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+          <tr>
+            <th class="col-index">序号</th><th>头像</th><th>工号</th><th>员工姓名</th><th>部门</th><th>岗位</th><th>城市</th>
+            <th class="num">基本工资</th><th class="num">岗位津贴</th><th>公积金</th>
+            <th>邮箱</th><th>状态</th><th>操作</th>
+          </tr>
+          </thead>
+          <tbody id="employee-rows"></tbody>
+        </table>
+      </div>
+      <div class="table-foot"><span id="employee-count">共 0 条</span><span class="hint">金额单位：元</span></div>
     </div>
   </section>
 
@@ -178,7 +213,7 @@
       </div>
       <div class="actions"><button type="submit" class="primary">保存考核</button></div>
     </form>
-    <div class="card">
+    <div class="card table-card">
       <table>
         <thead>
         <tr><th>期间</th><th>工号</th><th>姓名</th><th class="num">分数</th><th class="num">系数</th><th>评语</th><th>操作</th></tr>
@@ -222,7 +257,7 @@
       <a class="button hidden" data-permission="import:use" href="/api/import/templates/attendance">下载导入模板</a>
       <span class="hint">考勤由 HR 录入，系统不会按全勤推算；缺勤数据缺失的员工会在核算中失败并给出原因。</span>
     </div>
-    <div class="card">
+    <div class="card table-card">
       <table>
         <thead>
         <tr>
@@ -279,7 +314,7 @@
       <p id="run-hint" class="hint"></p>
     </div>
 
-    <div id="email-report" class="card hidden">
+    <div id="email-report" class="card table-card hidden">
       <h2>邮件发送报告</h2>
       <div id="email-report-summary" class="cards small"></div>
       <div class="table-wrap">
@@ -290,7 +325,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card table-card">
       <div class="panel-head">
         <h2>历史批次</h2>
         <button id="runs-refresh">刷新</button>
@@ -309,7 +344,7 @@
       <button id="tasks-refresh">刷新待办</button>
       <span class="hint">仅显示当前审批节点由你处理（角色、账号或审批权限）的批次；提交人不能审批自己提交的批次。</span>
     </div>
-    <div class="card">
+    <div class="card table-card">
       <div class="table-wrap">
         <table>
           <thead>
@@ -361,7 +396,7 @@
         <button type="button" id="flow-cancel">取消</button>
       </div>
     </form>
-    <div class="card">
+    <div class="card table-card">
       <table>
         <thead>
         <tr><th>名称</th><th>范围</th><th>金额区间</th><th>审批节点</th><th class="num">优先级</th><th>状态</th><th>说明</th><th>操作</th></tr>
@@ -377,6 +412,7 @@
       <span class="badge" id="chat-agent">核算智能体加载中…</span>
       <span class="hint">每个会话拥有独立上下文，消息仅本人可见；对话只做查询、核算与解释，金额始终来自确定性引擎。</span>
     </div>
+    <div id="chat-mode-banner" class="chat-mode-banner hidden"></div>
     <div class="chat-layout">
       <aside class="card chat-sidebar">
         <div class="chat-sidebar-head">
@@ -411,9 +447,20 @@
   </section>
 
   <section id="tab-users" class="tab">
-    <div class="toolbar">
-      <button id="user-new" class="primary">新增用户</button>
-      <span class="hint">停用用户后无法登录；系统至少保留一名启用状态的管理员。</span>
+    <div id="user-stats" class="stat-grid"></div>
+    <div class="toolbar filter-bar">
+      <label class="filter-field"><span>账号 / 姓名</span><input type="search" id="user-filter-keyword" placeholder="输入登录账号或姓名"></label>
+      <label class="filter-field"><span>角色</span><select id="user-filter-role"><option value="">全部角色</option></select></label>
+      <label class="filter-field"><span>状态</span><select id="user-filter-status">
+        <option value="">全部状态</option>
+        <option value="active">启用</option>
+        <option value="inactive">停用</option>
+      </select></label>
+      <button id="user-filter-query" class="primary">查询</button>
+      <button id="user-filter-reset">重置</button>
+      <span class="filter-actions">
+        <button id="user-new" class="success">+ 新增用户</button>
+      </span>
     </div>
     <form id="user-form" class="card form hidden">
       <h2 id="user-form-title">新增用户</h2>
@@ -431,16 +478,23 @@
         <button type="button" id="user-cancel">取消</button>
       </div>
     </form>
-    <div class="card">
-      <table>
-        <thead>
-        <tr>
-          <th>用户名</th><th>姓名</th><th>角色</th><th>部门</th>
-          <th>状态</th><th>最近登录</th><th>操作</th>
-        </tr>
-        </thead>
-        <tbody id="user-rows"></tbody>
-      </table>
+    <div class="card table-card">
+      <div class="panel-head">
+        <h2>用户列表</h2>
+        <span class="panel-extra">停用用户后无法登录；系统至少保留一名启用状态的管理员</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+          <tr>
+            <th class="col-index">序号</th><th>头像</th><th>登录账号</th><th>员工姓名</th><th>角色</th><th>部门</th>
+            <th>启用状态</th><th>最近登录</th><th>操作</th>
+          </tr>
+          </thead>
+          <tbody id="user-rows"></tbody>
+        </table>
+      </div>
+      <div class="table-foot"><span id="user-count">共 0 条</span><span class="hint">角色权限决定可访问的菜单与接口</span></div>
     </div>
   </section>
 
@@ -461,7 +515,7 @@
         <button type="button" id="department-cancel">取消</button>
       </div>
     </form>
-    <div class="card">
+    <div class="card table-card">
       <table>
         <thead>
         <tr><th>部门</th><th>说明</th><th class="num">员工数</th><th class="num">用户数</th><th>状态</th><th>操作</th></tr>
@@ -505,6 +559,14 @@
   <section class="tab" id="tab-flows">
     <div id="flows-app"></div>
   </section>
+
+  <section class="tab" id="tab-team">
+    <div id="team-app"></div>
+  </section>
+
+  <section class="tab" id="tab-kb">
+    <div id="kb-app" class="kb-app"></div>
+  </section>
     </main>
   </div>
 </div>
@@ -524,6 +586,17 @@
   </form>
 </dialog>
 
+<dialog id="kb-dialog" class="dialog kb-dialog">
+  <form id="kb-dialog-form">
+    <h2 id="kb-dialog-title">知识库</h2>
+    <div id="kb-dialog-body"></div>
+    <div class="actions">
+      <button type="submit" id="kb-dialog-ok" class="primary">确定</button>
+      <button type="button" id="kb-dialog-cancel">取消</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" class="toast hidden"></div>
 <script src="vendor/vue.global.prod.js"></script>
 <script src="vendor/vue-flow-core.iife.js"></script>
@@ -532,5 +605,7 @@
 <script src="agents.js"></script>
 <script src="skills.js"></script>
 <script src="flows.js"></script>
+<script src="team.js"></script>
+<script src="kb.js"></script>
 </body>
 </html>

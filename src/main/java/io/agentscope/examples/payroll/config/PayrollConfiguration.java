@@ -17,40 +17,50 @@ import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatFeedbackService;
+import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
 import io.agentscope.examples.payroll.service.ExcelImportService;
+import io.agentscope.examples.payroll.service.LoginRateLimiter;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.PayrollServices;
+import io.agentscope.examples.payroll.service.SessionLockService;
 import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
+import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.ShadowReportService;
 import io.agentscope.examples.payroll.team.ShadowTeamService;
+import io.agentscope.examples.payroll.team.TeamAdminService;
+import io.agentscope.examples.payroll.team.TeamLlmClient;
 import io.agentscope.examples.payroll.team.TeamMode;
 import io.agentscope.examples.payroll.team.TeamSettings;
 import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import org.springframework.core.env.Environment;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
@@ -64,8 +74,33 @@ public class PayrollConfiguration {
     public PayrollDatabase payrollDatabase(
             @Value("${payroll.db.url}") String url,
             @Value("${payroll.db.user}") String user,
-            @Value("${payroll.db.password}") String password) {
-        return PayrollDatabase.open(url, user, password);
+            @Value("${payroll.db.password}") String password,
+            @Value("${payroll.db.pool-size:16}") int poolSize) {
+        return PayrollDatabase.open(url, user, password, poolSize);
+    }
+
+    /** redis profile 下注入 StringRedisTemplate；未启用 Redis 时为 null，限流/配额自动回退内存。 */
+    @Bean
+    public LoginRateLimiter loginRateLimiter(
+            ObjectProvider<StringRedisTemplate> redisProvider,
+            @Value("${payroll.security.login-max-failures:5}") int maxFailures,
+            @Value("${payroll.security.login-lock-minutes:5}") int lockMinutes) {
+        return new LoginRateLimiter(redisProvider.getIfAvailable(), maxFailures, lockMinutes);
+    }
+
+    @Bean
+    public ChatQuotaService chatQuotaService(
+            ObjectProvider<StringRedisTemplate> redisProvider,
+            @Value("${payroll.chat.max-concurrent-per-user:2}") int maxConcurrent) {
+        return new ChatQuotaService(redisProvider.getIfAvailable(), maxConcurrent);
+    }
+
+    /** redis profile 下同一会话跨实例互斥；未启用 Redis 时退化为进程内锁。 */
+    @Bean
+    public SessionLockService sessionLockService(
+            ObjectProvider<StringRedisTemplate> redisProvider,
+            @Value("${payroll.chat.session-lock-minutes:15}") int ttlMinutes) {
+        return new SessionLockService(redisProvider.getIfAvailable(), ttlMinutes);
     }
 
     @Bean
@@ -125,6 +160,7 @@ public class PayrollConfiguration {
             VectorMemoryService memory,
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry,
+            ActiveTeamService activeTeamService,
             @Value("${payroll.orchestrator:legacy}") String orchestrator) {
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
@@ -143,10 +179,11 @@ public class PayrollConfiguration {
                         userId,
                         graph,
                         memory,
-                        agentRegistry::activeAgent,
+                        agentRegistry::effectiveAgent,
                         flowRegistry::activeFlow,
                         flowRegistry::activeFlowId,
-                        agentRegistry::list);
+                        agentRegistry::list,
+                        activeTeamService);
     }
 
     /** 智能体定义与全局核算智能体设置都以 Nacos 为存储，管理接口与运行时共享同一实例。 */
@@ -266,19 +303,79 @@ public class PayrollConfiguration {
             @Value("${payroll.team.mode:OFF}") String mode,
             @Value("${payroll.team.retention-days:180}") int retentionDays,
             @Value("${payroll.team.stats-window-days:30}") int statsWindowDays,
-            @Value("${payroll.team.shadow-sample-rate:0.15}") double shadowSampleRate) {
+            @Value("${payroll.team.shadow-sample-rate:0.15}") double shadowSampleRate,
+            @Value("${payroll.team.active-user-ids:}") String activeUserIds,
+            @Value("${payroll.team.active-session-ids:}") String activeSessionIds) {
         TeamMode parsed = TeamMode.from(mode);
         if (mode != null && !mode.isBlank() && !parsed.name().equalsIgnoreCase(mode.trim())) {
             log.warn("[动态团队] 未知模式 {}，按 OFF 处理", mode);
         }
-        log.info("[动态团队] 模式：{}", parsed);
-        return new TeamSettings(parsed, retentionDays, statsWindowDays, shadowSampleRate);
+        Set<Long> users = parseIds(activeUserIds, "active-user-ids");
+        Set<Long> sessions = parseIds(activeSessionIds, "active-session-ids");
+        log.info(
+                "[动态团队] 模式：{}，ACTIVE 白名单：用户={}，会话={}",
+                parsed,
+                users.isEmpty() ? "全部" : users,
+                sessions.isEmpty() ? "全部" : sessions);
+        return new TeamSettings(
+                parsed, retentionDays, statsWindowDays, shadowSampleRate, users, sessions);
+    }
+
+    private static Set<Long> parseIds(String value, String key) {
+        Set<Long> ids = new LinkedHashSet<>();
+        if (value == null || value.isBlank()) {
+            return ids;
+        }
+        for (String part : value.split("[,;\\s]+")) {
+            if (part.isBlank()) {
+                continue;
+            }
+            try {
+                ids.add(Long.parseLong(part.trim()));
+            } catch (NumberFormatException e) {
+                log.warn("[动态团队] 忽略非法 {}：{}", key, part);
+            }
+        }
+        return ids;
     }
 
     @Bean
     public ShadowReportService shadowReportService(
             H2AgentTeamStore agentTeamStore, TeamSettings teamSettings) {
         return new ShadowReportService(agentTeamStore, teamSettings);
+    }
+
+    @Bean
+    public TeamAdminService teamAdminService(
+            TeamSettings teamSettings, H2AgentTeamStore agentTeamStore) {
+        return new TeamAdminService(teamSettings, agentTeamStore);
+    }
+
+    @Bean
+    public TeamLlmClient teamLlmClient() {
+        return new TeamLlmClient();
+    }
+
+    @Bean
+    public ActiveTeamService activeTeamService(
+            TeamSettings teamSettings,
+            H2AgentTeamStore agentTeamStore,
+            AgentStatsService agentStatsService,
+            NacosAgentRegistry agentRegistry,
+            TeamLlmClient teamLlmClient,
+            AuditService auditService) {
+        ActiveTeamService service =
+                new ActiveTeamService(
+                        teamSettings,
+                        agentTeamStore,
+                        agentStatsService,
+                        agentRegistry::list,
+                        teamLlmClient,
+                        auditService);
+        log.info(
+                "[动态团队] ACTIVE 服务：{}",
+                service.enabled() ? "已启用（按白名单生效）" : "未启用");
+        return service;
     }
 
     @Bean(destroyMethod = "close")
@@ -288,7 +385,8 @@ public class PayrollConfiguration {
             H2ChatStore chatStore,
             AgentStatsService agentStatsService,
             NacosAgentRegistry agentRegistry,
-            PayrollChatFactory payrollChatFactory) {
+            PayrollChatFactory payrollChatFactory,
+            TeamLlmClient teamLlmClient) {
         ShadowTeamService service =
                 new ShadowTeamService(
                         teamSettings,
@@ -296,7 +394,9 @@ public class PayrollConfiguration {
                         chatStore,
                         agentStatsService,
                         agentRegistry::list,
-                        payrollChatFactory);
+                        payrollChatFactory,
+                        teamLlmClient,
+                        null);
         log.info("[动态团队] 影子服务：{}", service.enabled() ? "已启用" : "未启用");
         return service;
     }
@@ -308,13 +408,21 @@ public class PayrollConfiguration {
             VectorMemoryService memory,
             H2AgentTeamStore agentTeamStore,
             TeamSettings teamSettings,
-            ShadowTeamService shadowTeamService) {
+            ShadowTeamService shadowTeamService,
+            ActiveTeamService activeTeamService,
+            SessionLockService sessionLockService,
+            @Value("${payroll.chat.cache-max-sessions:200}") int cacheMaxSessions,
+            @Value("${payroll.chat.cache-idle-minutes:60}") int cacheIdleMinutes) {
         return new ChatSessionManager(
                 chatStore,
                 chatFactory,
                 memory,
                 new StaticRunRecorder(agentTeamStore, teamSettings),
-                shadowTeamService);
+                shadowTeamService,
+                activeTeamService,
+                sessionLockService,
+                cacheMaxSessions,
+                cacheIdleMinutes);
     }
 
     @Bean

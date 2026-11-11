@@ -48,7 +48,8 @@ class NacosSkillRegistryTest {
         NacosSkillRegistry registry = registry(true);
 
         SkillSummary saved =
-                registry.create("payroll-auditor", "薪酬审计角色", "## 角色\n独立审计工资数据。");
+                registry.create(
+                        "payroll-auditor", "薪酬审计角色", roleContent("独立审计工资数据。"));
 
         assertEquals("payroll-auditor", saved.id());
         assertEquals("nacos", saved.source());
@@ -95,7 +96,7 @@ class NacosSkillRegistryTest {
         nacos = new FakeNacosServer();
         NacosSkillRegistry registry = registry(true);
 
-        registry.update(RoleSkills.CALCULATOR, "覆盖版计算角色", "## 角色\n来自 Nacos 的覆盖版。");
+        registry.update(RoleSkills.CALCULATOR, "覆盖版计算角色", roleContent("来自 Nacos 的覆盖版。"));
         SkillSummary overridden =
                 registry.list().stream()
                         .filter(skill -> skill.id().equals(RoleSkills.CALCULATOR))
@@ -200,6 +201,20 @@ class NacosSkillRegistryTest {
                         PayrollException.class,
                         () -> registry.create("payroll-auditor", "", "正文"));
         assertTrue(error.getMessage().contains("Nacos 未启用"), error.getMessage());
+    }
+
+    private static String roleContent(String marker) {
+        return "## 角色\n"
+                + marker
+                + "\n\n## 规则\n"
+                + "1. 先确认用户诉求与处理对象，再给出结论。\n"
+                + "2. 只基于已获取的数据作答，不得编造或推测缺失数据。\n"
+                + "3. 输出先结论、后依据，最后列出风险与待确认项。\n\n"
+                + "## 输出要求\n"
+                + "使用简洁中文分点作答，金额保留两位小数，不输出内部工具调用过程。\n"
+                + "涉及政策口径时注明数据来源；信息缺失时明确说明缺少哪些字段，并请用户补充。\n"
+                + "每次答复结尾给出下一步建议，便于用户确认是否需要继续处理。\n"
+                + "若用户问题超出本角色职责，直接说明原因并给出可执行的替代方案。\n";
     }
 
     private NacosSkillRegistry registry(boolean enabled) {

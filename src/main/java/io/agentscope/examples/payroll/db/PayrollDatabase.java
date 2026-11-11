@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.db;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.agentscope.examples.payroll.domain.AttendanceSummary;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.MonthlyVariablePay;
@@ -21,9 +23,13 @@ import java.time.YearMonth;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.flywaydb.core.Flyway;
 
 /**
- * H2 文件数据库：管理台维护的员工、考核、城市政策与工资批次都落在这里。
+ * 薪酬管理台数据库：默认 H2 文件库，部门部署可切换 MySQL。
+ *
+ * <p>H2 使用内联 DDL 幂等建表；MySQL 使用 Flyway（classpath:db/migration/mysql）版本化建表，
+ * 并由 HikariCP 提供连接池。两种库共用同一套仓储代码，方言差异集中在 upsert 与种子 SQL。
  *
  * <p>默认文件为 {@code ./data/payroll.mv.db}。首次启动自动建表，并把 classpath 中的演示数据
  * 迁移进库；之后所有修改都以数据库为准。
@@ -509,11 +515,48 @@ public final class PayrollDatabase {
     private final String url;
     private final String user;
     private final String password;
+    private final boolean mysql;
+    private final HikariDataSource pool;
 
-    private PayrollDatabase(String url, String user, String password) {
+    private PayrollDatabase(String url, String user, String password, int poolSize) {
         this.url = url;
         this.user = user;
         this.password = password;
+        this.mysql = url.startsWith("jdbc:mysql:");
+        this.pool = mysql ? createPool(url, user, password, poolSize) : null;
+    }
+
+    /** MySQL 使用连接池；H2 保持单写者直连，避免本地/测试创建大量池与后台线程。 */
+    private static HikariDataSource createPool(
+            String url, String user, String password, int poolSize) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url);
+        config.setUsername(user);
+        config.setPassword(password);
+        config.setPoolName("payroll-mysql");
+        config.setMaximumPoolSize(poolSize > 0 ? poolSize : envInt("PAYROLL_DB_POOL_SIZE", 16));
+        config.setMinimumIdle(2);
+        config.setConnectionTimeout(10_000);
+        config.setIdleTimeout(600_000);
+        config.setMaxLifetime(1_800_000);
+        config.setAutoCommit(true);
+        config.addDataSourceProperty("cachePrepStmts", "true");
+        config.addDataSourceProperty("prepStmtCacheSize", "250");
+        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
+        config.addDataSourceProperty("useServerPrepStmts", "true");
+        return new HikariDataSource(config);
+    }
+
+    private static int envInt(String name, int fallback) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     public static PayrollDatabase openDefault() {
@@ -523,13 +566,18 @@ public final class PayrollDatabase {
         return open(url, user, password);
     }
 
-    /** 按显式连接参数初始化数据库，供 Spring 配置或嵌入式场景使用。 */
     public static PayrollDatabase open(String url, String user, String password) {
+        return open(url, user, password, -1);
+    }
+
+    /** 按显式连接参数初始化数据库，供 Spring 配置或嵌入式场景使用。 */
+    public static PayrollDatabase open(String url, String user, String password, int poolSize) {
         PayrollDatabase database =
                 new PayrollDatabase(
                         url == null || url.isBlank() ? DEFAULT_URL : url.trim(),
                         user == null || user.isBlank() ? DEFAULT_USER : user,
-                        password == null ? DEFAULT_PASSWORD : password);
+                        password == null ? DEFAULT_PASSWORD : password,
+                        poolSize);
         database.initialize();
         return database;
     }
@@ -540,26 +588,52 @@ public final class PayrollDatabase {
                 new PayrollDatabase(
                         "jdbc:h2:mem:payroll-" + suffix + ";DB_CLOSE_DELAY=-1",
                         DEFAULT_USER,
-                        DEFAULT_PASSWORD);
+                        DEFAULT_PASSWORD,
+                        -1);
         database.initialize();
         return database;
     }
 
     public Connection connection() throws SQLException {
-        return DriverManager.getConnection(url, user, password);
+        return pool != null ? pool.getConnection() : DriverManager.getConnection(url, user, password);
     }
 
     public String url() {
         return url;
     }
 
+    public boolean isMysql() {
+        return mysql;
+    }
+
+    /** 按方言选择 SQL；MySQL 分支只在 mysql profile 下使用。 */
+    public String dialect(String h2Sql, String mysqlSql) {
+        return mysql ? mysqlSql : h2Sql;
+    }
+
+    /** JVM 退出或 Spring 容器关闭时释放连接池。 */
+    public void close() {
+        if (pool != null) {
+            pool.close();
+        }
+    }
+
     private void initialize() {
-        ensureDirectory();
+        if (mysql) {
+            migrateMysql();
+        } else {
+            ensureDirectory();
+        }
         try (Connection connection = connection()) {
             connection.setAutoCommit(false);
-            try (Statement statement = connection.createStatement()) {
-                for (String ddl : SCHEMA) {
-                    statement.execute(ddl);
+            if (!mysql) {
+                try (Statement statement = connection.createStatement()) {
+                    for (String ddl : SCHEMA) {
+                        statement.execute(ddl);
+                    }
+                    for (String ddl : io.agentscope.examples.payroll.kb.KbSchema.DDL) {
+                        statement.execute(ddl);
+                    }
                 }
             }
             seedCityPolicies(connection);
@@ -568,7 +642,27 @@ public final class PayrollDatabase {
             seedApprovalFlows(connection);
             connection.commit();
         } catch (SQLException e) {
-            throw new IllegalStateException("初始化 H2 数据库失败：" + e.getMessage(), e);
+            throw new IllegalStateException(
+                    "初始化 " + (mysql ? "MySQL" : "H2") + " 数据库失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** MySQL 表结构由 Flyway 版本化管理，避免内联 DDL 与已有库结构漂移。 */
+    private void migrateMysql() {
+        Flyway flyway =
+                Flyway.configure()
+                        .dataSource(pool)
+                        .locations("classpath:db/migration/mysql")
+                        .table("flyway_schema_history")
+                        .load();
+        try {
+            flyway.migrate();
+        } catch (RuntimeException e) {
+            throw new IllegalStateException(
+                    "MySQL 表结构迁移失败：目标库必须为空库或已由 Flyway 管理；"
+                            + "请勿手工建表，也不要指向已有业务表的库。原始错误："
+                            + e.getMessage(),
+                    e);
         }
     }
 
@@ -591,11 +685,17 @@ public final class PayrollDatabase {
 
     private void seedCityPolicies(Connection connection) throws SQLException {
         String sql =
-                """
-                INSERT INTO city_policies (city, policy_json, updated_at)
-                SELECT ?, ?, ? WHERE NOT EXISTS
-                    (SELECT 1 FROM city_policies WHERE city = ?)
-                """;
+                dialect(
+                        """
+                        INSERT INTO city_policies (city, policy_json, updated_at)
+                        SELECT ?, ?, ? WHERE NOT EXISTS
+                            (SELECT 1 FROM city_policies WHERE city = ?)
+                        """,
+                        """
+                        INSERT INTO city_policies (city, policy_json, updated_at)
+                        SELECT ?, ?, ? FROM DUAL WHERE NOT EXISTS
+                            (SELECT 1 FROM city_policies WHERE city = ?)
+                        """);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (Map.Entry<String, PayrollPolicy> entry : DEMO_CITY_POLICIES.entrySet()) {
                 statement.setString(1, entry.getKey());
@@ -720,11 +820,22 @@ public final class PayrollDatabase {
         scores.put("EMP005", new BigDecimalScore("85.00", "入职后快速接手算法模块"));
         scores.put("EMP006", new BigDecimalScore("82.00", "招聘完成率达标"));
         String sql =
-                """
-                MERGE INTO performance_reviews
-                    (employee_id, period, score, coefficient, review_comment, updated_at)
-                KEY(employee_id, period) VALUES (?, ?, ?, 1.0000, ?, ?)
-                """;
+                dialect(
+                        """
+                        MERGE INTO performance_reviews
+                            (employee_id, period, score, coefficient, review_comment, updated_at)
+                        KEY(employee_id, period) VALUES (?, ?, ?, 1.0000, ?, ?)
+                        """,
+                        """
+                        INSERT INTO performance_reviews
+                            (employee_id, period, score, coefficient, review_comment, updated_at)
+                        VALUES (?, ?, ?, 1.0000, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            score = VALUES(score),
+                            coefficient = VALUES(coefficient),
+                            review_comment = VALUES(review_comment),
+                            updated_at = VALUES(updated_at)
+                        """);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (Map.Entry<String, BigDecimalScore> entry : scores.entrySet()) {
                 statement.setString(1, entry.getKey());
@@ -741,11 +852,17 @@ public final class PayrollDatabase {
     /** 部门与内置角色只在缺失时补齐，不覆盖管理台已经调整过的数据。 */
     private void seedIdentityData(Connection connection) throws SQLException {
         String departmentSql =
-                """
-                INSERT INTO departments (name, description, active, created_at)
-                SELECT ?, ?, TRUE, ? WHERE NOT EXISTS
-                    (SELECT 1 FROM departments WHERE name = ?)
-                """;
+                dialect(
+                        """
+                        INSERT INTO departments (name, description, active, created_at)
+                        SELECT ?, ?, TRUE, ? WHERE NOT EXISTS
+                            (SELECT 1 FROM departments WHERE name = ?)
+                        """,
+                        """
+                        INSERT INTO departments (name, description, active, created_at)
+                        SELECT ?, ?, TRUE, ? FROM DUAL WHERE NOT EXISTS
+                            (SELECT 1 FROM departments WHERE name = ?)
+                        """);
         try (PreparedStatement statement = connection.prepareStatement(departmentSql)) {
             for (String name : List.of("研发部", "销售部", "财务部", "生产部", "人力资源部")) {
                 statement.setString(1, name);
@@ -770,11 +887,17 @@ public final class PayrollDatabase {
         }
 
         String roleSql =
-                """
-                INSERT INTO roles (code, name, description, permissions_json, builtin, created_at)
-                SELECT ?, ?, ?, ?, TRUE, ? WHERE NOT EXISTS
-                    (SELECT 1 FROM roles WHERE code = ?)
-                """;
+                dialect(
+                        """
+                        INSERT INTO roles (code, name, description, permissions_json, builtin, created_at)
+                        SELECT ?, ?, ?, ?, TRUE, ? WHERE NOT EXISTS
+                            (SELECT 1 FROM roles WHERE code = ?)
+                        """,
+                        """
+                        INSERT INTO roles (code, name, description, permissions_json, builtin, created_at)
+                        SELECT ?, ?, ?, ?, TRUE, ? FROM DUAL WHERE NOT EXISTS
+                            (SELECT 1 FROM roles WHERE code = ?)
+                        """);
         Map<String, String> names =
                 Map.of(
                         Permissions.ROLE_ADMIN, "系统管理员",
@@ -810,13 +933,21 @@ public final class PayrollDatabase {
     /** 首次启动写入一条全局默认审批链，保证工资批次开箱即可提交审批。 */
     private void seedApprovalFlows(Connection connection) throws SQLException {
         String sql =
-                """
-                INSERT INTO approval_flows
-                    (name, scope_type, scope_value, min_amount, max_amount, priority, enabled,
-                     description, created_at, updated_at)
-                SELECT ?, 'GLOBAL', '*', 0, NULL, 100, TRUE, ?, ?, ?
-                WHERE NOT EXISTS (SELECT 1 FROM approval_flows)
-                """;
+                dialect(
+                        """
+                        INSERT INTO approval_flows
+                            (name, scope_type, scope_value, min_amount, max_amount, priority, enabled,
+                             description, created_at, updated_at)
+                        SELECT ?, 'GLOBAL', '*', 0, NULL, 100, TRUE, ?, ?, ?
+                        WHERE NOT EXISTS (SELECT 1 FROM approval_flows)
+                        """,
+                        """
+                        INSERT INTO approval_flows
+                            (name, scope_type, scope_value, min_amount, max_amount, priority, enabled,
+                             description, created_at, updated_at)
+                        SELECT ?, 'GLOBAL', '*', 0, NULL, 100, TRUE, ?, ?, ? FROM DUAL
+                        WHERE NOT EXISTS (SELECT 1 FROM approval_flows)
+                        """);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             LocalDateTime now = LocalDateTime.now();
             statement.setString(1, "默认审批链");

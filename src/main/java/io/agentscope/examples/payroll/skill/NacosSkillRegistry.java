@@ -33,6 +33,10 @@ public final class NacosSkillRegistry {
     private static final int MAX_ID_LENGTH = 64;
     private static final int MAX_DESCRIPTION_LENGTH = 200;
     private static final int MAX_CONTENT_LENGTH = 200_000;
+    private static final int MIN_CONTENT_LENGTH = 200;
+    private static final Pattern HEADING_PATTERN = Pattern.compile("(?m)^#{1,3}\\s+\\S+");
+    private static final List<String> ROLE_KEYWORDS =
+            List.of("规则", "步骤", "流程", "输出", "要求", "职责", "角色");
 
     /** 管理台列表项；contentLength 为去掉 frontmatter 后的正文字数。 */
     @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
@@ -185,6 +189,19 @@ public final class NacosSkillRegistry {
         }
         if (cleanContent.length() > MAX_CONTENT_LENGTH) {
             throw new PayrollException("提示词正文不能超过 " + MAX_CONTENT_LENGTH + " 字");
+        }
+        // 技能正文会直接注入系统提示词；过短或没有结构的正文会让模型自行补全角色设定。
+        if (cleanContent.length() < MIN_CONTENT_LENGTH) {
+            throw new PayrollException(
+                    "提示词正文过于简短（" + cleanContent.length() + " 字），至少需要 "
+                            + MIN_CONTENT_LENGTH + " 字，并说明角色、规则与输出要求");
+        }
+        if (!HEADING_PATTERN.matcher(cleanContent).find()) {
+            throw new PayrollException("提示词正文需要至少一个 Markdown 标题（如 ## 角色 / ## 规则）");
+        }
+        if (ROLE_KEYWORDS.stream().noneMatch(cleanContent::contains)) {
+            throw new PayrollException(
+                    "提示词正文需要包含角色规则，至少出现“角色 / 规则 / 步骤 / 输出要求”之一");
         }
         String markdown = composeMarkdown(skillId, cleanDescription, cleanContent);
         if (!client.publish(skillId + DATA_ID_SUFFIX, markdown, "markdown")) {

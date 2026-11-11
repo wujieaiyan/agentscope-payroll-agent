@@ -14,8 +14,6 @@ import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -43,11 +41,8 @@ public final class ShadowTeamService implements AutoCloseable {
     private final TeamSettings settings;
     private final H2AgentTeamStore teamStore;
     private final H2ChatStore chatStore;
-    private final AgentStatsService statsService;
-    private final Supplier<List<AgentDefinition>> catalogSupplier;
     private final PayrollChatFactory chatFactory;
-    private final TeamLlmClient llm;
-    private final TeamIntentExtractor intentExtractor;
+    private final TeamPlanPipeline pipeline;
     private final Random random;
     private final ExecutorService planner;
     private final ExecutorService flowExecutor;
@@ -83,11 +78,13 @@ public final class ShadowTeamService implements AutoCloseable {
         this.settings = settings == null ? new TeamSettings(TeamMode.OFF, 0, 0, 0D) : settings;
         this.teamStore = teamStore;
         this.chatStore = chatStore;
-        this.statsService = statsService;
-        this.catalogSupplier = catalogSupplier == null ? List::of : catalogSupplier;
         this.chatFactory = chatFactory;
-        this.llm = llm == null ? TeamLlmClient.disabled() : llm;
-        this.intentExtractor = new TeamIntentExtractor(this.llm);
+        this.pipeline =
+                new TeamPlanPipeline(
+                        this.settings,
+                        catalogSupplier,
+                        statsService,
+                        llm == null ? TeamLlmClient.disabled() : llm);
         this.random = random == null ? new Random() : random;
         this.enabled =
                 this.settings.mode() == TeamMode.SHADOW
@@ -174,97 +171,13 @@ public final class ShadowTeamService implements AutoCloseable {
         }
         long started = System.currentTimeMillis();
         String planId = "shadow-" + sessionId + "-" + messageId + "-" + System.nanoTime();
-        TeamIntent intent;
-        try {
-            intent = intentExtractor.extract(question);
-        } catch (RuntimeException e) {
-            log.warn("[动态团队] 影子意图抽取失败：{}", rootMessage(e));
-            return ShadowOutcome.skipped("INTENT_FAILED");
-        }
-        if (!intent.eligible()) {
-            String reason = "L0: " + ineligibleReason(intent);
-            long runId =
-                    recordFallback(
-                            userId,
-                            sessionId,
-                            messageId,
-                            baselineRunId,
-                            planId,
-                            intent.taskType(),
-                            null,
-                            "{}",
-                            null,
-                            null,
-                            reason,
-                            started);
-            return new ShadowOutcome(runId, planId, AgentTeamRun.STATUS_FALLBACK, reason, false);
-        }
-
-        TeamTemplate template = TeamTemplate.select(intent);
-        if (template.fallback()) {
-            String reason = "L2: 没有匹配的任务模板";
-            long runId =
-                    recordFallback(
-                            userId,
-                            sessionId,
-                            messageId,
-                            baselineRunId,
-                            planId,
-                            intent.taskType(),
-                            null,
-                            "{}",
-                            null,
-                            null,
-                            reason,
-                            started);
-            return new ShadowOutcome(runId, planId, AgentTeamRun.STATUS_FALLBACK, reason, false);
-        }
-
-        List<AgentDefinition> catalog;
-        CapabilityIndex index;
-        TeamShortlist shortlist;
-        try {
-            List<AgentDefinition> loaded = catalogSupplier.get();
-            catalog = loaded == null ? List.of() : loaded;
-            index = CapabilityIndex.from(catalog);
-            TeamCandidateSelector selector =
-                    new TeamCandidateSelector(index, statsService, settings);
-            shortlist = selector.shortlist(intent, template.id(), template.slots());
-        } catch (RuntimeException e) {
-            String reason = "L2: 候选筛选失败：" + rootMessage(e);
-            log.warn("[动态团队] 影子候选筛选失败：{}", rootMessage(e));
-            long runId =
-                    recordFallback(
-                            userId,
-                            sessionId,
-                            messageId,
-                            baselineRunId,
-                            planId,
-                            intent.taskType(),
-                            template.id(),
-                            "{}",
-                            null,
-                            null,
-                            reason,
-                            started);
-            return new ShadowOutcome(runId, planId, AgentTeamRun.STATUS_FALLBACK, reason, false);
-        }
-
-        PlanResult planResult;
-        try {
-            TeamPlanGenerator generator =
-                    new TeamPlanGenerator(llm, new PlanValidator(index));
-            planResult = generator.generate(intent, template, shortlist, planId);
-        } catch (RuntimeException e) {
-            planResult = PlanResult.fallback("计划生成异常：" + rootMessage(e), List.of());
-        }
-        if (!planResult.ok()) {
-            String reason = "L2: " + planResult.fallbackReason();
+        TeamPlanPipeline.Attempt attempt = pipeline.prepare(question, planId);
+        if (attempt instanceof TeamPlanPipeline.Fallback fallback) {
             log.info(
                     "[动态团队] 影子计划回退：session={}，message={}，原因={}",
                     sessionId,
                     messageId,
-                    reason);
+                    fallback.reason());
             long runId =
                     recordFallback(
                             userId,
@@ -272,25 +185,22 @@ public final class ShadowTeamService implements AutoCloseable {
                             messageId,
                             baselineRunId,
                             planId,
-                            intent.taskType(),
-                            template.id(),
+                            fallback.intent() == null ? null : fallback.intent().taskType(),
+                            fallback.templateId(),
                             "{}",
-                            catalogJson(index, null),
-                            shortlist.scoreJson(),
-                            reason,
+                            fallback.catalogJson(),
+                            fallback.scoreJson(),
+                            fallback.reason(),
                             started);
-            return new ShadowOutcome(runId, planId, AgentTeamRun.STATUS_FALLBACK, reason, false);
+            return new ShadowOutcome(
+                    runId, planId, AgentTeamRun.STATUS_FALLBACK, fallback.reason(), false);
         }
-
-        TeamPlan plan = planResult.plan();
-        FlowDefinition flow = TeamPlanCompiler.compile(plan, "dynamic-" + planId);
-        Map<String, AgentDefinition> agents = new LinkedHashMap<>();
-        for (String agentId : plan.agentIds()) {
-            AgentDefinition definition = index.definition(agentId);
-            if (definition != null) {
-                agents.put(agentId, definition);
-            }
-        }
+        TeamPlanPipeline.Prepared prepared = (TeamPlanPipeline.Prepared) attempt;
+        TeamIntent intent = prepared.intent();
+        TeamTemplate template = prepared.template();
+        TeamPlan plan = prepared.plan();
+        FlowDefinition flow = prepared.flow();
+        Map<String, AgentDefinition> agents = prepared.agents();
         long runId;
         try {
             AgentTeamRun run =
@@ -304,8 +214,8 @@ public final class ShadowTeamService implements AutoCloseable {
                             intent.taskType(),
                             template.id(),
                             JsonSupport.toJson(plan),
-                            catalogJson(index, plan),
-                            shortlist.scoreJson(),
+                            prepared.catalogJson(),
+                            prepared.scoreJson(),
                             AgentTeamRun.STATUS_RUNNING,
                             null,
                             baselineRunId,
@@ -513,45 +423,6 @@ public final class ShadowTeamService implements AutoCloseable {
                         rootMessage(e));
             }
         }
-    }
-
-    private String catalogJson(CapabilityIndex index, TeamPlan plan) {
-        Map<String, Object> root = new LinkedHashMap<>();
-        List<Map<String, Object>> agents = new ArrayList<>();
-        List<AgentCapabilityProfile> profiles =
-                plan == null
-                        ? index.profiles()
-                        : plan.agentIds().stream()
-                                .map(index::profile)
-                                .filter(java.util.Objects::nonNull)
-                                .toList();
-        for (AgentCapabilityProfile profile : profiles) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("agent_id", profile.agentId());
-            item.put("name", profile.name());
-            item.put("capabilities", profile.capabilities());
-            item.put("source", profile.source());
-            item.put("latency_class", profile.latencyClass());
-            agents.add(item);
-        }
-        root.put("agents", agents);
-        return JsonSupport.toJson(root);
-    }
-
-    private static String ineligibleReason(TeamIntent intent) {
-        if (intent.writeAction()) {
-            return "写操作直接走静态链路";
-        }
-        if (TeamIntent.TASK_OTHER.equals(intent.taskType())) {
-            return "无法归类任务";
-        }
-        if (intent.confidence() < 0.6D) {
-            return "意图置信度低于 0.6";
-        }
-        if (intent.requiredCapabilities().isEmpty()) {
-            return "未识别到所需能力";
-        }
-        return "不满足动态组队条件";
     }
 
     private static Thread daemon(Runnable runnable, String name) {

@@ -3,6 +3,7 @@ package io.agentscope.examples.payroll.web;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.LoginRateLimiter;
 import io.agentscope.examples.payroll.support.AuditContext;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
@@ -19,10 +20,13 @@ public class AuthController {
 
     private final AuthService authService;
     private final AuditService auditService;
+    private final LoginRateLimiter loginRateLimiter;
 
-    public AuthController(AuthService authService, AuditService auditService) {
+    public AuthController(
+            AuthService authService, AuditService auditService, LoginRateLimiter loginRateLimiter) {
         this.authService = authService;
         this.auditService = auditService;
+        this.loginRateLimiter = loginRateLimiter;
     }
 
     @PostMapping("/login")
@@ -40,14 +44,26 @@ public class AuthController {
             auditService.recordFailure("auth.login", "user", "anonymous", 401, "请输入用户名和密码");
             throw new UnauthorizedException("请输入用户名和密码");
         }
+        String attempted = request.username().trim();
+        var locked = loginRateLimiter.lockedFor(attempted);
+        if (locked.isPresent()) {
+            long seconds = Math.max(1, locked.get().toSeconds());
+            long minutes = (seconds + 59) / 60;
+            AuditContext.setActorName(attempted);
+            auditService.recordFailure(
+                    "auth.login", "user", attempted, 429, "登录失败次数过多，账号临时锁定");
+            throw new TooManyRequestsException(
+                    "登录失败次数过多，请 " + minutes + " 分钟后再试");
+        }
         AuthUser user =
                 authService.authenticate(request.username(), request.password()).orElse(null);
         if (user == null) {
-            String attempted = request.username().trim();
+            loginRateLimiter.onFailure(attempted);
             AuditContext.setActorName(attempted);
             auditService.recordFailure("auth.login", "user", attempted, 401, "用户名或密码错误");
             throw new UnauthorizedException("用户名或密码错误");
         }
+        loginRateLimiter.onSuccess(attempted);
         authService.startSession(http, user);
         AuditContext.setActor(user);
         auditService.record(

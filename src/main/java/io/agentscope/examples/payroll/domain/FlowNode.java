@@ -13,12 +13,31 @@ public record FlowNode(
         String condition,
         String conditionValue,
         Double x,
-        Double y) {
+        Double y,
+        String contextMode) {
 
     public static final String TYPE_START = "START";
     public static final String TYPE_AGENT = "AGENT";
     public static final String TYPE_CONDITION = "CONDITION";
     public static final String TYPE_END = "END";
+
+    /** 不接收上游记录，只使用用户原始问题。 */
+    public static final String CONTEXT_NONE = "NONE";
+
+    /** 显式接收所有可达上游节点的记录。 */
+    public static final String CONTEXT_UPSTREAM = "UPSTREAM";
+
+    public FlowNode(
+            String id,
+            String type,
+            String name,
+            String agentId,
+            String condition,
+            String conditionValue,
+            Double x,
+            Double y) {
+        this(id, type, name, agentId, condition, conditionValue, x, y, null);
+    }
 
     public static final String CONDITION_HAS_TARGETS = "HAS_CALCULATION_TARGETS";
     public static final String CONDITION_HAS_TOOL_ERROR = "HAS_TOOL_ERROR";

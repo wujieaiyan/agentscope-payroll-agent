@@ -1,0 +1,26 @@
+# Redis：会话共享 + 登录失败限流 + 对话并发配额
+# --spring.profiles.active=redis（或 dept=mysql,redis）
+spring:
+  # 重新放开 Redis 自动装配（application.yml 默认关闭），仅排除手动管理的 ES 客户端。
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+  data:
+    redis:
+      host: "${PAYROLL_REDIS_HOST:127.0.0.1}"
+      port: "${PAYROLL_REDIS_PORT:6379}"
+      password: "${PAYROLL_REDIS_PASSWORD:}"
+      database: "${PAYROLL_REDIS_DB:0}"
+      timeout: "${PAYROLL_REDIS_TIMEOUT:2s}"
+      lettuce:
+        pool:
+          max-active: "${PAYROLL_REDIS_POOL_MAX_ACTIVE:16}"
+          max-idle: "${PAYROLL_REDIS_POOL_MAX_IDLE:8}"
+          min-idle: "${PAYROLL_REDIS_POOL_MIN_IDLE:1}"
+  session:
+    # 会话空闲超时；多实例共享后重启不再强制所有用户重新登录。
+    timeout: "${PAYROLL_SESSION_TIMEOUT:8h}"
+    redis:
+      namespace: "${PAYROLL_SESSION_NAMESPACE:payroll:session}"
+      flush-mode: on_save
+      save-mode: on_set_attribute

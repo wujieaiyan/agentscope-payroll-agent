@@ -64,8 +64,9 @@ class AgentAdminWebTest {
         assertTrue(meta.contains("\"activeAgentId\""), meta);
 
         String active = get(admin, "/api/admin/agents/active");
-        assertTrue(active.contains("\"agentId\":\"payroll-calculator\""), active);
+        assertTrue(active.contains("\"agentId\":\""), active);
         assertTrue(active.contains("\"configured\""), active);
+        assertTrue(active.contains("\"available\""), active);
 
         String skills = get(admin, "/api/admin/agents/skills");
         assertTrue(skills.contains("\"payroll-calculator\""), skills);

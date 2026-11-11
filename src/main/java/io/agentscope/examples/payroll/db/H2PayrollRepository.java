@@ -252,10 +252,18 @@ public final class H2PayrollRepository implements PayrollRepository, PayrollPoli
 
     public void savePolicy(CityPolicy cityPolicy) {
         String sql =
-                """
-                MERGE INTO city_policies (city, policy_json, updated_at) KEY(city)
-                VALUES (?, ?, ?)
-                """;
+                database.dialect(
+                        """
+                        MERGE INTO city_policies (city, policy_json, updated_at) KEY(city)
+                        VALUES (?, ?, ?)
+                        """,
+                        """
+                        INSERT INTO city_policies (city, policy_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            policy_json = VALUES(policy_json),
+                            updated_at = VALUES(updated_at)
+                        """);
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, cityPolicy.city());
@@ -269,13 +277,36 @@ public final class H2PayrollRepository implements PayrollRepository, PayrollPoli
 
     public Employee saveEmployee(Employee employee) {
         String sql =
-                """
-                MERGE INTO employees (employee_id, name, department, job_title, base_salary,
-                    position_allowance, housing_fund_rate, social_insurance_base,
-                    special_additional_deduction, hire_date, bank_account_masked, email, city,
-                    active, updated_at)
-                KEY(employee_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?)
-                """;
+                database.dialect(
+                        """
+                        MERGE INTO employees (employee_id, name, department, job_title, base_salary,
+                            position_allowance, housing_fund_rate, social_insurance_base,
+                            special_additional_deduction, hire_date, bank_account_masked, email, city,
+                            active, updated_at)
+                        KEY(employee_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?)
+                        """,
+                        """
+                        INSERT INTO employees (employee_id, name, department, job_title, base_salary,
+                            position_allowance, housing_fund_rate, social_insurance_base,
+                            special_additional_deduction, hire_date, bank_account_masked, email, city,
+                            active, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?)
+                        ON DUPLICATE KEY UPDATE
+                            name = VALUES(name),
+                            department = VALUES(department),
+                            job_title = VALUES(job_title),
+                            base_salary = VALUES(base_salary),
+                            position_allowance = VALUES(position_allowance),
+                            housing_fund_rate = VALUES(housing_fund_rate),
+                            social_insurance_base = VALUES(social_insurance_base),
+                            special_additional_deduction = VALUES(special_additional_deduction),
+                            hire_date = VALUES(hire_date),
+                            bank_account_masked = VALUES(bank_account_masked),
+                            email = VALUES(email),
+                            city = VALUES(city),
+                            active = TRUE,
+                            updated_at = VALUES(updated_at)
+                        """);
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, employee.employeeId());
@@ -345,11 +376,22 @@ public final class H2PayrollRepository implements PayrollRepository, PayrollPoli
 
     public PerformanceReview saveReview(PerformanceReview review) {
         String sql =
-                """
-                MERGE INTO performance_reviews
-                    (employee_id, period, score, coefficient, review_comment, updated_at)
-                KEY(employee_id, period) VALUES (?, ?, ?, ?, ?, ?)
-                """;
+                database.dialect(
+                        """
+                        MERGE INTO performance_reviews
+                            (employee_id, period, score, coefficient, review_comment, updated_at)
+                        KEY(employee_id, period) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        """
+                        INSERT INTO performance_reviews
+                            (employee_id, period, score, coefficient, review_comment, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            score = VALUES(score),
+                            coefficient = VALUES(coefficient),
+                            review_comment = VALUES(review_comment),
+                            updated_at = VALUES(updated_at)
+                        """);
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, review.employeeId());
@@ -405,12 +447,26 @@ public final class H2PayrollRepository implements PayrollRepository, PayrollPoli
 
     public AttendanceSummary saveAttendance(AttendanceSummary attendance) {
         String sql =
-                """
-                MERGE INTO attendance (employee_id, period, personal_leave_days, sick_leave_days,
-                    absent_days, weekday_overtime_hours, rest_day_overtime_hours,
-                    holiday_overtime_hours)
-                KEY(employee_id, period) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """;
+                database.dialect(
+                        """
+                        MERGE INTO attendance (employee_id, period, personal_leave_days, sick_leave_days,
+                            absent_days, weekday_overtime_hours, rest_day_overtime_hours,
+                            holiday_overtime_hours)
+                        KEY(employee_id, period) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        """
+                        INSERT INTO attendance (employee_id, period, personal_leave_days, sick_leave_days,
+                            absent_days, weekday_overtime_hours, rest_day_overtime_hours,
+                            holiday_overtime_hours)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            personal_leave_days = VALUES(personal_leave_days),
+                            sick_leave_days = VALUES(sick_leave_days),
+                            absent_days = VALUES(absent_days),
+                            weekday_overtime_hours = VALUES(weekday_overtime_hours),
+                            rest_day_overtime_hours = VALUES(rest_day_overtime_hours),
+                            holiday_overtime_hours = VALUES(holiday_overtime_hours)
+                        """);
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, attendance.employeeId());

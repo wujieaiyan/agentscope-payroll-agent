@@ -133,7 +133,7 @@ function setSidebarCollapsed(collapsed) {
 /** 菜单图标复用内置 Ant Design 图标，避免用单字充当图标。 */
 function renderNavIcons() {
   if (typeof window.payrollAvatarMarkup !== 'function') return;
-  $$('#tabs .nav-icon[data-icon]').forEach((icon) => {
+  $$('#tabs [data-icon]').forEach((icon) => {
     icon.innerHTML = window.payrollAvatarMarkup(icon.dataset.icon);
   });
 }
@@ -272,7 +272,19 @@ async function loadHealth() {
     const chatModel = $('#chat-model');
     if (chatModel) chatModel.textContent = '模型 ' + (health.chat_model || '未配置');
     const chatAgent = $('#chat-agent');
-    if (chatAgent) chatAgent.textContent = '核算智能体 ' + (health.chat_agent || '默认流水线');
+    if (chatAgent) {
+      chatAgent.textContent = health.chat_mode === 'FLOW'
+        ? `全局流程 ${health.chat_flow || ''}`
+        : `核算智能体 ${health.chat_agent || '内置三段流水线'}`;
+    }
+    const modeBanner = $('#chat-mode-banner');
+    if (modeBanner) {
+      const flowMode = health.chat_mode === 'FLOW';
+      modeBanner.textContent = flowMode
+        ? `当前由全局默认流程「${health.chat_flow}」接管对话；如需改用单个智能体，请在流程编排页取消默认流程。`
+        : '';
+      modeBanner.classList.toggle('hidden', !flowMode);
+    }
     setPeriodDefaults(health.data_through_period);
   } catch (error) {
     badge.textContent = '数据库连接失败';
@@ -359,6 +371,14 @@ const TAB_META = {
     group: '智能体', eyebrow: 'AGENT', title: '流程编排',
     subtitle: '用画布把智能体与条件节点编成 DAG，设为默认后下一轮对话生效。',
   },
+  team: {
+    group: '智能体', eyebrow: 'TEAM', title: '团队运行',
+    subtitle: '查看动态团队的模式配置、近期运行与回退链路；ACTIVE 仅在白名单内生效。',
+  },
+  kb: {
+    group: '知识库', eyebrow: 'KNOWLEDGE', title: '知识库',
+    subtitle: '上传制度文档并配置解析、分块与检索策略；访问范围由库级成员权限控制。',
+  },
   users: {
     group: '系统管理', eyebrow: 'SYSTEM', title: '用户',
     subtitle: '维护登录账号、角色与部门归属；至少保留一名启用管理员。',
@@ -383,8 +403,53 @@ function updatePageHead(name) {
   $('#page-subtitle').textContent = meta.subtitle;
 }
 
+const openTabs = [];
+
+function renderTabStrip() {
+  const strip = $('#tab-strip');
+  if (!strip) return;
+  strip.innerHTML = openTabs
+    .map((name) => {
+      const title = TAB_META[name]?.title || name;
+      const active = name === openTabs.active;
+      return `
+        <div class="tab-chip${active ? ' active' : ''}" role="tab" aria-selected="${active}"
+             tabindex="0" data-strip-tab="${esc(name)}" title="${esc(title)}">
+          <span class="tab-chip-dot" aria-hidden="true"></span>
+          <span>${esc(title)}</span>
+          <button type="button" class="tab-chip-close" data-close-tab="${esc(name)}"
+                  aria-label="关闭 ${esc(title)}">×</button>
+        </div>`;
+    })
+    .join('');
+}
+
+function openTab(name) {
+  if (!name) return;
+  if (!openTabs.includes(name)) openTabs.push(name);
+  openTabs.active = name;
+  renderTabStrip();
+}
+
+function closeTab(name) {
+  const index = openTabs.indexOf(name);
+  if (index < 0) return;
+  openTabs.splice(index, 1);
+  if (openTabs.active !== name) {
+    renderTabStrip();
+    return;
+  }
+  const next = openTabs[Math.max(0, index - 1)] || openTabs[0];
+  if (next) {
+    showTab(next);
+  } else {
+    showTab('employees');
+  }
+}
+
 function showTab(name) {
   updatePageHead(name);
+  openTab(name);
   $$('#tabs .nav-item').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === name);
   });
@@ -410,6 +475,8 @@ function showTab(name) {
   if (name === 'agents') initAgentsTab();
   if (name === 'skills') initSkillsTab();
   if (name === 'flows') initFlowsTab();
+  if (name === 'team') initTeamTab();
+  if (name === 'kb') initKbTab();
 }
 
 async function loadEmployees() {
@@ -419,6 +486,7 @@ async function loadEmployees() {
   const all = await api('/api/employees?include_inactive=true');
   state.allEmployees = all;
   state.employees = all.filter((employee) => employee.active);
+  fillEmployeeFilterDepartments();
   renderEmployees();
   fillEmployeeSelect();
   fillScopeSelect();
@@ -438,21 +506,101 @@ function fillEmployeeDepartmentSelect(selected) {
   else if (names.length) select.value = names[0];
 }
 
+function avatarHue(value) {
+  let hash = 0;
+  const text = String(value || '?');
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+  return hash % 360;
+}
+
+function avatarMarkup(name, inactive = false) {
+  const label = String(name || '?').trim().slice(0, 1).toUpperCase() || '?';
+  return `<span class="row-avatar${inactive ? ' inactive' : ''}"
+    style="background:hsl(${avatarHue(name)}, 58%, 50%)">${esc(label)}</span>`;
+}
+
+function statCard(label, value, unit, tone, icon) {
+  return `
+    <div class="stat-card ${tone}">
+      <span class="stat-icon" aria-hidden="true">${esc(icon)}</span>
+      <div class="stat-body">
+        <div class="stat-label">${esc(label)}</div>
+        <div class="stat-value">${value}${unit ? `<small>${esc(unit)}</small>` : ''}</div>
+      </div>
+    </div>`;
+}
+
+function fillEmployeeFilterDepartments() {
+  const select = $('#employee-filter-department');
+  if (!select) return;
+  const previous = select.value;
+  const names = [...new Set(state.allEmployees.map((item) => item.department).filter(Boolean))].sort(
+    (a, b) => a.localeCompare(b, 'zh-CN')
+  );
+  select.innerHTML =
+    '<option value="">全部部门</option>' +
+    names.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+  if (previous && names.includes(previous)) select.value = previous;
+}
+
+function renderEmployeeStats() {
+  const container = $('#employee-stats');
+  if (!container) return;
+  const all = state.allEmployees;
+  const active = all.filter((employee) => employee.active);
+  const departments = new Set(all.map((item) => item.department).filter(Boolean));
+  const avgSalary = active.length
+    ? active.reduce((sum, item) => sum + Number(item.base_salary || 0), 0) / active.length
+    : 0;
+  container.innerHTML = [
+    statCard('员工总数', all.length, '人', 'blue', '员'),
+    statCard('在职人数', active.length, '人', 'green', '职'),
+    statCard('停用人数', all.length - active.length, '人', 'orange', '停'),
+    statCard('部门数量', departments.size, '个', 'gray', '部'),
+    statCard('平均基本工资', money(avgSalary), '元', 'purple', '均'),
+  ].join('');
+}
+
+function employeeFilterValues() {
+  return {
+    keyword: ($('#employee-filter-keyword')?.value || '').trim().toLowerCase(),
+    department: $('#employee-filter-department')?.value || '',
+    status: $('#employee-filter-status')?.value || '',
+  };
+}
+
 function renderEmployees() {
-  const showInactive = $('#employee-include-inactive').checked;
   const writable = can('employee:write');
-  const rows = state.allEmployees.filter((employee) => showInactive || employee.active);
+  const filters = employeeFilterValues();
+  renderEmployeeStats();
+  const rows = state.allEmployees.filter((employee) => {
+    if (filters.department && employee.department !== filters.department) return false;
+    if (filters.status === 'active' && !employee.active) return false;
+    if (filters.status === 'inactive' && employee.active) return false;
+    if (!filters.keyword) return true;
+    return [employee.employee_id, employee.name, employee.email].some((value) =>
+      String(value || '').toLowerCase().includes(filters.keyword)
+    );
+  });
+  const count = $('#employee-count');
+  if (count) {
+    count.textContent = `共 ${rows.length} 条 · 在职 ${rows.filter((item) => item.active).length} 人`;
+  }
   const body = $('#employee-rows');
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="11" class="hint">暂无员工</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="hint">没有符合筛选条件的员工</td></tr>';
     return;
   }
   body.innerHTML = rows
     .map(
-      (employee) => `
+      (employee, index) => `
       <tr>
+        <td class="row-index">${index + 1}</td>
+        <td>${avatarMarkup(employee.name, !employee.active)}</td>
         <td>${esc(employee.employee_id)}</td>
-        <td>${esc(employee.name)}</td>
+        <td><span class="row-person"><strong>${esc(employee.name)}</strong></span></td>
         <td>${esc(employee.department)}</td>
         <td>${esc(employee.position)}</td>
         <td>${esc(employee.city)}</td>
@@ -460,11 +608,19 @@ function renderEmployees() {
         <td class="num">${money(employee.position_allowance)}</td>
         <td class="num">${(Number(employee.housing_fund_rate) * 100).toFixed(2)}%</td>
         <td>${employee.email ? esc(employee.email) : '<span class="hint">未维护</span>'}</td>
-        <td><span class="status ${employee.active ? 'SENT' : 'FAILED'}">${employee.active ? '在职' : '停用'}</span></td>
+        <td>${
+          employee.active
+            ? `<button type="button" class="switch on" role="switch" aria-checked="true"
+                 data-deactivate="${esc(employee.employee_id)}" title="点击停用员工">
+                 <span class="switch-track" aria-hidden="true"></span><span class="switch-text">在职</span>
+               </button>`
+            : `<span class="switch disabled" title="停用员工不可恢复，需重新录入">
+                 <span class="switch-track" aria-hidden="true"></span><span class="switch-text">停用</span>
+               </span>`
+        }</td>
         <td>${
           writable
-            ? `<button class="link" data-edit-employee="${esc(employee.employee_id)}">编辑</button>
-          ${employee.active ? `<button class="link danger-text" data-deactivate="${esc(employee.employee_id)}">停用</button>` : ''}`
+            ? `<button class="link" data-edit-employee="${esc(employee.employee_id)}">编辑资料</button>`
             : '<span class="hint">只读</span>'
         }</td>
       </tr>`
@@ -1673,34 +1829,96 @@ async function loadUsers() {
   renderUsers();
 }
 
+function fillUserFilterRoles() {
+  const select = $('#user-filter-role');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML =
+    '<option value="">全部角色</option>' +
+    state.roles.map((role) => `<option value="${esc(role.code)}">${esc(role.name)}</option>`).join('');
+  if (previous && state.roles.some((role) => role.code === previous)) {
+    select.value = previous;
+  }
+}
+
+function renderUserStats() {
+  const container = $('#user-stats');
+  if (!container) return;
+  const active = state.users.filter((user) => user.active);
+  const admins = state.users.filter(
+    (user) => String(user.role_code || '').toUpperCase() === 'ADMIN'
+  );
+  const departments = new Set(state.users.map((user) => user.department_id).filter(Boolean));
+  container.innerHTML = [
+    statCard('用户总数', state.users.length, '人', 'blue', '户'),
+    statCard('启用账号', active.length, '人', 'green', '启'),
+    statCard('停用账号', state.users.length - active.length, '人', 'orange', '停'),
+    statCard('管理员', admins.length, '人', 'red', '管'),
+    statCard('覆盖部门', departments.size, '个', 'gray', '部'),
+  ].join('');
+}
+
+function userFilterValues() {
+  return {
+    keyword: ($('#user-filter-keyword')?.value || '').trim().toLowerCase(),
+    role: $('#user-filter-role')?.value || '',
+    status: $('#user-filter-status')?.value || '',
+  };
+}
+
 function renderUsers() {
   const body = $('#user-rows');
   if (!body) return;
-  if (!state.users.length) {
-    body.innerHTML = '<tr><td colspan="7" class="hint">暂无用户</td></tr>';
+  fillUserFilterRoles();
+  renderUserStats();
+  const filters = userFilterValues();
+  const rows = state.users.filter((user) => {
+    if (filters.role && user.role_code !== filters.role) return false;
+    if (filters.status === 'active' && !user.active) return false;
+    if (filters.status === 'inactive' && user.active) return false;
+    if (!filters.keyword) return true;
+    return [user.username, user.display_name].some((value) =>
+      String(value || '').toLowerCase().includes(filters.keyword)
+    );
+  });
+  const count = $('#user-count');
+  if (count) count.textContent = `共 ${rows.length} 条 · 启用 ${activeUserCount()} 人`;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="hint">没有符合筛选条件的用户</td></tr>';
     return;
   }
-  body.innerHTML = state.users
-    .map(
-      (user) => `
+  body.innerHTML = rows
+    .map((user, index) => {
+      const isSelf = state.me && user.id === state.me.id;
+      const switchMarkup = isSelf
+        ? `<span class="switch ${user.active ? 'on' : ''} disabled" title="当前登录账号不能在此停用">
+             <span class="switch-track" aria-hidden="true"></span>
+             <span class="switch-text">${user.active ? '启用中' : '停用'}</span>
+           </span>`
+        : `<button type="button" class="switch ${user.active ? 'on' : ''}" role="switch"
+             aria-checked="${user.active}" data-toggle-user="${user.id}"
+             title="${user.active ? '点击停用' : '点击启用'}">
+             <span class="switch-track" aria-hidden="true"></span>
+             <span class="switch-text">${user.active ? '已启用' : '已停用'}</span>
+           </button>`;
+      return `
       <tr>
+        <td class="row-index">${index + 1}</td>
+        <td>${avatarMarkup(user.display_name || user.username, !user.active)}</td>
         <td>${esc(user.username)}</td>
-        <td>${esc(user.display_name)}</td>
+        <td><span class="row-person"><strong>${esc(user.display_name || user.username)}</strong></span></td>
         <td>${esc(user.role_name || user.role_code)}</td>
         <td>${user.department_name ? esc(user.department_name) : '<span class="hint">未分配</span>'}</td>
-        <td><span class="status ${user.active ? 'SENT' : 'FAILED'}">${user.active ? '启用' : '停用'}</span></td>
+        <td>${switchMarkup}</td>
         <td>${formatDateTime(user.last_login_at)}</td>
-        <td>
-          <button class="link" data-edit-user="${user.id}">编辑</button>
-          ${
-            state.me && user.id === state.me.id
-              ? ''
-              : `<button class="link ${user.active ? 'danger-text' : ''}" data-toggle-user="${user.id}">${user.active ? '停用' : '启用'}</button>`
-          }
-        </td>
-      </tr>`
-    )
+        <td><button class="link" data-edit-user="${user.id}">编辑资料</button></td>
+      </tr>`;
+    })
     .join('');
+}
+
+function activeUserCount() {
+  return state.users.filter((user) => user.active).length;
 }
 
 function showUserForm(user) {
@@ -1908,7 +2126,7 @@ const CHAT_TEAM_STATUS = {
   PLANNED: { label: '已计划', cls: '' },
   INTERRUPTED: { label: '已中断', cls: 'bad' },
   CANCELLED: { label: '已取消', cls: 'muted' },
-  FALLBACK: { label: '已回退', cls: '' },
+  FALLBACK: { label: '已回退', cls: 'bad' },
   REJECTED: { label: '已拒绝', cls: 'bad' },
   CLOSED: { label: '已关闭', cls: 'muted' },
 };
@@ -2261,6 +2479,26 @@ function buildTeamRaw(primary) {
   return details;
 }
 
+function buildTeamFallback(run) {
+  const banner = document.createElement('div');
+  banner.className = 'chat-team-fallback';
+  const title = document.createElement('strong');
+  title.textContent = '已回退到标准流程';
+  banner.append(title);
+  if (run && run.fallback_reason) {
+    const reason = document.createElement('span');
+    reason.textContent = `：${run.fallback_reason}`;
+    banner.append(reason);
+  }
+  if (run && run.fallback_of_run_id) {
+    const link = document.createElement('span');
+    link.className = 'hint';
+    link.textContent = `（实际执行静态运行 #${run.fallback_of_run_id}）`;
+    banner.append(link);
+  }
+  return banner;
+}
+
 function renderTeamPanel(panel, view) {
   const body = panel.querySelector('.chat-team-body');
   const modeEl = panel.querySelector('.chat-team-mode');
@@ -2299,6 +2537,14 @@ function renderTeamPanel(panel, view) {
   );
   body.append(meta);
 
+  const fallbackRun = runs.find(
+    (run) => run.status === 'FALLBACK' && run.mode === 'ACTIVE'
+  ) || runs.find((run) => run.status === 'FALLBACK');
+  if (fallbackRun) {
+    hint.textContent += ' · 已回退';
+    body.append(buildTeamFallback(fallbackRun));
+  }
+
   const hasLinks =
     primary.baseline_run_id || primary.fallback_of_run_id || primary.retry_of_run_id;
   if (runs.length > 1 || hasLinks) {
@@ -2332,7 +2578,8 @@ async function loadTeamPanel(panel, sessionId, messageId) {
     panel.dataset.loaded = '1';
     renderTeamPanel(panel, view);
     const mode = view && view.primary_run ? view.primary_run.mode : '';
-    if (mode === 'SHADOW' || mode === 'ACTIVE') panel.open = true;
+    const hasFallback = ((view && view.runs) || []).some((run) => run.status === 'FALLBACK');
+    if (mode === 'SHADOW' || mode === 'ACTIVE' || hasFallback) panel.open = true;
   } catch (error) {
     panel.dataset.loaded = '';
     body.replaceChildren(teamEmpty(`团队运行加载失败：${error.message}`, 'error'));
@@ -3141,6 +3388,25 @@ function bindEvents() {
   $$('#tabs .nav-item').forEach((button) => {
     button.addEventListener('click', () => showTab(button.dataset.tab));
   });
+  const tabStrip = $('#tab-strip');
+  if (tabStrip) {
+    tabStrip.addEventListener('click', (event) => {
+      const close = event.target.closest('[data-close-tab]');
+      if (close) {
+        closeTab(close.dataset.closeTab);
+        return;
+      }
+      const chip = event.target.closest('[data-strip-tab]');
+      if (chip) showTab(chip.dataset.stripTab);
+    });
+    tabStrip.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const chip = event.target.closest('[data-strip-tab]');
+      if (!chip) return;
+      event.preventDefault();
+      showTab(chip.dataset.stripTab);
+    });
+  }
   $$('#tabs .nav-group-title').forEach((title) => {
     title.addEventListener('click', () => toggleNavGroup(title.closest('.nav-group')));
   });
@@ -3238,6 +3504,22 @@ function bindEvents() {
   $('#user-cancel').addEventListener('click', () => {
     $('#user-form').classList.add('hidden');
   });
+  $('#user-filter-query').addEventListener('click', renderUsers);
+  $('#user-filter-keyword').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      renderUsers();
+    }
+  });
+  ['user-filter-role', 'user-filter-status'].forEach((id) => {
+    $(`#${id}`).addEventListener('change', renderUsers);
+  });
+  $('#user-filter-reset').addEventListener('click', () => {
+    $('#user-filter-keyword').value = '';
+    $('#user-filter-role').value = '';
+    $('#user-filter-status').value = '';
+    renderUsers();
+  });
   $('#user-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.target;
@@ -3290,7 +3572,8 @@ function bindEvents() {
       if (user) showUserForm(user);
       return;
     }
-    const toggleId = Number(event.target.dataset.toggleUser || 0);
+    const toggleTarget = event.target.closest('[data-toggle-user]');
+    const toggleId = Number(event.target.dataset.toggleUser || toggleTarget?.dataset.toggleUser || 0);
     if (!toggleId) return;
     const user = state.users.find((item) => item.id === toggleId);
     if (!user) return;
@@ -3419,7 +3702,22 @@ function bindEvents() {
   $('#employee-cancel').addEventListener('click', () => {
     $('#employee-form').classList.add('hidden');
   });
-  $('#employee-include-inactive').addEventListener('change', renderEmployees);
+  $('#employee-filter-query').addEventListener('click', renderEmployees);
+  $('#employee-filter-keyword').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      renderEmployees();
+    }
+  });
+  ['employee-filter-department', 'employee-filter-status'].forEach((id) => {
+    $(`#${id}`).addEventListener('change', renderEmployees);
+  });
+  $('#employee-filter-reset').addEventListener('click', () => {
+    $('#employee-filter-keyword').value = '';
+    $('#employee-filter-department').value = '';
+    $('#employee-filter-status').value = '';
+    renderEmployees();
+  });
 
   $('#employee-rows').addEventListener('click', async (event) => {
     const editId = event.target.dataset.editEmployee;
@@ -3428,7 +3726,8 @@ function bindEvents() {
       if (employee) showEmployeeForm(employee);
       return;
     }
-    const deactivateId = event.target.dataset.deactivate;
+    const deactivateId =
+      event.target.dataset.deactivate || event.target.closest('[data-deactivate]')?.dataset.deactivate;
     if (deactivateId) {
       if (!confirm(`确认停用员工 ${deactivateId}？停用后不再参与核算。`)) return;
       try {
@@ -3718,6 +4017,7 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', async () => {
   bindEvents();
   initSidebar();
+  openTab('employees');
   try {
     await loadMe();
     await loadHealth();

@@ -192,6 +192,18 @@ class TeamPlanGeneratorTest {
         assertEquals(380D, validator.x(), 1e-9);
     }
 
+    @Test
+    @DisplayName("模型回填的 agent_id 带注解或引号时先清洗再匹配")
+    void cleansAnnotatedAgentId() {
+        assertEquals(
+                "payroll-calculator",
+                TeamPlanGenerator.cleanAgentId(
+                        "payroll-calculator(rank=0.864, objective=78.0, feedback=65.0, samples=0, cold_start)"));
+        assertEquals("payroll-validator", TeamPlanGenerator.cleanAgentId("  payroll-validator（冷启动） "));
+        assertEquals("payroll-calculator", TeamPlanGenerator.cleanAgentId("\"payroll-calculator\""));
+        assertEquals("", TeamPlanGenerator.cleanAgentId(null));
+    }
+
     private static TeamShortlist shortlist(Map<TeamRole, List<AgentCandidate>> byRole) {
         return new TeamShortlist(
                 TeamTemplate.CALC_VALIDATE.id(), byRole, "{}", 30, false);

@@ -28,6 +28,7 @@ function initFlowsTab() {
         loading: false,
         saving: false,
         activating: false,
+        clearing: false,
         flows: [],
         activeFlowId: '',
         meta: { writable: false, location: '', agents: [] },
@@ -105,6 +106,7 @@ function initFlowsTab() {
             avatar: this.agentAvatar(node.agentId),
             condition: node.condition || '',
             conditionValue: node.conditionValue || '',
+            contextMode: node.contextMode || '',
           },
         }));
         this.graphEdges = (flow.edges || []).map((edge) => ({
@@ -207,18 +209,33 @@ function initFlowsTab() {
       },
       async activateFlow() {
         if (!this.flow.id || !this.meta.writable) return;
+        if (!window.confirm('设为全局默认流程会同时取消默认核算智能体，确认继续？')) return;
         this.activating = true;
         try {
           await api('/api/admin/flows/' + encodeURIComponent(this.flow.id) + '/active', {
             method: 'PUT',
           });
-          toast('已设为全局默认流程，下一轮对话生效');
+          toast('已设为全局默认流程，并取消默认核算智能体');
           await this.reload(this.flow.id);
         } catch (error) {
           this.errors = String(error.message || error).split('；').filter(Boolean);
           showError(error);
         } finally {
           this.activating = false;
+        }
+      },
+      async clearActiveFlow() {
+        if (!this.meta.writable || !this.activeFlowId) return;
+        if (!window.confirm('取消全局默认流程？下一轮对话将回到核算智能体链路。')) return;
+        this.clearing = true;
+        try {
+          await api('/api/admin/flows/active', { method: 'DELETE' });
+          toast('已取消全局默认流程，下一轮对话生效');
+          await this.reload(this.flow.id);
+        } catch (error) {
+          showError(error);
+        } finally {
+          this.clearing = false;
         }
       },
       onDragStart(event, type) {
@@ -369,6 +386,9 @@ function initFlowsTab() {
           conditionValue: node.type === 'condition'
             ? ((node.data && node.data.conditionValue) || '')
             : '',
+          contextMode: node.type === 'agent'
+            ? ((node.data && node.data.contextMode) || null)
+            : null,
           x: node.position.x,
           y: node.position.y,
         }));
@@ -411,6 +431,10 @@ function initFlowsTab() {
             <button type="button" @click="activateFlow"
                     :disabled="!meta.writable || !flow.id || flow.id === activeFlowId || activating">
               {{ flow.id === activeFlowId ? '当前默认' : '设为默认' }}
+            </button>
+            <button type="button" @click="clearActiveFlow"
+                    :disabled="!meta.writable || !activeFlowId || clearing">
+              {{ clearing ? '取消中…' : '取消默认' }}
             </button>
             <button type="button" @click="zoomOut">－</button>
             <button type="button" @click="zoomIn">＋</button>
@@ -492,6 +516,14 @@ function initFlowsTab() {
                   </option>
                 </select>
               </label>
+              <label>上游记录
+                <select v-model="selectedNode.data.contextMode">
+                  <option value="">自动（仅数据流水线串联）</option>
+                  <option value="UPSTREAM">接收上游记录</option>
+                  <option value="NONE">不接收上游记录</option>
+                </select>
+              </label>
+              <p class="hint">自动模式只把带核算对象的上游记录传给下游；纯文本角色默认隔离，跨角色串联需显式选择“接收上游记录”。</p>
             </template>
             <template v-if="selectedNode.type === 'condition'">
               <label>条件

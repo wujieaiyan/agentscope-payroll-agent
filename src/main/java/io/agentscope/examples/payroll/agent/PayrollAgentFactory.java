@@ -93,9 +93,15 @@ public final class PayrollAgentFactory {
             开始任何回答前，必须先调用 load_skill_through_path(skillId="%s", path="SKILL.md")，
             读取后再严格遵循其中的角色说明、工具选择与输出格式。
             技能加载成功前，禁止调用任何业务工具，也禁止直接回答用户。
-            若该 skillId 调用失败，改用 <available_skills> 中对应角色的 <skill-id> 重试一次；
-            仍失败才只执行下方绝对规则，并在回答开头说明“角色技能未加载”。
+            只能加载该 skillId；本智能体没有任何其他可用技能，禁止改用其他技能重试。
+            若加载失败，直接说明“角色技能未加载”，并按下方绝对规则作答。
+            禁止在正文中输出工具调用名称、JSON 参数或“请加载技能”之类的指令。
             """;
+
+    /** 预加载技能正文的展示上限，避免超长技能挤占上下文。 */
+    private static final int MAX_SKILL_CONTENT_CHARS = 8_000;
+
+    private static final int MAX_SKILL_BLOCK_CHARS = 24_000;
 
     /** 自定义技能智能体的通用规则：不复用薪酬口径，避免把非薪酬角色拉回核算场景。 */
     private static final String GENERAL_RULES =
@@ -326,7 +332,26 @@ public final class PayrollAgentFactory {
                 + "|"
                 + agent.description()
                 + "|"
-                + agent.skillIds();
+                + agent.skillIds()
+                + "|"
+                + skillFingerprint(agent.skillIds());
+    }
+
+    /** 技能正文参与缓存签名：Nacos 技能改动后，旧的系统提示词必须失效。 */
+    private static String skillFingerprint(List<String> skillIds) {
+        if (skillIds == null || skillIds.isEmpty()) {
+            return "";
+        }
+        AgentSkillRepository repository = SkillRepositories.shared();
+        StringBuilder fingerprint = new StringBuilder();
+        for (String skillId : new LinkedHashSet<>(skillIds)) {
+            AgentSkill skill = repository.getSkill(skillId);
+            String content = skill == null || skill.getSkillContent() == null
+                    ? "missing"
+                    : Integer.toHexString(skill.getSkillContent().hashCode());
+            fingerprint.append(skillId).append(':').append(content).append(';');
+        }
+        return fingerprint.toString();
     }
 
     public static Team createTeam(PayrollTools tools, AgentDefinition activeAgent) {
@@ -404,6 +429,7 @@ public final class PayrollAgentFactory {
         AgentSkillRepository skillRepository = SkillRepositories.shared();
         List<AgentSkill> skills = boundSkills(skillRepository, agent);
         AgentSkill primary = skills.get(0);
+        boolean payrollRole = isPayrollRole(agent.skillIds());
         Set<String> allowed = flowTools(agent.skillIds());
         Toolkit toolkit = toolkit(tools, allowed, agent.name(), primary);
         List<McpClientWrapper> mcpClients =
@@ -415,12 +441,13 @@ public final class PayrollAgentFactory {
                 createAgent(
                         "FlowNode_" + agent.id(),
                         agent.name() + "：" + (agent.description() == null ? "" : agent.description()),
-                        flowNodePrompt(agent, primary.getSkillId()),
+                        flowNodePrompt(agent, skills),
                         model,
                         toolkit,
                         12,
-                        skillRepository,
-                        agent.skillIds());
+                        // 自定义角色：技能正文已注入提示词，不再注册动态加载工具。
+                        payrollRole ? skillRepository : null,
+                        payrollRole ? agent.skillIds() : List.of());
         return new NodeAgent(nodeAgent, mcpClients);
     }
 
@@ -450,12 +477,13 @@ public final class PayrollAgentFactory {
                 createAgent(
                         "PayrollActiveAgent",
                         activeAgent.name() + "：" + activeAgent.description(),
-                        activeAgentPrompt(activeAgent, primary.getSkillId()),
+                        activeAgentPrompt(activeAgent, boundSkills),
                         model,
                         toolkit,
                         12,
-                        skillRepository,
-                        activeAgent.skillIds());
+                        // 技能正文已预加载，移除 load_skill_through_path，避免小模型编造技能 id。
+                        null,
+                        List.of());
         return new Team(agent, null, null, summarizer, mcpClients, activeAgent, false);
     }
 
@@ -513,8 +541,9 @@ public final class PayrollAgentFactory {
     }
 
     /** 流程节点沿用角色提示词，避免把“第 2/3 环”误当成独立核算智能体。 */
-    private static String flowNodePrompt(AgentDefinition agent, String skillId) {
+    private static String flowNodePrompt(AgentDefinition agent, List<AgentSkill> skills) {
         List<String> skillIds = agent.skillIds();
+        String skillId = skills.get(0).getSkillId();
         if (skillIds.contains(RoleSkills.VALIDATOR)) {
             return validatorPrompt(skillId);
         }
@@ -524,25 +553,67 @@ public final class PayrollAgentFactory {
         if (skillIds.contains(RoleSkills.CALCULATOR)) {
             return calculatorPrompt(skillId);
         }
-        return activeAgentPrompt(agent, skillId);
+        return activeAgentPrompt(agent, skills);
     }
 
     /**
-     * 自定义技能智能体的提示词：角色由管理员填写的名称、描述与已加载技能定义，
-     * 不注入薪酬核算规则，避免 ai-coding 等非薪酬角色被拉回薪酬场景。
+     * 自定义技能智能体的提示词：角色由管理员填写的名称、描述与技能正文组成。
+     * 技能正文直接预加载，不依赖运行期 load_skill_through_path，避免小模型失败后
+     * 编造技能 id 或把伪工具调用写进正文。
      */
-    static String activeAgentPrompt(AgentDefinition agent, String skillId) {
+    static String activeAgentPrompt(AgentDefinition agent, List<AgentSkill> skills) {
         String description = agent.description() == null ? "" : agent.description();
         return GENERAL_RULES
                 + "\n"
-                + SKILL_BOOT_RULE.formatted(skillId)
+                + skillBlock(skills)
                 + """
                 ## 基本职责
                 你是「%s」。%s
-                严格按已加载的技能处理用户诉求；技能未覆盖的问题不要自行补全数据或流程，
+                严格按上方的角色技能处理用户诉求；技能未覆盖的问题不要自行补全数据或流程，
                 超出职责范围时直接说明并请用户提出对应问题。
+                角色技能已由系统预加载，禁止调用 load_skill_through_path，也不要输出任何工具调用文本。
                 """
                         .formatted(agent.name(), description);
+    }
+
+    /** 把绑定技能正文拼成系统提示词片段；同名技能只保留第一份。 */
+    private static String skillBlock(List<AgentSkill> skills) {
+        StringBuilder block = new StringBuilder("## 已加载角色技能（必须遵循）\n");
+        int total = 0;
+        Set<String> seen = new LinkedHashSet<>();
+        for (AgentSkill skill : skills) {
+            if (skill == null || !seen.add(skill.getSkillId())) {
+                continue;
+            }
+            String content = skill.getSkillContent() == null ? "" : skill.getSkillContent().strip();
+            if (content.isEmpty()) {
+                continue;
+            }
+            if (content.length() > MAX_SKILL_CONTENT_CHARS) {
+                content = content.substring(0, MAX_SKILL_CONTENT_CHARS)
+                        + "\n（技能内容过长，已截断，请按上述规则执行）";
+            }
+            if (total + content.length() > MAX_SKILL_BLOCK_CHARS) {
+                break;
+            }
+            block.append("\n### ")
+                    .append(skill.getSkillId())
+                    .append("\n")
+                    .append(content)
+                    .append("\n");
+            total += content.length();
+        }
+        return block.toString();
+    }
+
+    /** 薪酬三个内置角色需要动态技能来激活业务工具，自定义角色则改为正文预注入。 */
+    private static boolean isPayrollRole(List<String> skillIds) {
+        if (skillIds == null || skillIds.isEmpty()) {
+            return false;
+        }
+        return skillIds.contains(RoleSkills.CALCULATOR)
+                || skillIds.contains(RoleSkills.VALIDATOR)
+                || skillIds.contains(RoleSkills.ACCOUNTANT);
     }
 
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */
@@ -638,6 +709,10 @@ public final class PayrollAgentFactory {
     static Toolkit toolkit(
             PayrollTools tools, Set<String> allowed, String role, AgentSkill skill) {
         Toolkit toolkit = new Toolkit();
+        if (allowed.isEmpty()) {
+            log.info("[多智能体] {}智能体工具集：[]（角色无需业务工具）", role);
+            return toolkit;
+        }
         toolkit.createSkillToolGroup(
                 "role-tools", role + "业务工具（加载角色技能后启用）", false, skill.getName());
         toolkit.registration().tool(tools).group("role-tools").apply();

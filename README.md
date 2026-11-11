@@ -409,6 +409,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   缓存与迁移设计见 [`docs/agent-runtime-cache-spec.md`](docs/agent-runtime-cache-spec.md)
   与 [`docs/harness-migration-spec.md`](docs/harness-migration-spec.md)。
 
+对长会话，进程内缓存的 `PayrollChat` 也设有上限（默认 200）与空闲淘汰（默认 60 分钟）：
+超出后按最久未使用关闭，正在生成回答的会话不会被淘汰；未命中时从数据库消息与摘要重建。
+会话互斥由 Redis 锁 `payroll:chat:lock:<sessionId>` 保证，多实例部署下同一会话只会在一处执行。
+
 ### 控制台日志
 
 开发排查以 `[多智能体]` 为前缀，输出到 stderr（`logback.xml` 配置），与 CLI 结果分开：
@@ -449,7 +453,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 - 开关：`PAYROLL_TEAM_MODE=OFF`（默认）保持旧链路；`STATIC` 在一轮对话旁路写入
   1 条团队运行（run）与计算/验证/核算各 1 条节点记录（node），成功、失败、中断都会落库；
-  记录失败只写日志，不影响回答。`SHADOW` 额外启用影子组队（见下节），`ACTIVE` 留给 P2。
+  记录失败只写日志，不影响回答。`SHADOW` 额外启用影子组队（见下节），`ACTIVE` 按白名单
+  直接执行动态团队（见 P2 小节）。
 - 影子组队（P1，`PAYROLL_TEAM_MODE=SHADOW`）：主链路回答落库后按
   `PAYROLL_TEAM_SHADOW_SAMPLE_RATE`（默认 0.15）异步采样。每轮最多两次轻量模型调用
   （意图抽取 + 计划选角）和一次动态 DAG 执行；计划只能从 Top-3 短名单内选人，
@@ -458,9 +463,20 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   失败先做一次 Top-1 确定性修复，仍失败则记录 `L2` 回退。影子运行只写
   `mode=SHADOW`、`is_primary=false` 的 run 与节点/trace，`baseline_run_id` 指向本轮
   静态运行，不向用户展示、不改变回答或 SSE 事件。
+- ACTIVE 灰度（P2，`PAYROLL_TEAM_MODE=ACTIVE`）：仅在未配置全局默认流程、且当前为
+  静态三段流水线时尝试动态组队，白名单由 `PAYROLL_TEAM_ACTIVE_USER_IDS` /
+  `PAYROLL_TEAM_ACTIVE_SESSION_IDS` 控制（逗号分隔，留空表示全部放行）。计划成功则
+  动态团队直接接管本轮回答：ACTIVE run 记为主运行（`is_primary=true`）并绑定消息，
+  静态 run 改为 `CANCELLED`；计划或执行失败则记录带 `L0`/`L2`/`L3` 前缀的
+  `FALLBACK` run（`fallback_of_run_id` 指向静态 run），用户继续得到标准流程结果。
+  审计动作：`team.active.executed` / `team.active.fallback`。写操作与不可归类任务在
+  `L0` 直接回退，不进入动态执行。
 - 影子报告：`GET /api/admin/team/shadow-report?days=7`（需 `agent:manage`，`days=0`
   取统计窗口）。返回计划率、成功率、`L0`–`L4` 回退分布、模板/任务/选角分布，
   以及相对静态基线（`baseline_run_id`）的成功率与耗时差异。
+- 管理台「团队运行」页签（需 `agent:manage`）：展示当前模式与白名单、按天/模式/状态
+  筛选近期运行；点击运行查看计划、模板、会话/消息、节点级状态/工具/耗时与回退原因，
+  回退运行标记「已回退到标准流程」并给出关联的静态运行。
 - 追溯链：`message_id → run_id → node_id → trace_id`。工具追溯新增 `run_id`/`node_id`，
   `GET /api/chat/sessions/{id}/messages/{messageId}/team` 返回主运行、全部运行、节点摘要、
   trace 引用与当前反馈；跨用户访问返回 403。
@@ -535,10 +551,12 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_AUTH_ENABLED` | `true` | 是否启用登录与权限；`false` 时所有请求视为内置管理员（仅测试/离线演示） |
 | `PAYROLL_ADMIN_PASSWORD` | `admin123` | 首次建库时创建 `admin` 的初始密码，仅在 `app_users` 为空时生效 |
 | `PAYROLL_AUDIT_RETENTION_DAYS` | `180` | 审计日志保留天数，启动时清理更早记录 |
-| `PAYROLL_TEAM_MODE` | `OFF` | 动态团队开关：`OFF` 保持旧链路；`STATIC` 记录静态运行；`SHADOW` 采样旁路动态组队 |
+| `PAYROLL_TEAM_MODE` | `OFF` | 动态团队开关：`OFF` 保持旧链路；`STATIC` 记录静态运行；`SHADOW` 采样旁路动态组队；`ACTIVE` 白名单内直接执行动态团队 |
 | `PAYROLL_TEAM_RETENTION_DAYS` | `180` | 团队运行保留天数，启动时软归档更早记录 |
 | `PAYROLL_TEAM_STATS_WINDOW_DAYS` | `30` | 评分榜默认统计窗口（天） |
 | `PAYROLL_TEAM_SHADOW_SAMPLE_RATE` | `0.15` | `SHADOW` 模式采样率；设 0 关闭影子执行 |
+| `PAYROLL_TEAM_ACTIVE_USER_IDS` | 空 | `ACTIVE` 用户白名单（逗号分隔用户 id）；留空表示全部用户 |
+| `PAYROLL_TEAM_ACTIVE_SESSION_IDS` | 空 | `ACTIVE` 会话白名单（逗号分隔会话 id）；留空表示全部会话 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`timeoutSeconds` |
 | `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |
@@ -555,6 +573,29 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 `--extract` 依赖结构化输出能力，Ollama 扩展暂不提供该元数据，建议改用 DashScope 模型执行。
 
 > Windows 控制台如出现中文乱码，请加 `-Dfile.encoding=UTF-8`，或先执行 `chcp 65001`。
+
+### MySQL 与 Redis（部门部署）
+
+默认仍是 H2 文件库；多人共用时用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`）切换：
+
+- MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
+  目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。
+- Redis：Spring Session 会话共享、登录失败锁定、单用户对话并发配额（超出返回 429）、
+  同一会话跨实例互斥（`payroll:chat:lock:<sessionId>`，锁随请求结束释放，实例崩溃后按 TTL 自动过期）。
+- 存量数据：`java -jar target/payroll-agent.jar --migrate-to-mysql [--force]`，执行前必须停止 Web 实例。
+
+常用环境变量：`PAYROLL_DB_URL`、`PAYROLL_DB_USER`、`PAYROLL_DB_PASSWORD`、`PAYROLL_DB_POOL_SIZE`、
+`PAYROLL_REDIS_HOST`、`PAYROLL_REDIS_PORT`、`PAYROLL_REDIS_PASSWORD`、
+`PAYROLL_LOGIN_MAX_FAILURES`、`PAYROLL_LOGIN_LOCK_MINUTES`、`PAYROLL_CHAT_MAX_CONCURRENT`、
+`PAYROLL_CHAT_SESSION_LOCK_MINUTES`、`PAYROLL_CHAT_CACHE_MAX_SESSIONS`、`PAYROLL_CHAT_CACHE_IDLE_MINUTES`、
+`PAYROLL_AGENT_CACHE_MAX`、`PAYROLL_AGENT_CACHE_IDLE_MINUTES`。
+完整步骤、迁移校验与回退见 [docs/mysql-redis-deploy.md](docs/mysql-redis-deploy.md)。
+
+> 智能体与会话缓存仍是进程内对象：`HarnessAgent`、`PayrollChat` 持有流式回调与运行期状态，
+> 不能序列化进 Redis。Redis 只负责跨实例协调，缓存按上限与空闲时间淘汰，未命中时从数据库与
+> Nacos 定义重建；因此多实例部署无需共享缓存，单实例内存也不会无限增长。
+
+管理与监控端点：`/actuator/health`、`/actuator/metrics`、`/actuator/prometheus`。
 
 ## 管理台 API
 
@@ -628,6 +669,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | PUT/DELETE | `/api/admin/flows/{id}` | 更新 / 删除流程（默认流程不可删） |
 | PUT | `/api/admin/flows/{id}/active` | 设为全局默认流程，下一轮对话生效 |
 | GET | `/api/admin/agent-stats?days=30` | 智能体评分榜：窗口内样本、综合分、客观/反馈分、时延与稳定性（需 `agent:manage`） |
+| GET | `/api/admin/team/config` | 动态团队模式、白名单、保留/统计窗口与影子采样率（需 `agent:manage`） |
+| GET | `/api/admin/team/runs?days=7&mode=&status=&limit=100` | 近期团队运行列表与模式/状态计数（需 `agent:manage`） |
+| GET | `/api/admin/team/runs/{runId}` | 单次运行的摘要、计划/评分快照与节点记录（需 `agent:manage`） |
+| GET | `/api/admin/team/shadow-report?days=7` | 影子对比报告：计划率、回退分布、模板/选角分布与基线差异（需 `agent:manage`） |
 | GET | `/api/audit` | 审计日志分页查询，支持 `from`/`to`/`actor`/`action`/`resource_type`/`resource_id`/`result`/`keyword`/`page`/`size`（需 `audit:read`） |
 | GET | `/api/audit/export` | 按相同条件导出 CSV（含 BOM，最多 1 万条，需 `audit:read`） |
 
@@ -796,6 +841,9 @@ mvn test
   模板计划校验（复核顺序、环、重复智能体、私有/下架）、Top-1 去重选角与回退、计划编译为流程、
   上游消息渲染与金额只取工具追溯、SHADOW L0/L2/L3 回退落库、影子报告聚合与基线差异、
   影子 trace 按 `run_id` 读取且不污染消息依据
+- 动态团队 P2：ACTIVE 白名单（用户/会话）与默认流程优先、同步动态执行与静态主运行切换、
+  `L0`/`L2`/`L3` 回退记录与 `fallback_of_run_id` 关联、`team.active.executed`/`team.active.fallback`
+  审计、管理台「团队运行」只读页签与 `/api/admin/team/*` 查询接口
 - 工具结构化成功/错误返回、工资条输出、Toolkit 反射注册与 schema 生成
 
 既有管理台测试通过 `payroll.auth.enabled=false` 跳过登录，专注业务回归；

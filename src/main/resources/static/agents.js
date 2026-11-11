@@ -18,12 +18,13 @@ function initAgentsTab() {
         loading: false,
         saving: false,
         activating: false,
+        clearing: false,
         agents: [],
         skills: [],
         stats: { window_days: 0, cached: false, record_count: 0, feedback_count: 0, agents: [] },
         statsLoading: false,
         meta: { writable: false, location: '', tags: [] },
-        active: { agentId: '', name: '', configured: '' },
+        active: { agentId: '', name: '', configured: '', available: true },
         filters: { keyword: '', tag: '', skillId: '', status: '', visibility: '' },
         dialogVisible: false,
         editingId: null,
@@ -37,9 +38,13 @@ function initAgentsTab() {
           : '存储：代码内置（未启用 Nacos，只读）';
       },
       activeText() {
-        return this.active.name
-          ? `核算智能体：${this.active.name}`
-          : '核算智能体：默认流水线';
+        if (this.active.configured && this.active.available === false) {
+          return `配置的核算智能体「${this.active.configured}」不可用，对话已阻止回退薪酬流水线`;
+        }
+        if (this.active.configured) {
+          return `核算智能体：${this.active.name}`;
+        }
+        return '核算智能体：内置三段流水线';
       },
       filteredAgents() {
         const f = this.filters;
@@ -79,7 +84,7 @@ function initAgentsTab() {
           this.agents = agents || [];
           this.meta = meta || { writable: false, location: '', tags: [] };
           this.skills = skills || [];
-          this.active = active || { agentId: '', name: '', configured: '' };
+          this.active = active || { agentId: '', name: '', configured: '', available: true };
         } catch (error) {
           showError(error);
         } finally {
@@ -173,13 +178,33 @@ function initAgentsTab() {
       async activate(agent) {
         this.activating = true;
         try {
-          await api(`/api/admin/agents/${agent.id}/active`, { method: 'PUT' });
-          toast(`已将「${agent.name}」设为核算智能体，下一轮对话生效`, 'success');
+          const result = await api(`/api/admin/agents/${agent.id}/active`, { method: 'PUT' });
+          const cleared = result && result.clearedFlowId;
+          toast(
+            `已将「${agent.name}」设为核算智能体`
+              + (cleared ? `，并取消默认流程 ${cleared}` : '')
+              + '，下一轮对话生效',
+            'success',
+          );
           await this.reload();
         } catch (error) {
           showError(error);
         } finally {
           this.activating = false;
+        }
+      },
+      async clearActive() {
+        if (!this.meta.writable || !this.active.configured) return;
+        if (!window.confirm('取消全局核算智能体？下一轮对话回到内置三段流水线。')) return;
+        this.clearing = true;
+        try {
+          await api('/api/admin/agents/active', { method: 'DELETE' });
+          toast('已取消核算智能体，下一轮对话生效', 'success');
+          await this.reload();
+        } catch (error) {
+          showError(error);
+        } finally {
+          this.clearing = false;
         }
       },
       statusText(status) {
@@ -228,7 +253,12 @@ function initAgentsTab() {
           <h2>Agent 管理</h2>
           <div class="actions">
             <span class="hint">{{ storageText }}</span>
-            <span class="hint agent-active-hint">{{ activeText }}</span>
+            <span class="hint agent-active-hint"
+                  :class="{ warn: active.configured && active.available === false }">{{ activeText }}</span>
+            <button v-if="active.configured" type="button" @click="clearActive"
+                    :disabled="!meta.writable || clearing">
+              {{ clearing ? '取消中…' : '取消核算智能体' }}
+            </button>
             <button type="button" @click="reload">刷新</button>
             <button type="button" class="primary" @click="openCreate" :disabled="!meta.writable">新建智能体</button>
           </div>

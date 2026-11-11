@@ -187,18 +187,22 @@ class FlowAdminControllerTest {
     void activateRequiresOnlineAgents() {
         FlowDefinition online = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(online);
+        when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
 
         ApiResponse response = controller.activate("flow-1");
 
-        assertEquals(Map.of("activeFlowId", "flow-1"), response.data());
+        assertEquals(
+                Map.of("activeFlowId", "flow-1", "clearedAgentId", "agent-x"),
+                response.data());
         verify(flowRegistry).setActiveFlow("flow-1");
+        verify(agentRegistry).clearActiveAgent();
         verify(auditService)
                 .record(
                         eq("flow.activate"),
                         eq("flow_definition"),
                         eq("flow-1"),
                         eq(null),
-                        eq(Map.of("activeFlowId", "flow-1")));
+                        eq(Map.of("activeFlowId", "flow-1", "clearedAgentId", "agent-x")));
 
         when(agentRegistry.list())
                 .thenReturn(

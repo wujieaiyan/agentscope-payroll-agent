@@ -171,7 +171,10 @@ public final class TeamPlanGenerator {
         roles.forEach(
                 (key, value) -> {
                     if (key instanceof String name && value instanceof String agentId) {
-                        byRole.put(name.trim().toUpperCase(Locale.ROOT), agentId);
+                        String cleaned = cleanAgentId(agentId);
+                        if (!cleaned.isEmpty()) {
+                            byRole.put(name.trim().toUpperCase(Locale.ROOT), cleaned);
+                        }
                     }
                 });
         Map<TeamRole, String> bindings = new LinkedHashMap<>();
@@ -192,6 +195,39 @@ public final class TeamPlanGenerator {
             bindings.put(role, agentId);
         }
         return bindings;
+    }
+
+    /**
+     * 小模型常把候选整行（含 {@code (rank=..., cold_start)} 注解）或引号一起回填，
+     * 直接做短名单匹配会误判为“越界选角”。这里只保留 agent_id 本身。
+     */
+    static String cleanAgentId(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String value = raw.trim();
+        int cut = value.length();
+        int paren = value.indexOf('(');
+        if (paren > 0) {
+            cut = Math.min(cut, paren);
+        }
+        int wideParen = value.indexOf('（');
+        if (wideParen > 0) {
+            cut = Math.min(cut, wideParen);
+        }
+        value = value.substring(0, cut).trim();
+        while (value.length() >= 2) {
+            char first = value.charAt(0);
+            char last = value.charAt(value.length() - 1);
+            if ((first == '"' && last == '"')
+                    || (first == '\'' && last == '\'')
+                    || (first == '`' && last == '`')) {
+                value = value.substring(1, value.length() - 1).trim();
+            } else {
+                break;
+            }
+        }
+        return value;
     }
 
     private static String rationale(String json) {
