@@ -30,7 +30,7 @@ import java.util.List;
 import org.springframework.boot.SpringApplication;
 
 /**
- * 薪酬智能体命令行入口。
+ * 协同智能体命令行入口。
  *
  * <pre>
  *   --web                           启动本地 Web 管理台（员工/考核/政策/工资批次）
@@ -216,7 +216,7 @@ public final class PayrollApplication {
             if (input.isBlank()) {
                 continue;
             }
-            System.out.print("\n薪酬智能体：");
+            System.out.print("\n协同智能体：");
             try {
                 chat.stream(input.trim(), new ConsoleChatListener());
             } catch (PayrollException e) {

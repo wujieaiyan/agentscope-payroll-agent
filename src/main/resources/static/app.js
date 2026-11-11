@@ -2061,7 +2061,7 @@ function appendChatMessage(role, text, tools, isError, options = {}) {
     meta.className = 'chat-meta';
     const name = document.createElement('span');
     name.className = 'chat-name';
-    name.textContent = role === 'user' ? '你' : '薪酬智能体';
+    name.textContent = role === 'user' ? '你' : '协同智能体';
     const time = document.createElement('span');
     time.className = 'chat-time';
     time.textContent = chatClock(date);
@@ -2831,7 +2831,7 @@ function appendStreamingMessage(sessionId) {
     meta.className = 'chat-meta';
     const label = document.createElement('span');
     label.className = 'chat-name';
-    label.textContent = '薪酬智能体';
+    label.textContent = '协同智能体';
     const time = document.createElement('span');
     time.className = 'chat-time';
     time.textContent = chatClock(date);

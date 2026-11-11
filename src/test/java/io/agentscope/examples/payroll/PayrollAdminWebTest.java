@@ -48,7 +48,7 @@ class PayrollAdminWebTest {
     @DisplayName("管理台首页、员工接口、预览/出账/发送与 Excel 下载可用")
     void servesAdminWorkflow() throws Exception {
         String home = get("/");
-        assertTrue(home.contains("薪酬智能体"));
+        assertTrue(home.contains("协同智能体"));
 
         String employees = get("/api/employees?include_inactive=true");
         assertTrue(employees.contains("EMP001"));
