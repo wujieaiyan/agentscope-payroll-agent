@@ -21,6 +21,11 @@ public interface ChatContextStore {
     default void savePersona(long sessionId, String persona) {
     }
 
+    /** 角色切换时作废会话内未确认的写操作提案，返回作废数量。 */
+    default int cancelPendingActions(long sessionId) {
+        return 0;
+    }
+
     /** CLI 等无持久化场景使用的空实现。 */
     static ChatContextStore noop() {
         return new ChatContextStore() {

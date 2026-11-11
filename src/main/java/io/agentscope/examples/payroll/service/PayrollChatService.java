@@ -13,11 +13,15 @@ import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.examples.payroll.agent.ActionGuard;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.ToolSafety;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
+import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AgentRunRecord;
+import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
@@ -82,12 +86,17 @@ public final class PayrollChatService implements PayrollChat {
     private final Supplier<String> activeFlowIdSupplier;
     private final Supplier<List<AgentDefinition>> agentCatalogSupplier;
     private final ActiveTeamService activeTeam;
+    private final boolean routingEnabled;
+    private final boolean actionConfirmEnabled;
+    private final int actionProposalTtlMinutes;
+    private final ToolSafety toolSafety;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final List<ChatToolTrace> collectedTraces = new CopyOnWriteArrayList<>();
     private final List<PayrollChat.StageRun> stageRuns = new CopyOnWriteArrayList<>();
     private final RuntimeContext sessionContext;
     private volatile TraceScope runScope = TraceScope.none();
+    private volatile ActionGuard roundGuard;
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
@@ -172,6 +181,73 @@ public final class PayrollChatService implements PayrollChat {
             Supplier<String> activeFlowIdSupplier,
             Supplier<List<AgentDefinition>> agentCatalogSupplier,
             ActiveTeamService activeTeam) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                true);
+    }
+
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                routingEnabled,
+                false,
+                15,
+                ToolSafety.defaults());
+    }
+
+    /**
+     * @param actionConfirmEnabled 写工具是否需要会话内确认；关闭时按旧行为直接执行
+     * @param actionProposalTtlMinutes 待确认提案的有效期
+     * @param toolSafety 工具读写分类器；null 时使用默认分类
+     */
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled,
+            boolean actionConfirmEnabled,
+            int actionProposalTtlMinutes,
+            ToolSafety toolSafety) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -183,6 +259,10 @@ public final class PayrollChatService implements PayrollChat {
         this.activeFlowIdSupplier = activeFlowIdSupplier;
         this.agentCatalogSupplier = agentCatalogSupplier;
         this.activeTeam = activeTeam == null ? ActiveTeamService.disabled() : activeTeam;
+        this.routingEnabled = routingEnabled;
+        this.actionConfirmEnabled = actionConfirmEnabled;
+        this.actionProposalTtlMinutes = Math.max(1, actionProposalTtlMinutes);
+        this.toolSafety = toolSafety == null ? ToolSafety.defaults() : toolSafety;
         this.sessionContext =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
@@ -237,7 +317,13 @@ public final class PayrollChatService implements PayrollChat {
                             : current.activeAgent() == null
                                     ? "pipeline"
                                     : "agent:" + current.activeAgent().id();
-            applyPersona(persona, events);
+            String previousPersona = applyPersona(persona, events);
+            String switchNote =
+                    previousPersona == null
+                                    || previousPersona.isBlank()
+                                    || previousPersona.equals(persona)
+                            ? ""
+                            : "本轮刚切换角色：" + previousPersona + " → " + persona + "。";
             log.info(
                     "[多智能体] 本轮生效角色：{}（{}）",
                     persona,
@@ -247,71 +333,253 @@ public final class PayrollChatService implements PayrollChat {
                                     ? "内置三段流水线"
                                     : "单个智能体");
 
-            prepareContext(context, events, current.summarizer());
-            String memoryBlock = memory.recall(userId, sessionId, question);
-            if (!memoryBlock.isBlank()) {
-                log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
-            }
-            String calculatorInput = context.augment(question, memoryBlock);
-
-            ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
-            if (resolvedFlow == null && current.pipeline() && activeTeam.enabled()) {
-                teamAttempt =
-                        activeTeam.attempt(
-                                this, userId, sessionId, question, calculatorInput, events);
-                if (teamAttempt.succeeded()) {
-                    String teamReply = teamAttempt.reply();
-                    events.onText(teamReply);
-                    context.append(question, teamReply);
-                    log.info(
-                            "[动态团队] ACTIVE 答复：plan={}，template={}，智能体={}，工具={}，trace={}，耗时={}ms",
-                            teamAttempt.planId(),
-                            teamAttempt.templateId(),
-                            teamAttempt.agentIds(),
-                            teamAttempt.tools(),
-                            teamAttempt.traces().size(),
-                            System.currentTimeMillis() - startedAt);
-                    return new Reply(
-                            teamReply,
-                            teamAttempt.tools(),
-                            modelId(),
-                            teamAttempt.traces(),
-                            teamAttempt.teamReply());
+            String plannedPath =
+                    resolvedFlow != null
+                            ? ChatRouting.FLOW
+                            : !current.pipeline()
+                                    ? ChatRouting.AGENT
+                                    : graphOrchestration ? ChatRouting.GRAPH : ChatRouting.PIPELINE;
+            ActionGuard guard =
+                    new ActionGuard(
+                            userId,
+                            sessionId,
+                            plannedPath,
+                            actionConfirmEnabled,
+                            actionProposalTtlMinutes,
+                            toolSafety,
+                            events);
+            roundGuard = guard;
+            sessionContext.put(ActionGuard.class, guard);
+            try {
+                prepareContext(context, events, current.summarizer());
+                String memoryBlock = memory.recall(userId, sessionId, question);
+                if (!memoryBlock.isBlank()) {
+                    log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
                 }
+                String calculatorInput = context.augment(question, memoryBlock);
+
+                ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
+                if (resolvedFlow == null && current.pipeline() && activeTeam.enabled()) {
+                    teamAttempt =
+                            activeTeam.attempt(
+                                    this, userId, sessionId, question, calculatorInput, events);
+                    if (teamAttempt.succeeded()) {
+                        String teamReply = composeReply(teamAttempt.reply(), guard);
+                        events.onText(teamReply);
+                        context.append(question, teamReply);
+                        log.info(
+                                "[动态团队] ACTIVE 答复：plan={}，template={}，智能体={}，工具={}，trace={}，耗时={}ms",
+                                teamAttempt.planId(),
+                                teamAttempt.templateId(),
+                                teamAttempt.agentIds(),
+                                teamAttempt.tools(),
+                                teamAttempt.traces().size(),
+                                System.currentTimeMillis() - startedAt);
+                        ChatRouting routing =
+                                buildRouting(
+                                        ChatRouting.TEAM_ACTIVE,
+                                        persona,
+                                        switchNote
+                                                + "本轮由动态团队接管（计划 "
+                                                + teamAttempt.planId()
+                                                + "）。",
+                                        null,
+                                        null,
+                                        "team|" + teamAttempt.templateId(),
+                                        teamAttempt.agentIds(),
+                                        teamAttempt.runId(),
+                                        startedAt,
+                                        List.of());
+                        logRouting(routing);
+                        return new Reply(
+                                teamReply,
+                                teamAttempt.tools(),
+                                modelId(),
+                                teamAttempt.traces(),
+                                teamAttempt.teamReply(),
+                                routing,
+                                guard.proposals());
+                    }
+                    if (teamAttempt.recorded()) {
+                        clearRoundState();
+                    }
+                }
+
+                String fromPath = null;
+                String fallbackReason = null;
                 if (teamAttempt.recorded()) {
-                    clearRoundState();
+                    fromPath = ChatRouting.TEAM_ACTIVE;
+                    fallbackReason = teamAttempt.fallbackReason();
                 }
-            }
 
-            String reply;
-            if (resolvedFlow != null) {
-                reply = flowReply(calculatorInput, resolvedFlow, events, tools);
-            } else if (!current.pipeline()) {
-                reply = activeAgentReply(calculatorInput, current, events, tools);
-            } else if (graphOrchestration) {
-                reply = graphReply(question, calculatorInput, current, events, tools);
-            } else {
-                reply = legacyReply(question, calculatorInput, current, events, tools);
+                String reply;
+                String path;
+                String reason;
+                String signature;
+                List<String> agentIds;
+                if (resolvedFlow != null) {
+                    reply = flowReply(calculatorInput, resolvedFlow, events, tools);
+                    path = ChatRouting.FLOW;
+                    reason =
+                            "本轮由默认流程「"
+                                    + resolvedFlow.flow().name()
+                                    + "」编排（"
+                                    + resolvedFlow.flow().nodes().size()
+                                    + " 个节点）。";
+                    signature =
+                            "flow:"
+                                    + resolvedFlow.flow().id()
+                                    + "|"
+                                    + resolvedFlow.flow().nodes().size();
+                    agentIds = flowAgentIds(resolvedFlow);
+                } else if (!current.pipeline()) {
+                    reply = activeAgentReply(calculatorInput, current, events, tools);
+                    path = ChatRouting.AGENT;
+                    AgentDefinition agent = current.activeAgent();
+                    reason =
+                            "本轮由智能体「"
+                                    + (agent == null ? "核算智能体" : agent.name())
+                                    + "」直接作答。";
+                    signature = PayrollAgentFactory.definitionSignature(agent);
+                    agentIds = agent == null ? List.of() : List.of(agent.id());
+                } else if (graphOrchestration) {
+                    reply = graphReply(question, calculatorInput, current, events, tools);
+                    path = ChatRouting.GRAPH;
+                    reason = "本轮由图编排（langgraph4j）驱动三阶段执行。";
+                    signature = "graph";
+                    agentIds = roundAgentIds();
+                } else {
+                    reply = legacyReply(question, calculatorInput, current, events, tools);
+                    path = ChatRouting.PIPELINE;
+                    reason = "本轮使用内置三段流水线（计算 → 验证 → 核算）。";
+                    signature = "pipeline";
+                    agentIds = roundAgentIds();
+                }
+                if (fromPath != null) {
+                    reason = reason + " 动态团队接管失败，已回退静态链路。";
+                }
+                reply = composeReply(reply, guard);
+                context.append(question, reply);
+                log.info(
+                        "[多智能体] 完成：总耗时={}ms，工具={}，答复长度={}，上下文=摘要{}轮+最近{}轮",
+                        System.currentTimeMillis() - startedAt,
+                        tools,
+                        reply.length(),
+                        context.summarizedTurns(),
+                        context.recentTurnCount());
+                log.info(
+                        "[多智能体] 工具追溯汇总：{} 次调用，金额类 {} 次",
+                        collectedTraces.size(),
+                        collectedTraces.stream().filter(trace -> !trace.amounts().isEmpty()).count());
+                ChatRouting routing =
+                        buildRouting(
+                                path,
+                                persona,
+                                switchNote + reason,
+                                fromPath,
+                                fallbackReason,
+                                signature,
+                                agentIds,
+                                0L,
+                                startedAt,
+                                stageKeys());
+                logRouting(routing);
+                return new Reply(
+                        reply,
+                        List.copyOf(tools),
+                        modelId(),
+                        List.copyOf(collectedTraces),
+                        teamAttempt.teamReply(),
+                        routing,
+                        guard.proposals());
+            } finally {
+                roundGuard = null;
+                sessionContext.put(ActionGuard.class, null);
             }
-            context.append(question, reply);
-            log.info(
-                    "[多智能体] 完成：总耗时={}ms，工具={}，答复长度={}，上下文=摘要{}轮+最近{}轮",
-                    System.currentTimeMillis() - startedAt,
-                    tools,
-                    reply.length(),
-                    context.summarizedTurns(),
-                    context.recentTurnCount());
-            log.info(
-                    "[多智能体] 工具追溯汇总：{} 次调用，金额类 {} 次",
-                    collectedTraces.size(),
-                    collectedTraces.stream().filter(trace -> !trace.amounts().isEmpty()).count());
-            return new Reply(
-                    reply,
-                    List.copyOf(tools),
-                    modelId(),
-                    List.copyOf(collectedTraces),
-                    teamAttempt.teamReply());
         }
+    }
+
+    /**
+     * 提案后由服务端收尾：保留提案前已流式输出的正文，模型在卡片之后的续写一律丢弃，
+     * 避免出现「已执行完成」这类与实际状态不符的说法。
+     */
+    private static String composeReply(String modelText, ActionGuard guard) {
+        if (guard == null || !guard.hasProposal()) {
+            return modelText == null ? "" : modelText;
+        }
+        String before = guard.textBeforeProposal();
+        String template = guard.finalReplyTemplate();
+        return before.isBlank() ? template : before + "\n\n" + template;
+    }
+
+    private ChatRouting buildRouting(
+            String path,
+            String persona,
+            String reason,
+            String fromPath,
+            String fallbackReason,
+            String signature,
+            List<String> agentIds,
+            long teamRunId,
+            long startedAt,
+            List<String> stages) {
+        if (!routingEnabled) {
+            return null;
+        }
+        return new ChatRouting(
+                path,
+                persona,
+                reason,
+                fromPath,
+                fallbackReason,
+                modelId(),
+                signature,
+                agentIds,
+                teamRunId,
+                System.currentTimeMillis() - startedAt,
+                stages);
+    }
+
+    private static void logRouting(ChatRouting routing) {
+        if (routing == null) {
+            return;
+        }
+        log.info(
+                "[路由] path={}，persona={}，agents={}，teamRunId={}，from={}，fallback={}，stages={}，耗时={}ms",
+                routing.path(),
+                routing.persona(),
+                routing.agentIds(),
+                routing.teamRunId(),
+                routing.fromPath(),
+                routing.fallbackReason(),
+                routing.stages(),
+                routing.elapsedMs());
+    }
+
+    private static List<String> flowAgentIds(ResolvedFlow resolved) {
+        return resolved.flow().nodes().stream()
+                .filter(node -> FlowNode.TYPE_AGENT.equalsIgnoreCase(node.type()))
+                .map(FlowNode::agentId)
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .toList();
+    }
+
+    /** 本轮实际参与阶段的智能体（流水线跳过阶段也会记入，按 stageRuns 去重）。 */
+    private List<String> roundAgentIds() {
+        return stageRuns.stream()
+                .map(PayrollChat.StageRun::agentId)
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .toList();
+    }
+
+    private List<String> stageKeys() {
+        return stageRuns.stream()
+                .map(PayrollChat.StageRun::stageKey)
+                .filter(key -> key != null && !key.isBlank())
+                .distinct()
+                .toList();
     }
 
     /** 动态尝试失败后清空本轮缓冲，避免半套动态阶段混入静态运行的追溯。 */
@@ -350,6 +618,14 @@ public final class PayrollChatService implements PayrollChat {
                 calculation.elapsedMs(),
                 calculation.targets().size(),
                 preview(calculation.text(), LOG_PREVIEW_LIMIT));
+
+        if (roundGuard != null && roundGuard.hasProposal()) {
+            log.info("[多智能体] 已生成待确认操作，跳过后续校验与核算阶段");
+            events.onPhase("已生成待确认操作，本轮停止后续核算");
+            recordSkippedStage("validator", 0);
+            recordSkippedStage("accountant", 0);
+            return calculation.text();
+        }
 
         String validation;
         if (calculation.targets().isEmpty()) {
@@ -510,24 +786,36 @@ public final class PayrollChatService implements PayrollChat {
      * 会话与当前角色绑定：管理员切换默认流程/智能体后，上一角色的对话上下文与向量线索
      * 都不能继续注入，否则情感专家会看到“武杰的工资”这类历史问题并给出串线回答。
      */
-    void applyPersona(String persona, ChatStreamListener events) {
+    String applyPersona(String persona, ChatStreamListener events) {
         if (sessionId <= 0 || persona == null || persona.isBlank()) {
-            return;
+            return null;
         }
         String previous;
         try {
             previous = contextStore.persona(sessionId);
         } catch (RuntimeException e) {
             log.warn("[会话] 读取角色绑定失败：sessionId={}，原因={}", sessionId, rootMessage(e));
-            return;
+            return null;
         }
         if (persona.equals(previous)) {
-            return;
+            return null;
         }
         if (previous != null && !previous.isBlank()) {
             context = new ConversationContext("", 0);
             persistContext(context);
             memory.onPersonaChanged(userId, sessionId);
+            try {
+                int canceled = contextStore.cancelPendingActions(sessionId);
+                if (canceled > 0) {
+                    log.info("[会话] 角色切换作废未确认提案：sessionId={}，数量={}", sessionId, canceled);
+                    events.onPhase("检测到智能体切换，已作废未确认的写操作");
+                }
+            } catch (RuntimeException e) {
+                log.warn(
+                        "[会话] 作废未确认提案失败：sessionId={}，原因={}",
+                        sessionId,
+                        rootMessage(e));
+            }
             events.onPhase("检测到智能体切换，已隔离上一角色的会话上下文");
             log.info(
                     "[会话] 角色切换：sessionId={}，{} -> {}，已清空会话上下文",
@@ -540,6 +828,7 @@ public final class PayrollChatService implements PayrollChat {
         } catch (RuntimeException e) {
             log.warn("[会话] 保存角色绑定失败：sessionId={}，原因={}", sessionId, rootMessage(e));
         }
+        return previous;
     }
 
     private String flowReply(
@@ -612,21 +901,26 @@ public final class PayrollChatService implements PayrollChat {
         }
         String label = node.label();
         ToolTraceRecorder recorder = new ToolTraceRecorder();
-        RuntimeContext nodeContext = RuntimeContext.builder()
-                .userId(String.valueOf(userId))
-                .sessionId(sessionId + ":" + node.id())
-                .put(ToolTraceRecorder.class, recorder)
-                .put(
-                        TraceScope.class,
-                        new TraceScope(
-                                runScope.runId(),
-                                runScope.planId(),
-                                node.id(),
-                                node.agentId(),
-                                role,
-                                runScope.mode(),
-                                node.id()))
-                .build();
+        RuntimeContext.Builder nodeContextBuilder =
+                RuntimeContext.builder()
+                        .userId(String.valueOf(userId))
+                        .sessionId(sessionId + ":" + node.id())
+                        .put(ToolTraceRecorder.class, recorder)
+                        .put(
+                                TraceScope.class,
+                                new TraceScope(
+                                        runScope.runId(),
+                                        runScope.planId(),
+                                        node.id(),
+                                        node.agentId(),
+                                        role,
+                                        runScope.mode(),
+                                        node.id()));
+        ActionGuard guard = roundGuard;
+        if (guard != null) {
+            nodeContextBuilder.put(ActionGuard.class, guard);
+        }
+        RuntimeContext nodeContext = nodeContextBuilder.build();
         PayrollAgentFactory.NodeAgent runtime =
                 PayrollAgentFactory.sharedFlowNodeAgent(engine, agent);
         try {
@@ -937,7 +1231,15 @@ public final class PayrollChatService implements PayrollChat {
                                 } else if (event instanceof TextBlockDeltaEvent delta) {
                                     streamed.append(delta.getDelta());
                                     if (answerStage) {
-                                        listener.onText(delta.getDelta());
+                                        ActionGuard guard =
+                                                callContext.get(ActionGuard.class);
+                                        // 提案后的模型续写不展示，终稿由服务端组装
+                                        if (guard == null || !guard.hasProposal()) {
+                                            if (guard != null) {
+                                                guard.observeText(delta.getDelta());
+                                            }
+                                            listener.onText(delta.getDelta());
+                                        }
                                     } else {
                                         listener.onAgentOutput(stageKey, delta.getDelta());
                                     }
@@ -990,8 +1292,11 @@ public final class PayrollChatService implements PayrollChat {
                         ? finalText[0].trim()
                         : streamed.toString().trim();
         if (streamed.length() == 0 && !text.isBlank()) {
+            ActionGuard guard = callContext.get(ActionGuard.class);
             if (answerStage) {
-                listener.onText(text);
+                if (guard == null || !guard.hasProposal()) {
+                    listener.onText(text);
+                }
             } else {
                 listener.onAgentOutput(stageKey, text);
             }
@@ -1407,8 +1712,9 @@ public final class PayrollChatService implements PayrollChat {
             // 配置了智能体但不可用时必须失败，不能静默回退到薪酬流水线。
             throw e;
         } catch (RuntimeException e) {
-            log.warn("[Agent] 读取核算智能体配置失败，回退默认流水线：{}", rootMessage(e));
-            return null;
+            // 与 resolveActiveFlow 对齐：未知异常视为配置/程序故障，直接报错而非更换回答角色。
+            throw new PayrollException(
+                    "读取核算智能体配置失败，已阻止回退薪酬流水线：" + rootMessage(e), e);
         }
     }
 

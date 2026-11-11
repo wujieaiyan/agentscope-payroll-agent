@@ -1,11 +1,14 @@
 package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.db.H2ChatStore;
+import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
 import io.agentscope.examples.payroll.domain.ChatMessage;
+import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.memory.MemorySeed;
 import io.agentscope.examples.payroll.memory.MemorySource;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
@@ -45,6 +48,7 @@ public final class ChatSessionManager implements AutoCloseable {
     private final SessionLockService locks;
     private final int maxCachedChats;
     private final long cacheIdleMillis;
+    private final AuditService audit;
     private final Map<Long, CachedChat> chats = new ConcurrentHashMap<>();
     private final Map<Long, StaticRunRecorder.ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<Long, String> questions = new ConcurrentHashMap<>();
@@ -106,6 +110,30 @@ public final class ChatSessionManager implements AutoCloseable {
             SessionLockService locks,
             int maxCachedChats,
             int cacheIdleMinutes) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                locks,
+                maxCachedChats,
+                cacheIdleMinutes,
+                null);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowTeamService shadow,
+            ActiveTeamService activeTeams,
+            SessionLockService locks,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
@@ -118,6 +146,7 @@ public final class ChatSessionManager implements AutoCloseable {
                 cacheIdleMinutes <= 0
                         ? Long.MAX_VALUE
                         : Duration.ofMinutes(cacheIdleMinutes).toMillis();
+        this.audit = audit;
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -244,12 +273,15 @@ public final class ChatSessionManager implements AutoCloseable {
                             reply.reply(),
                             reply.tools(),
                             reply.model(),
-                            reply.traces());
+                            reply.traces(),
+                            reply.routing(),
+                            reply.proposals());
             log.info(
                     "[会话] 回答已保存：sessionId={}，messageId={}，工具追溯={}条",
                     sessionId,
                     saved.id(),
                     reply.traces() == null ? 0 : reply.traces().size());
+            recordProposals(sessionId, saved.id(), reply.proposals());
             PayrollChat.TeamReply team = reply.team();
             if (team != null && team.runId() > 0) {
                 if (team.succeeded()) {
@@ -281,10 +313,49 @@ public final class ChatSessionManager implements AutoCloseable {
         }
     }
 
+    /** 提案随助手消息落库后写审计；每条提案一条，便于按 proposalId 追溯。 */
+    private void recordProposals(long sessionId, long messageId, List<ActionProposal> proposals) {
+        if (audit == null || proposals == null || proposals.isEmpty()) {
+            return;
+        }
+        for (ActionProposal proposal : proposals) {
+            try {
+                audit.record(
+                        "chat.action.propose",
+                        "chat_action_proposal",
+                        proposal.proposalId(),
+                        null,
+                        Map.of(
+                                "session_id", sessionId,
+                                "message_id", messageId,
+                                "tool_name", proposal.toolName(),
+                                "risk_level", proposal.riskLevel(),
+                                "safety_source", proposal.safetySource(),
+                                "summary", proposal.summary()));
+            } catch (RuntimeException e) {
+                log.warn(
+                        "[审计] 记录提案失败：proposalId={}，原因={}",
+                        proposal.proposalId(),
+                        rootMessage(e));
+            }
+        }
+    }
+
     /** 按消息读取计算依据，先校验会话归属。 */
     public List<ChatToolTrace> traces(long userId, long sessionId, long messageId) {
         store.requireOwned(sessionId, userId);
         return store.traces(sessionId, messageId);
+    }
+
+    /** 单条助手消息的路由快照；会话不存在或不属于当前用户时按 404 处理。 */
+    public ChatRouting routing(long userId, long sessionId, long messageId) {
+        ChatSession session =
+                store.find(sessionId)
+                        .filter(item -> item.userId() == userId)
+                        .orElseThrow(() -> new PayrollNotFoundException("会话不存在或无权访问"));
+        return store.message(session.id(), messageId)
+                .map(ChatMessage::routing)
+                .orElseThrow(() -> new PayrollNotFoundException("消息不存在"));
     }
 
     public void fail(long userId, long sessionId, String message) {

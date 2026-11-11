@@ -21,7 +21,8 @@ import org.slf4j.LoggerFactory;
  * <pre>{@code
  * [
  *   {"name":"hr","transport":"sse","url":"http://localhost:9000/sse",
- *    "allowedTools":["get_employee_profile"],"timeoutSeconds":15}
+ *    "allowedTools":["get_employee_profile"],"timeoutSeconds":15,
+ *    "readOnlyTools":["search_employee_docs"]}
  * ]
  * }</pre>
  */
@@ -33,6 +34,7 @@ public record McpServerConfig(
         List<String> args,
         Map<String, String> headers,
         Set<String> allowedTools,
+        Set<String> readOnlyTools,
         Duration timeout) {
 
     public static final String ENV = "PAYROLL_MCP_SERVERS";
@@ -63,10 +65,24 @@ public record McpServerConfig(
         args = args == null ? List.of() : List.copyOf(args);
         headers = headers == null ? Map.of() : Map.copyOf(headers);
         allowedTools = allowedTools == null ? Set.of() : Set.copyOf(allowedTools);
+        readOnlyTools = readOnlyTools == null ? Set.of() : Set.copyOf(readOnlyTools);
         timeout = timeout == null ? DEFAULT_TIMEOUT : timeout;
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("MCP 超时时间必须大于 0");
         }
+    }
+
+    /** 兼容旧调用方：未显式声明只读工具时为空集。 */
+    public McpServerConfig(
+            String name,
+            String transport,
+            String url,
+            String command,
+            List<String> args,
+            Map<String, String> headers,
+            Set<String> allowedTools,
+            Duration timeout) {
+        this(name, transport, url, command, args, headers, allowedTools, Set.of(), timeout);
     }
 
     public static List<McpServerConfig> fromEnvironment() {
@@ -119,7 +135,9 @@ public record McpServerConfig(
                 strings(node.path("args")),
                 stringMap(node.path("headers")),
                 new LinkedHashSet<>(strings(node.path("allowedTools"))),
-                Duration.ofSeconds(node.path("timeoutSeconds").asInt((int) DEFAULT_TIMEOUT.toSeconds())));
+                new LinkedHashSet<>(strings(node.path("readOnlyTools"))),
+                Duration.ofSeconds(
+                        node.path("timeoutSeconds").asInt((int) DEFAULT_TIMEOUT.toSeconds())));
     }
 
     private static String text(JsonNode node, String field) {

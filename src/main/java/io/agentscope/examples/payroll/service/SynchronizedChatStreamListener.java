@@ -98,6 +98,13 @@ final class SynchronizedChatStreamListener implements ChatStreamListener {
     }
 
     @Override
+    public void onActionProposal(io.agentscope.examples.payroll.domain.ActionProposal proposal) {
+        synchronized (lock) {
+            delegate.onActionProposal(proposal);
+        }
+    }
+
+    @Override
     public void onDone(PayrollChat.Reply reply) {
         synchronized (lock) {
             delegate.onDone(reply);

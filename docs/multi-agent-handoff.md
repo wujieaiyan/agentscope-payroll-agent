@@ -1603,3 +1603,59 @@ P2 在 P1 的共享组队流水线上实现 ACTIVE 灰度：白名单内先尝�
 - 管理台团队页签为只读，白名单/模式仍通过环境变量或 YAML 调整。
 - 同步执行会拉长本轮响应时延（实测约 32 秒），必要时可在 P3 改为异步等待 + SSE 进度。
 - 历史消息的团队卡片仍按需展开，只有新流式回答会自动展开 SHADOW/ACTIVE/回退卡片。
+
+## 32. 路由透明化与写操作确认（2026-11-11）
+
+规格与决策记录见 [`routing-action-confirm-spec.md`](routing-action-confirm-spec.md)（D1–D7）。
+
+### 32.1 P0 路由透明化
+
+- `ChatRouting` 覆盖 `PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE/ACTION` 六种链路，
+  每轮结束写入 `chat_messages.routing_json`；SSE `done` 同时返回 `routing`，
+  历史消息一次查询带出，旧消息为 `null` 不补默认值。
+- `GET /api/chat/sessions/{id}/messages/{messageId}/routing` 校验会话归属；
+  前端 chip 与折叠卡片显示路径、回退来源/原因、模型与定义签名。
+- `resolveActiveAgent()` / `resolveActiveFlow()` 统一为硬失败：只有“明确未配置”返回
+  `null` 走流水线，已下架、缺失或供应商异常一律 `PayrollException`，不再静默换角色。
+
+### 32.2 P1 会话内写操作确认
+
+- 新增 `ToolSafety`（分类优先级：本地覆盖 > 内置注解/服务端 hint > 默认写）、
+  `ActionGuard`（单轮闸门）、`ActionProposal` + `chat_action_proposals`、
+  `ActionProposalService`（确认/取消/过期/审计/结果消息）、`DefaultActionExecutor`
+  （显式本地动作 + 按需 MCP 客户端）与 `ChatActionController`。
+- `ActionGuard` 挂在 `RuntimeContext`：第一个写工具生成提案并推送 `action_proposal`，
+  本轮后续工具调用一律拒绝；终稿由服务端模板拼接提案前已流式正文，模型无法续写“已完成”。
+- 状态机 `PENDING → CONFIRMED → EXECUTED/FAILED`、`PENDING → CANCELED/EXPIRED`
+  全部由条件 UPDATE 决定唯一执行权；重复确认返回既有终态，两个标签页并发只执行一次。
+- 仅发起人可查看/确认/取消，他人 404；确认前失去所需权限 403 且保持 `PENDING`；
+  过期 410；角色切换作废未确认提案；删除会话级联清理提案与 trace；提案不进审批待办。
+- 前端确认卡片展示风险级别、参数、有效期倒计时与结果预览，确认后用状态码处理
+  403/404/410，避免依赖错误文案匹配。
+
+### 32.3 P2 MCP 工具分类
+
+- `McpServerConfig` 新增 `readOnlyTools`；`McpToolHints` 在 `listTools()` 时缓存
+  `readOnlyHint`/`destructiveHint`，`GuardedAgentTool` 据此判定只读与不可撤销风险。
+- `PAYROLL_MCP_TRUST_READ_ONLY_HINTS=false` 时所有 MCP 工具一律确认；
+  `safety-overrides` / `readOnlyTools` 的生效值与来源在启动时写审计（`chat.action.safety.override`）。
+
+### 32.4 测试与验证（2026-11-12）
+
+- 全量 `mvn test`：**351 通过，0 失败**（基线 318，新增 33）。
+  新增 `ActionGuardTest`（9）、`ToolSafetyTest`（9）、`DefaultActionExecutorTest`（4）、
+  `ActionProposalServiceTest`（5）、`ChatActionConfirmWebTest`（4），并扩展
+  `McpToolRegistrarTest`（`readOnlyTools` 解析与注解缓存，+2）。
+- `ChatActionConfirmWebTest` 覆盖：SSE 提案 → 确认执行一次 → 结果消息（`ACTION` 路由）
+  → 重复确认幂等；跨用户 404；权限不足 403 且保持 `PENDING`；过期 410；取消；
+  删除会话后不可见；提案不出现在 `/api/approval/tasks`。
+- `SPRING_PROFILES_ACTIVE=dept`（MySQL 8 + Redis 7）启动实测：Flyway 成功应用
+  `V3 - chat routing`，会话创建/消息读取/提案接口在 MySQL 上正常，Redis 会话生效。
+
+### 32.5 已知限制
+
+- 确认人只能是发起人；跨人确认需要独立“提案收件箱”，暂未实现。
+- `DefaultActionExecutor` 默认没有本地写动作，需显式注册本地 handler 或配置 MCP 服务；
+  未注册时确认会落 `FAILED` 并记录原因，不静默成功。
+- 提案确认链路不经过模型，因此结果消息只含工具结果摘要；需要解释时由用户再次提问。
+- `PAYROLL_ACTION_CONFIRM_ENABLED` 默认关闭，用于灰度；关闭时写工具仍按旧行为直接执行。

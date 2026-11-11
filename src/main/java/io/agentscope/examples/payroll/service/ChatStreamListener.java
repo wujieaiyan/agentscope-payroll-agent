@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 
 /**
@@ -60,6 +61,10 @@ public interface ChatStreamListener {
 
     /** 回答正文增量。 */
     default void onText(String delta) {
+    }
+
+    /** 本轮生成了待确认写操作提案；本轮随后不再执行任何写工具。 */
+    default void onActionProposal(ActionProposal proposal) {
     }
 
     /** 本轮回答结束。 */

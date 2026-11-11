@@ -390,17 +390,26 @@ public final class PayrollTools {
             Supplier<Object> action) {
         long startedAt = System.nanoTime();
         String result;
-        try {
-            Object data = action.get();
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "OK");
-            response.put("data", data);
-            result = JsonSupport.toJson(response);
-        } catch (PayrollException e) {
-            result = error(e.getMessage());
-        } catch (RuntimeException e) {
-            log.warn("payroll tool failed", e);
-            result = error("核算执行失败：" + e.getMessage());
+        ActionGuard guard = context == null ? null : context.get(ActionGuard.class);
+        String pending =
+                guard == null
+                        ? null
+                        : guard.intercept(toolName, arguments, false, false, false);
+        if (pending != null) {
+            result = pending;
+        } else {
+            try {
+                Object data = action.get();
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("status", "OK");
+                response.put("data", data);
+                result = JsonSupport.toJson(response);
+            } catch (PayrollException e) {
+                result = error(e.getMessage());
+            } catch (RuntimeException e) {
+                log.warn("payroll tool failed", e);
+                result = error("核算执行失败：" + e.getMessage());
+            }
         }
         ToolTraceRecorder activeRecorder = recorderFor(context);
         if (activeRecorder != null) {

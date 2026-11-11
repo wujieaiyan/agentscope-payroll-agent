@@ -1,6 +1,9 @@
 package io.agentscope.examples.payroll.config;
 
+import io.agentscope.examples.payroll.agent.McpServerConfig;
+import io.agentscope.examples.payroll.agent.ToolSafety;
 import io.agentscope.examples.payroll.db.H2AdminRepository;
+import io.agentscope.examples.payroll.db.H2ActionProposalStore;
 import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2AuditStore;
@@ -12,6 +15,8 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.memory.VectorMemorySettings;
+import io.agentscope.examples.payroll.service.ActionExecutor;
+import io.agentscope.examples.payroll.service.ActionProposalService;
 import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
@@ -19,6 +24,7 @@ import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatFeedbackService;
 import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
+import io.agentscope.examples.payroll.service.DefaultActionExecutor;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
 import io.agentscope.examples.payroll.service.ExcelImportService;
@@ -46,7 +52,9 @@ import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,6 +63,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -66,6 +75,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 
 /** Spring 容器中的薪酬组件装配，与 CLI 使用同一套领域实现。 */
 @Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(ToolSafetyProperties.class)
 public class PayrollConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollConfiguration.class);
@@ -153,6 +163,67 @@ public class PayrollConfiguration {
         return new PayrollChatService(engine);
     }
 
+    /** 工具读写分类：本地覆盖优先，MCP 是否信任服务端 readOnlyHint 可配置。 */
+    @Bean
+    public ToolSafety toolSafety(
+            ToolSafetyProperties properties,
+            @Value("${payroll.mcp.trust-read-only-hints:true}") boolean trustReadOnlyHints) {
+        Map<String, Boolean> mcpReadOnly = new LinkedHashMap<>();
+        for (McpServerConfig config : McpServerConfig.fromEnvironment()) {
+            config.readOnlyTools().forEach(tool -> mcpReadOnly.put(tool, true));
+        }
+        return new ToolSafety(properties.safetyOverrides(), trustReadOnlyHints, mcpReadOnly);
+    }
+
+    /** 强制改判会影响确认行为，启动时逐条写审计，便于事后核对是谁放行的。 */
+    @Bean
+    public ApplicationRunner toolSafetyAuditRunner(
+            AuditService auditService, ToolSafety toolSafety) {
+        return args -> {
+            toolSafety
+                    .overrides()
+                    .forEach(
+                            (tool, readOnly) ->
+                                    auditSafetyOverride(
+                                            auditService,
+                                            "payroll.tools.safety-overrides",
+                                            tool,
+                                            readOnly));
+            toolSafety
+                    .mcpReadOnlyTools()
+                    .forEach(
+                            (tool, readOnly) ->
+                                    auditSafetyOverride(
+                                            auditService,
+                                            "mcp.readOnlyTools",
+                                            tool,
+                                            readOnly));
+        };
+    }
+
+    private static void auditSafetyOverride(
+            AuditService auditService, String source, String toolName, boolean readOnly) {
+        try {
+            auditService.record(
+                    "chat.action.safety.override",
+                    "tool_safety",
+                    toolName,
+                    null,
+                    Map.of("source", source, "read_only", readOnly));
+            log.info(
+                    "[工具安全] 启动审计已记录强制改判：tool={}，来源={}，readOnly={}",
+                    toolName,
+                    source,
+                    readOnly);
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[工具安全] 记录强制改判审计失败：tool={}，来源={}，原因={}",
+                    toolName,
+                    source,
+                    e.getMessage());
+        }
+    }
+
     @Bean
     public PayrollChatFactory payrollChatFactory(
             PayrollEngine engine,
@@ -161,7 +232,11 @@ public class PayrollConfiguration {
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry,
             ActiveTeamService activeTeamService,
-            @Value("${payroll.orchestrator:legacy}") String orchestrator) {
+            ToolSafety toolSafety,
+            @Value("${payroll.orchestrator:legacy}") String orchestrator,
+            @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
+            @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
+            @Value("${payroll.chat.action-confirm.ttl-minutes:15}") int actionProposalTtlMinutes) {
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
             log.info("[多智能体] 编排模式：langgraph4j 图编排（POC）");
@@ -170,6 +245,9 @@ public class PayrollConfiguration {
                 log.warn("[多智能体] 未知编排模式 {}，回退为 legacy", orchestrator);
             }
             log.info("[多智能体] 编排模式：手写状态机");
+        }
+        if (!actionConfirmEnabled) {
+            log.warn("[写操作] 会话内确认开关关闭：写工具将按旧行为直接执行");
         }
         return (sessionId, userId) ->
                 new PayrollChatService(
@@ -183,7 +261,11 @@ public class PayrollConfiguration {
                         flowRegistry::activeFlow,
                         flowRegistry::activeFlowId,
                         agentRegistry::list,
-                        activeTeamService);
+                        activeTeamService,
+                        routingEnabled,
+                        actionConfirmEnabled,
+                        actionProposalTtlMinutes,
+                        toolSafety);
     }
 
     /** 智能体定义与全局核算智能体设置都以 Nacos 为存储，管理接口与运行时共享同一实例。 */
@@ -268,6 +350,26 @@ public class PayrollConfiguration {
     @Bean
     public H2AgentTeamStore agentTeamStore(PayrollDatabase database) {
         return new H2AgentTeamStore(database);
+    }
+
+    @Bean
+    public H2ActionProposalStore actionProposalStore(PayrollDatabase database) {
+        return new H2ActionProposalStore(database);
+    }
+
+    @Bean
+    public ActionExecutor actionExecutor() {
+        return new DefaultActionExecutor();
+    }
+
+    @Bean
+    public ActionProposalService actionProposalService(
+            H2ChatStore chatStore,
+            H2ActionProposalStore actionProposalStore,
+            ActionExecutor actionExecutor,
+            AuditService auditService) {
+        return new ActionProposalService(
+                chatStore, actionProposalStore, actionExecutor, auditService);
     }
 
     @Bean
@@ -411,6 +513,7 @@ public class PayrollConfiguration {
             ShadowTeamService shadowTeamService,
             ActiveTeamService activeTeamService,
             SessionLockService sessionLockService,
+            AuditService auditService,
             @Value("${payroll.chat.cache-max-sessions:200}") int cacheMaxSessions,
             @Value("${payroll.chat.cache-idle-minutes:60}") int cacheIdleMinutes) {
         return new ChatSessionManager(
@@ -422,7 +525,8 @@ public class PayrollConfiguration {
                 activeTeamService,
                 sessionLockService,
                 cacheMaxSessions,
-                cacheIdleMinutes);
+                cacheIdleMinutes,
+                auditService);
     }
 
     @Bean

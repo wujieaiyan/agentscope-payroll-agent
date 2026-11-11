@@ -3,6 +3,8 @@ package io.agentscope.examples.payroll.web;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
+import io.agentscope.examples.payroll.domain.PayrollGoneException;
+import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.support.AuditContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +21,16 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 public class ApiExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    @ExceptionHandler(PayrollNotFoundException.class)
+    public ResponseEntity<ApiResponse> handleNotFound(PayrollNotFoundException e) {
+        return error(HttpStatus.NOT_FOUND, e.getMessage());
+    }
+
+    @ExceptionHandler(PayrollGoneException.class)
+    public ResponseEntity<ApiResponse> handleGone(PayrollGoneException e) {
+        return error(HttpStatus.GONE, e.getMessage());
+    }
 
     @ExceptionHandler({PayrollException.class, IllegalArgumentException.class})
     public ResponseEntity<ApiResponse> handleBadRequest(RuntimeException e) {
