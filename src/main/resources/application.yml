@@ -1,15 +1,24 @@
 server:
-  address: 127.0.0.1
+  # 默认只监听本机；部门部署通过 PAYROLL_SERVER_ADDRESS=0.0.0.0 放开。
+  address: "${PAYROLL_SERVER_ADDRESS:127.0.0.1}"
   port: "${PAYROLL_WEB_PORT:8080}"
   shutdown: graceful
 
 spring:
   application:
     name: payroll-agent
+  profiles:
+    # 部门级部署：--spring.profiles.active=dept 同时启用 MySQL 与 Redis。
+    group:
+      dept: mysql,redis
   # 向量库客户端由 PayrollConfiguration 手动创建，禁用 Boot 的 ES 自动装配。
+  # Redis 相关自动装配默认关闭，仅在 redis profile 中放开，避免本地/测试强依赖 Redis。
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.session.SessionAutoConfiguration
   jackson:
     property-naming-strategy: SNAKE_CASE
     default-property-inclusion: non_null
@@ -37,6 +46,18 @@ payroll:
   auth:
     enabled: "${PAYROLL_AUTH_ENABLED:true}"
     admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+  security:
+    # 同一账号连续失败达到阈值后锁定，Redis 不可用时回退进程内计数。
+    login-max-failures: "${PAYROLL_LOGIN_MAX_FAILURES:5}"
+    login-lock-minutes: "${PAYROLL_LOGIN_LOCK_MINUTES:5}"
+  chat:
+    # 单个用户同时进行的流式生成数，超出返回 429。
+    max-concurrent-per-user: "${PAYROLL_CHAT_MAX_CONCURRENT:2}"
+    # 同一会话跨实例互斥锁的过期时间；需大于单轮回答的最长耗时（SSE 超时 10 分钟）。
+    session-lock-minutes: "${PAYROLL_CHAT_SESSION_LOCK_MINUTES:15}"
+    # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
+    cache-max-sessions: "${PAYROLL_CHAT_CACHE_MAX_SESSIONS:200}"
+    cache-idle-minutes: "${PAYROLL_CHAT_CACHE_IDLE_MINUTES:60}"
   # 审计日志保留天数，启动时清理更早的记录。
   audit:
     retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"
@@ -89,3 +110,15 @@ payroll:
 logging:
   level:
     root: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: payroll-agent

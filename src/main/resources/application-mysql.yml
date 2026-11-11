@@ -1,0 +1,19 @@
+# MySQL 双库支持：--spring.profiles.active=mysql（或 dept=mysql,redis）
+#
+# 目标库需提前存在（建库与账号见 docs/mysql-redis-deploy.md），
+# 表结构由 Flyway 在启动时按 db/migration/mysql 版本化创建。
+spring:
+  # 该 profile 不启用 Redis 自动装配，保持与本地 H2 一致的行为。
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.session.SessionAutoConfiguration
+
+payroll:
+  db:
+    url: "${PAYROLL_DB_URL:jdbc:mysql://127.0.0.1:3306/payroll?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true}"
+    user: "${PAYROLL_DB_USER:payroll}"
+    password: "${PAYROLL_DB_PASSWORD:payroll}"
+    pool-size: "${PAYROLL_DB_POOL_SIZE:16}"

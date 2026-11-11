@@ -409,6 +409,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   缓存与迁移设计见 [`docs/agent-runtime-cache-spec.md`](docs/agent-runtime-cache-spec.md)
   与 [`docs/harness-migration-spec.md`](docs/harness-migration-spec.md)。
 
+对长会话，进程内缓存的 `PayrollChat` 也设有上限（默认 200）与空闲淘汰（默认 60 分钟）：
+超出后按最久未使用关闭，正在生成回答的会话不会被淘汰；未命中时从数据库消息与摘要重建。
+会话互斥由 Redis 锁 `payroll:chat:lock:<sessionId>` 保证，多实例部署下同一会话只会在一处执行。
+
 ### 控制台日志
 
 开发排查以 `[多智能体]` 为前缀，输出到 stderr（`logback.xml` 配置），与 CLI 结果分开：
@@ -569,6 +573,29 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 `--extract` 依赖结构化输出能力，Ollama 扩展暂不提供该元数据，建议改用 DashScope 模型执行。
 
 > Windows 控制台如出现中文乱码，请加 `-Dfile.encoding=UTF-8`，或先执行 `chcp 65001`。
+
+### MySQL 与 Redis（部门部署）
+
+默认仍是 H2 文件库；多人共用时用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`）切换：
+
+- MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
+  目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。
+- Redis：Spring Session 会话共享、登录失败锁定、单用户对话并发配额（超出返回 429）、
+  同一会话跨实例互斥（`payroll:chat:lock:<sessionId>`，锁随请求结束释放，实例崩溃后按 TTL 自动过期）。
+- 存量数据：`java -jar target/payroll-agent.jar --migrate-to-mysql [--force]`，执行前必须停止 Web 实例。
+
+常用环境变量：`PAYROLL_DB_URL`、`PAYROLL_DB_USER`、`PAYROLL_DB_PASSWORD`、`PAYROLL_DB_POOL_SIZE`、
+`PAYROLL_REDIS_HOST`、`PAYROLL_REDIS_PORT`、`PAYROLL_REDIS_PASSWORD`、
+`PAYROLL_LOGIN_MAX_FAILURES`、`PAYROLL_LOGIN_LOCK_MINUTES`、`PAYROLL_CHAT_MAX_CONCURRENT`、
+`PAYROLL_CHAT_SESSION_LOCK_MINUTES`、`PAYROLL_CHAT_CACHE_MAX_SESSIONS`、`PAYROLL_CHAT_CACHE_IDLE_MINUTES`、
+`PAYROLL_AGENT_CACHE_MAX`、`PAYROLL_AGENT_CACHE_IDLE_MINUTES`。
+完整步骤、迁移校验与回退见 [docs/mysql-redis-deploy.md](docs/mysql-redis-deploy.md)。
+
+> 智能体与会话缓存仍是进程内对象：`HarnessAgent`、`PayrollChat` 持有流式回调与运行期状态，
+> 不能序列化进 Redis。Redis 只负责跨实例协调，缓存按上限与空闲时间淘汰，未命中时从数据库与
+> Nacos 定义重建；因此多实例部署无需共享缓存，单实例内存也不会无限增长。
+
+管理与监控端点：`/actuator/health`、`/actuator/metrics`、`/actuator/prometheus`。
 
 ## 管理台 API
 

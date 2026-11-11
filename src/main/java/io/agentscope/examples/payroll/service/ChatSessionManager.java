@@ -11,9 +11,12 @@ import io.agentscope.examples.payroll.memory.MemorySource;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.ShadowTeamService;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
@@ -22,13 +25,16 @@ import org.slf4j.LoggerFactory;
 /**
  * 多用户、多窗口对话管理：每个会话拥有独立的 PayrollChat 实例与消息记录。
  *
- * <p>会话归属在每次读写前校验；同一会话同时只允许一轮回答，避免上下文交错。
+ * <p>会话归属在每次读写前校验；同一会话同时只允许一轮回答，避免上下文交错。会话运行时对象
+ * 无法跨实例共享，因此缓存在进程内，并通过 {@link SessionLockService} 在 Redis 上做分布式互斥。
  */
 public final class ChatSessionManager implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(ChatSessionManager.class);
     private static final String DEFAULT_TITLE = "新会话";
     private static final int TITLE_LIMIT = 24;
+    private static final int DEFAULT_MAX_CHATS = 200;
+    private static final int DEFAULT_IDLE_MINUTES = 60;
 
     private final H2ChatStore store;
     private final PayrollChatFactory chatFactory;
@@ -36,9 +42,13 @@ public final class ChatSessionManager implements AutoCloseable {
     private final StaticRunRecorder runs;
     private final ShadowTeamService shadow;
     private final ActiveTeamService activeTeams;
-    private final Map<Long, PayrollChat> chats = new ConcurrentHashMap<>();
+    private final SessionLockService locks;
+    private final int maxCachedChats;
+    private final long cacheIdleMillis;
+    private final Map<Long, CachedChat> chats = new ConcurrentHashMap<>();
     private final Map<Long, StaticRunRecorder.ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<Long, String> questions = new ConcurrentHashMap<>();
+    private final Map<Long, String> sessionLocks = new ConcurrentHashMap<>();
     private final Set<Long> busy = ConcurrentHashMap.newKeySet();
 
     public ChatSessionManager(H2ChatStore store, PayrollChatFactory chatFactory) {
@@ -74,12 +84,40 @@ public final class ChatSessionManager implements AutoCloseable {
             StaticRunRecorder runs,
             ShadowTeamService shadow,
             ActiveTeamService activeTeams) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                SessionLockService.disabled(),
+                DEFAULT_MAX_CHATS,
+                DEFAULT_IDLE_MINUTES);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowTeamService shadow,
+            ActiveTeamService activeTeams,
+            SessionLockService locks,
+            int maxCachedChats,
+            int cacheIdleMinutes) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
         this.runs = runs == null ? StaticRunRecorder.disabled() : runs;
         this.shadow = shadow == null ? ShadowTeamService.disabled() : shadow;
         this.activeTeams = activeTeams == null ? ActiveTeamService.disabled() : activeTeams;
+        this.locks = locks == null ? SessionLockService.disabled() : locks;
+        this.maxCachedChats = Math.max(1, maxCachedChats);
+        this.cacheIdleMillis =
+                cacheIdleMinutes <= 0
+                        ? Long.MAX_VALUE
+                        : Duration.ofMinutes(cacheIdleMinutes).toMillis();
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -167,6 +205,12 @@ public final class ChatSessionManager implements AutoCloseable {
         if (!busy.add(sessionId)) {
             throw new PayrollException("该会话正在生成回答，请稍后再试");
         }
+        Optional<String> lock = locks.acquire(sessionId);
+        if (lock.isEmpty()) {
+            busy.remove(sessionId);
+            throw new PayrollException("该会话正在其他实例上生成回答，请稍后再试");
+        }
+        sessionLocks.put(sessionId, lock.get());
         try {
             PayrollChat chat = chatFor(userId, sessionId);
             ChatMessage saved =
@@ -181,6 +225,7 @@ public final class ChatSessionManager implements AutoCloseable {
             return chat;
         } catch (RuntimeException e) {
             questions.remove(sessionId);
+            releaseSessionLock(sessionId);
             busy.remove(sessionId);
             throw e;
         }
@@ -231,6 +276,7 @@ public final class ChatSessionManager implements AutoCloseable {
             failRun(run, sessionId, 0L, "保存回答失败：" + rootMessage(e));
             return null;
         } finally {
+            releaseSessionLock(sessionId);
             busy.remove(sessionId);
         }
     }
@@ -257,6 +303,7 @@ public final class ChatSessionManager implements AutoCloseable {
             log.error("[会话] 保存错误消息失败：sessionId={}", sessionId, e);
         } finally {
             failRun(activeRuns.remove(sessionId), sessionId, messageId, message);
+            releaseSessionLock(sessionId);
             busy.remove(sessionId);
         }
     }
@@ -274,7 +321,15 @@ public final class ChatSessionManager implements AutoCloseable {
                         e.getMessage());
             }
         }
+        releaseSessionLock(sessionId);
         busy.remove(sessionId);
+    }
+
+    private void releaseSessionLock(long sessionId) {
+        String token = sessionLocks.remove(sessionId);
+        if (token != null) {
+            locks.release(sessionId, token);
+        }
     }
 
     /** 会话开始后创建静态运行并把坐标注入对话实例；旁路失败不影响对话。 */
@@ -347,12 +402,12 @@ public final class ChatSessionManager implements AutoCloseable {
     }
 
     private List<PayrollChat.StageRun> stagesOf(long sessionId) {
-        PayrollChat chat = chats.get(sessionId);
-        if (chat == null) {
+        CachedChat cached = chats.get(sessionId);
+        if (cached == null) {
             return List.of();
         }
         try {
-            return chat.stageRuns();
+            return cached.chat().stageRuns();
         } catch (RuntimeException e) {
             log.warn("[动态团队] 读取阶段摘要失败：sessionId={}，原因={}", sessionId, e.getMessage());
             return List.of();
@@ -371,17 +426,60 @@ public final class ChatSessionManager implements AutoCloseable {
     }
 
     public PayrollChat chatFor(long userId, long sessionId) {
-        return chats.computeIfAbsent(sessionId, key -> chatFactory.create(key, userId));
+        long now = System.currentTimeMillis();
+        CachedChat cached =
+                chats.compute(
+                        sessionId,
+                        (key, existing) ->
+                                existing == null
+                                        ? new CachedChat(chatFactory.create(key, userId), now)
+                                        : existing.touch(now));
+        evictChats(now);
+        return cached.chat();
+    }
+
+    /** 当前进程缓存的会话数，供监控与测试使用。 */
+    public int cachedChatCount() {
+        return chats.size();
+    }
+
+    /**
+     * 只淘汰空闲或超额的会话，且跳过正在生成的会话；淘汰后下次访问会按数据库上下文重建。
+     */
+    private void evictChats(long now) {
+        int excess = chats.size() - maxCachedChats;
+        if (excess <= 0 && cacheIdleMillis == Long.MAX_VALUE) {
+            return;
+        }
+        List<Map.Entry<Long, CachedChat>> snapshot = new ArrayList<>(chats.entrySet());
+        snapshot.sort(Comparator.comparingLong(entry -> entry.getValue().lastAccess()));
+        for (Map.Entry<Long, CachedChat> entry : snapshot) {
+            boolean idle = now - entry.getValue().lastAccess() > cacheIdleMillis;
+            if (!idle && excess <= 0) {
+                continue;
+            }
+            if (busy.contains(entry.getKey())) {
+                continue;
+            }
+            if (chats.remove(entry.getKey(), entry.getValue())) {
+                closeChat(entry.getKey(), entry.getValue().chat());
+                excess--;
+            }
+        }
     }
 
     private void closeChat(long sessionId) {
-        PayrollChat chat = chats.remove(sessionId);
-        if (chat != null) {
-            try {
-                chat.close();
-            } catch (RuntimeException e) {
-                log.warn("[会话] 关闭对话实例失败：sessionId={}，原因={}", sessionId, e.getMessage());
-            }
+        CachedChat cached = chats.remove(sessionId);
+        if (cached != null) {
+            closeChat(sessionId, cached.chat());
+        }
+    }
+
+    private void closeChat(long sessionId, PayrollChat chat) {
+        try {
+            chat.close();
+        } catch (RuntimeException e) {
+            log.warn("[会话] 关闭对话实例失败：sessionId={}，原因={}", sessionId, e.getMessage());
         }
     }
 
@@ -389,6 +487,32 @@ public final class ChatSessionManager implements AutoCloseable {
     public void close() {
         chats.keySet().forEach(this::closeChat);
         busy.clear();
+        sessionLocks.forEach(locks::release);
+        sessionLocks.clear();
+    }
+
+    private static final class CachedChat {
+
+        private final PayrollChat chat;
+        private volatile long lastAccess;
+
+        private CachedChat(PayrollChat chat, long lastAccess) {
+            this.chat = chat;
+            this.lastAccess = lastAccess;
+        }
+
+        private PayrollChat chat() {
+            return chat;
+        }
+
+        private long lastAccess() {
+            return lastAccess;
+        }
+
+        private CachedChat touch(long now) {
+            lastAccess = now;
+            return this;
+        }
     }
 
     private static String autoTitle(String message) {

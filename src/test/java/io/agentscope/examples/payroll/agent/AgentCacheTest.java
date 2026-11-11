@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -89,6 +90,24 @@ class AgentCacheTest {
         assertEquals(0, cache.size());
         assertEquals(1, closed.get());
         assertNotSame(closeable, cache.get("team|a", Object::new));
+    }
+
+    @Test
+    @DisplayName("空闲超过 TTL 的实例被关闭并允许重新构建")
+    void idleEntriesAreEvicted() throws InterruptedException {
+        AgentCache cache = new AgentCache(4, Duration.ofMillis(10));
+        AtomicInteger closed = new AtomicInteger();
+        AutoCloseable closeable =
+                () -> {
+                    closed.incrementAndGet();
+                };
+
+        cache.get("team|a", () -> closeable);
+        Thread.sleep(30);
+        cache.get("team|b", Object::new);
+
+        assertEquals(1, cache.size());
+        assertEquals(1, closed.get());
     }
 
     @Test

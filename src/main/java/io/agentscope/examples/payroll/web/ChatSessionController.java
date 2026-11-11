@@ -5,6 +5,7 @@ import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatFeedbackService;
+import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
@@ -41,6 +42,7 @@ public class ChatSessionController {
     private final TeamRunQueryService teamQueryService;
     private final AuditService auditService;
     private final AuthService authService;
+    private final ChatQuotaService chatQuotaService;
     private final Executor chatStreamExecutor;
 
     public ChatSessionController(
@@ -49,12 +51,14 @@ public class ChatSessionController {
             TeamRunQueryService teamQueryService,
             AuditService auditService,
             AuthService authService,
+            ChatQuotaService chatQuotaService,
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
         this.manager = manager;
         this.feedbackService = feedbackService;
         this.teamQueryService = teamQueryService;
         this.auditService = auditService;
         this.authService = authService;
+        this.chatQuotaService = chatQuotaService;
         this.chatStreamExecutor = chatStreamExecutor;
     }
 
@@ -149,16 +153,23 @@ public class ChatSessionController {
             HttpServletRequest request) {
         long userId = userId(request);
         String message = requireMessage(body == null ? null : body.message());
-        PayrollChat chat = manager.begin(userId, sessionId, message);
+        if (!chatQuotaService.tryAcquire(userId)) {
+            throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
+        }
         try {
-            PayrollChat.Reply reply = chat.chat(message);
-            manager.complete(userId, sessionId, reply);
-            return ApiResponse.ok(reply);
-        } catch (RuntimeException e) {
-            manager.fail(userId, sessionId, rootMessage(e));
-            throw e;
+            PayrollChat chat = manager.begin(userId, sessionId, message);
+            try {
+                PayrollChat.Reply reply = chat.chat(message);
+                manager.complete(userId, sessionId, reply);
+                return ApiResponse.ok(reply);
+            } catch (RuntimeException e) {
+                manager.fail(userId, sessionId, rootMessage(e));
+                throw e;
+            } finally {
+                manager.release(sessionId);
+            }
         } finally {
-            manager.release(sessionId);
+            chatQuotaService.release(userId);
         }
     }
 
@@ -186,7 +197,15 @@ public class ChatSessionController {
             emitter.complete();
             return emitter;
         }
-        chatStreamExecutor.execute(() -> stream(userId, sessionId, message, channel, emitter));
+        if (!chatQuotaService.tryAcquire(userId)) {
+            throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
+        }
+        try {
+            chatStreamExecutor.execute(() -> stream(userId, sessionId, message, channel, emitter));
+        } catch (RuntimeException e) {
+            chatQuotaService.release(userId);
+            throw e;
+        }
         return emitter;
     }
 
@@ -225,6 +244,7 @@ public class ChatSessionController {
             emitter.complete();
         } finally {
             manager.release(sessionId);
+            chatQuotaService.release(userId);
         }
     }
 

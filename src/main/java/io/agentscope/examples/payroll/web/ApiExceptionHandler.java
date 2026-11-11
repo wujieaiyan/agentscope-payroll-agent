@@ -40,6 +40,11 @@ public class ApiExceptionHandler {
         return error(HttpStatus.FORBIDDEN, e.getMessage());
     }
 
+    @ExceptionHandler(TooManyRequestsException.class)
+    public ResponseEntity<ApiResponse> handleRateLimited(TooManyRequestsException e) {
+        return error(HttpStatus.TOO_MANY_REQUESTS, e.getMessage());
+    }
+
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse> handleUnreadable(HttpMessageNotReadableException e) {
         return error(HttpStatus.BAD_REQUEST, "请求体格式错误，请检查 JSON 字段");

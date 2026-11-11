@@ -16,6 +16,7 @@ import io.agentscope.examples.payroll.domain.ReviewView;
 import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
@@ -77,6 +78,7 @@ public class PayrollWebController {
     private final Executor chatStreamExecutor;
     private final AuditService auditService;
     private final AuthService authService;
+    private final ChatQuotaService chatQuotaService;
     private final ApprovalService approvalService;
     private final NacosAgentRegistry agentRegistry;
     private final NacosFlowRegistry flowRegistry;
@@ -86,6 +88,7 @@ public class PayrollWebController {
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
             AuditService auditService,
             AuthService authService,
+            ChatQuotaService chatQuotaService,
             ApprovalService approvalService,
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry) {
@@ -93,6 +96,7 @@ public class PayrollWebController {
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
         this.authService = authService;
+        this.chatQuotaService = chatQuotaService;
         this.approvalService = approvalService;
         this.agentRegistry = agentRegistry;
         this.flowRegistry = flowRegistry;
@@ -266,8 +270,18 @@ public class PayrollWebController {
 
     @PostMapping("/chat")
     @RequirePermission(Permissions.CHAT_USE)
-    public ApiResponse chat(@RequestBody(required = false) ChatRequest request) {
-        return ApiResponse.ok(services.chat().chat(requireChatMessage(request)));
+    public ApiResponse chat(
+            @RequestBody(required = false) ChatRequest request, HttpServletRequest http) {
+        String message = requireChatMessage(request);
+        long userId = authService.currentUser(http).id();
+        if (!chatQuotaService.tryAcquire(userId)) {
+            throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
+        }
+        try {
+            return ApiResponse.ok(services.chat().chat(message));
+        } finally {
+            chatQuotaService.release(userId);
+        }
     }
 
     /**
@@ -278,7 +292,8 @@ public class PayrollWebController {
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @RequirePermission(Permissions.CHAT_USE)
-    public SseEmitter chatStream(@RequestBody(required = false) ChatRequest request) {
+    public SseEmitter chatStream(
+            @RequestBody(required = false) ChatRequest request, HttpServletRequest http) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         emitter.onTimeout(emitter::complete);
         emitter.onError(error -> emitter.complete());
@@ -292,11 +307,20 @@ public class PayrollWebController {
             emitter.complete();
             return emitter;
         }
-        chatStreamExecutor.execute(() -> streamChat(message, emitter));
+        long userId = authService.currentUser(http).id();
+        if (!chatQuotaService.tryAcquire(userId)) {
+            throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
+        }
+        try {
+            chatStreamExecutor.execute(() -> streamChat(message, userId, emitter));
+        } catch (RuntimeException e) {
+            chatQuotaService.release(userId);
+            throw e;
+        }
         return emitter;
     }
 
-    private void streamChat(String message, SseEmitter emitter) {
+    private void streamChat(String message, long userId, SseEmitter emitter) {
         ChatSse.Channel channel = new ChatSse.Channel(emitter);
         long startedAt = System.currentTimeMillis();
         log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
@@ -316,6 +340,8 @@ public class PayrollWebController {
             log.error("[SSE] 流式对话异常", e);
             channel.send("error", ChatSse.payload("message", "对话失败，请查看服务端日志"));
             emitter.complete();
+        } finally {
+            chatQuotaService.release(userId);
         }
     }
 

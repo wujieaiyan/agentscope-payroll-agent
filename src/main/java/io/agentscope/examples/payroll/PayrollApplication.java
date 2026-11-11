@@ -5,6 +5,8 @@ import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.examples.payroll.agent.PayrollIntent;
 import io.agentscope.examples.payroll.agent.PayrollTools;
+import io.agentscope.examples.payroll.db.H2ToMysqlMigration;
+import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.BatchPayrollResult;
 import io.agentscope.examples.payroll.domain.Money;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -32,6 +34,7 @@ import org.springframework.boot.SpringApplication;
  *
  * <pre>
  *   --web                           启动本地 Web 管理台（员工/考核/政策/工资批次）
+ *   --migrate-to-mysql [--force]    把现有 H2 数据迁移到 MySQL（需先停止 Web 实例）
  *   --demo                         离线演示：批量核算 + 工资条 + 校验（无需模型）
  *   --payroll EMP001 --period 2026-10   单人核算并打印工资条
  *   --department 研发部 --period 2026-10 部门批量核算
@@ -53,6 +56,10 @@ public final class PayrollApplication {
             }
             if (options.web) {
                 runWeb(options);
+                return;
+            }
+            if (options.migrateToMysql) {
+                runMigration(options.force);
                 return;
             }
 
@@ -96,11 +103,36 @@ public final class PayrollApplication {
     /** 以 Spring Boot 内嵌 Tomcat 启动管理台；CLI 其他模式不启动 Spring 容器。 */
     private static void runWeb(Options options) {
         List<String> args = new ArrayList<>();
-        args.add("--server.address=127.0.0.1");
         if (options.port != null) {
             args.add("--server.port=" + parsePort(options.port));
         }
         SpringApplication.run(PayrollWebApplication.class, args.toArray(String[]::new));
+    }
+
+    /** H2 → MySQL 一次性迁移；执行前必须停止 Web 实例，避免 H2 文件锁。 */
+    private static void runMigration(boolean force) {
+        String sourceUrl =
+                env("PAYROLL_MIGRATE_SOURCE_URL", PayrollDatabase.DEFAULT_URL);
+        String targetUrl =
+                env(
+                        "PAYROLL_MIGRATE_TARGET_URL",
+                        "jdbc:mysql://127.0.0.1:3306/payroll?useUnicode=true"
+                                + "&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai"
+                                + "&useSSL=false&allowPublicKeyRetrieval=true");
+        System.out.println("开始迁移：" + sourceUrl + " → " + targetUrl);
+        H2ToMysqlMigration.run(
+                sourceUrl,
+                env("PAYROLL_MIGRATE_SOURCE_USER", "sa"),
+                env("PAYROLL_MIGRATE_SOURCE_PASSWORD", ""),
+                targetUrl,
+                env("PAYROLL_MIGRATE_TARGET_USER", "payroll"),
+                env("PAYROLL_MIGRATE_TARGET_PASSWORD", "payroll"),
+                force);
+    }
+
+    private static String env(String name, String fallback) {
+        String value = System.getenv(name);
+        return value == null || value.isBlank() ? fallback : value.trim();
     }
 
     private static int parsePort(String value) {
@@ -295,6 +327,7 @@ public final class PayrollApplication {
 
                 用法：
                   --web [--port 8080]                 启动本地 Web 管理台
+                  --migrate-to-mysql [--force]        迁移 H2 数据到 MySQL（先停止 Web）
                   --demo                              离线演示（无需模型）
                   --payroll EMP001 --period 2026-10   单人核算并打印工资条
                   --department 研发部 --period 2026-10 部门批量核算
@@ -343,6 +376,8 @@ public final class PayrollApplication {
         private boolean demo;
         private boolean web;
         private boolean help;
+        private boolean migrateToMysql;
+        private boolean force;
         private String period;
         private String payrollId;
         private String department;
@@ -355,6 +390,8 @@ public final class PayrollApplication {
                 switch (args[i]) {
                     case "--demo" -> options.demo = true;
                     case "--web" -> options.web = true;
+                    case "--migrate-to-mysql" -> options.migrateToMysql = true;
+                    case "--force" -> options.force = true;
                     case "--port" -> options.port = requireValue(args, ++i, "--port");
                     case "--help", "-h" -> options.help = true;
                     case "--period" -> options.period = requireValue(args, ++i, "--period");
