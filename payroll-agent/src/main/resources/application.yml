@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: payroll-agent-runtime
+  config:
+    import: classpath:application-common.yml
+  main:
+    web-application-type: servlet
+
+server:
+  port: "${PAYROLL_AGENT_PORT:8100}"
+
+payroll:
+  # 运行期只提供 /internal/**，不暴露管理台接口。
+  node-role: "${PAYROLL_NODE_ROLE:runtime}"

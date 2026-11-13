@@ -101,9 +101,9 @@
 ## 本地验证
 
 ```bash
-# 启动（需先起 Nacos 8848，账号 nacos/nacos）
+# 启动（需先起 Nacos 8848，账号 nacos/nacos；对话链路另需启动 payroll-agent-runtime.jar）
 PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 PAYROLL_NACOS_USERNAME=nacos PAYROLL_NACOS_PASSWORD=nacos \
-  java -jar target/payroll-agent.jar --web --port 8091
+  PAYROLL_WEB_PORT=8091 java -jar payroll-backend/target/payroll-backend-exec.jar
 
 # 登录拿 cookie
 curl -c jar.txt -H 'Content-Type: application/json' \

@@ -45,7 +45,7 @@ PAYROLL_DB_PASSWORD='<数据库密码>' \
 PAYROLL_REDIS_HOST=127.0.0.1 \
 PAYROLL_REDIS_PORT=6379 \
 PAYROLL_WEB_PORT=8099 \
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
 ```
 
 Windows CMD/PowerShell 用 `set` / `$env:` 设置同名环境变量；也可在 IDE 的 Run Configuration 中配置。
@@ -103,10 +103,10 @@ Redis 不可用时，登录限流、并发配额与会话锁自动退化为单�
 cp data/payroll.mv.db data/payroll.mv.db.bak
 
 # 目标库为空时可直接迁移
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --migrate-to-mysql
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --migrate-to-mysql
 
 # 目标库已有数据时需显式覆盖
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --migrate-to-mysql --force
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --migrate-to-mysql --force
 ```
 
 可选环境变量：

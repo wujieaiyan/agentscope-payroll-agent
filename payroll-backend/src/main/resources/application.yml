@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: payroll-backend
+  config:
+    import: classpath:application-common.yml
+  web:
+    resources:
+      # 前端由 Nginx 托管，后端不再提供静态页面。
+      add-mappings: false
+
+payroll:
+  node-role: "${PAYROLL_NODE_ROLE:web}"
+server:
+  port: "${PAYROLL_WEB_PORT:8080}"

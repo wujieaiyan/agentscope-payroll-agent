@@ -1,0 +1,188 @@
+# 三镜像多节点演练：前端(Nginx) + 2 个 Web 后端 + 2 个 agent-runtime + MySQL + Redis + Ollama。
+# 用法：
+#   mvn -DskipTests package
+#   docker compose -f docker/docker-compose.yml up -d --build
+#   浏览器访问 http://127.0.0.1:18088
+# 说明：
+#   - frontend 镜像托管 Vue3 产物，/api 与 /actuator 反向代理到两个 Web 节点。
+#   - Web 无状态，登录态与轮次状态在 MySQL/Redis，Nginx 轮询且无粘性。
+#   - runtime 只在容器网络内暴露 8100，对外不可达。
+#   - Web/runtime 共享 kb-data（知识库文件）与 output-data（导出文件），避免多实例各写本地。
+#   - 模型由 compose 内的 Ollama 提供，直接挂载宿主机模型目录（只读），无需宿主机 Ollama。
+
+name: payroll-multinode
+
+x-app-env: &app-env
+  SPRING_PROFILES_ACTIVE: mysql,redis
+  PAYROLL_SERVER_ADDRESS: 0.0.0.0
+  PAYROLL_DB_URL: jdbc:mysql://mysql:3306/payroll?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+  PAYROLL_DB_USER: ${PAYROLL_DB_USER:-payroll}
+  PAYROLL_DB_PASSWORD: ${PAYROLL_DB_PASSWORD:-payroll}
+  PAYROLL_REDIS_HOST: redis
+  PAYROLL_REDIS_PORT: "6379"
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  PAYROLL_MODEL: ${PAYROLL_MODEL:-ollama:qwen2.5:3b-instruct}
+  PAYROLL_ADMIN_PASSWORD: ${PAYROLL_ADMIN_PASSWORD:-admin123}
+  # 容器内不部署 ES：关闭长记忆、语义缓存与知识库索引，避免健康检查与写入失败。
+  PAYROLL_MEMORY_ENABLED: "false"
+  PAYROLL_MEMORY_ES_URL: ${PAYROLL_MEMORY_ES_URL:-http://host.docker.internal:9200}
+  PAYROLL_SEMANTIC_CACHE_ENABLED: "false"
+  PAYROLL_KB_ES_ENABLED: "false"
+  MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED: "false"
+  # Web 与 runtime 共用同一 HMAC 密钥。
+  PAYROLL_AGENT_RUNTIME_TOKEN: ${PAYROLL_AGENT_RUNTIME_TOKEN:-local-demo-token-change-me}
+  TZ: Asia/Shanghai
+
+x-app: &app
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    ollama:
+      condition: service_healthy
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: payroll
+      MYSQL_USER: ${PAYROLL_DB_USER:-payroll}
+      MYSQL_PASSWORD: ${PAYROLL_DB_PASSWORD:-payroll}
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 复用宿主机已下载的模型，避免容器内重复拉取；目录只读挂载。
+  ollama:
+    image: ollama/ollama:0.12.11
+    restart: unless-stopped
+    environment:
+      OLLAMA_MODELS: /models
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ${PAYROLL_OLLAMA_MODELS_DIR:-/mnt/d/ollma}:/models:ro
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  runtime-1:
+    <<: *app
+    image: payroll-runtime:local
+    build:
+      context: ..
+      dockerfile: docker/runtime.Dockerfile
+    environment:
+      <<: *app-env
+      PAYROLL_NODE_ROLE: runtime
+      PAYROLL_NODE_ID: runtime-1
+      PAYROLL_AGENT_PORT: "8100"
+    expose:
+      - "8100"
+    volumes:
+      - kb-data:/app/data
+      - output-data:/app/output
+
+  runtime-2:
+    <<: *app
+    image: payroll-runtime:local
+    build:
+      context: ..
+      dockerfile: docker/runtime.Dockerfile
+    environment:
+      <<: *app-env
+      PAYROLL_NODE_ROLE: runtime
+      PAYROLL_NODE_ID: runtime-2
+      PAYROLL_AGENT_PORT: "8100"
+    expose:
+      - "8100"
+    volumes:
+      - kb-data:/app/data
+      - output-data:/app/output
+
+  web-1:
+    <<: *app
+    image: payroll-backend:local
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      <<: *app-env
+      PAYROLL_NODE_ROLE: web
+      PAYROLL_NODE_ID: web-1
+      PAYROLL_WEB_PORT: "8080"
+      PAYROLL_AGENT_RUNTIME_URLS: http://runtime-1:8100,http://runtime-2:8100
+    expose:
+      - "8080"
+    volumes:
+      - kb-data:/app/data
+      - output-data:/app/output
+
+  web-2:
+    <<: *app
+    image: payroll-backend:local
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      <<: *app-env
+      PAYROLL_NODE_ROLE: web
+      PAYROLL_NODE_ID: web-2
+      PAYROLL_WEB_PORT: "8080"
+      PAYROLL_AGENT_RUNTIME_URLS: http://runtime-1:8100,http://runtime-2:8100
+    expose:
+      - "8080"
+    volumes:
+      - kb-data:/app/data
+      - output-data:/app/output
+
+  frontend:
+    image: payroll-frontend:local
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - web-1
+      - web-2
+    ports:
+      - "18088:80"
+
+volumes:
+  mysql-data:
+  redis-data:
+  kb-data:
+  output-data:

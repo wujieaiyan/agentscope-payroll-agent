@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.agentscope.examples</groupId>
+        <artifactId>agentscope-payroll</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>payroll-agent</artifactId>
+    <name>Payroll Agent Runtime</name>
+    <description>智能体运行期：模型编排、工具、流程、动态团队、智能体路由与内部轮次接口</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.agentscope.examples</groupId>
+            <artifactId>payroll-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bsc.langgraph4j</groupId>
+            <artifactId>langgraph4j-core</artifactId>
+            <version>${langgraph4j.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>payroll-agent</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <classifier>runtime</classifier>
+                    <mainClass>io.agentscope.payroll.runtime.AgentRuntimeApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>repackage-cli</id>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>cli</classifier>
+                            <mainClass>io.agentscope.examples.payroll.PayrollApplication</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

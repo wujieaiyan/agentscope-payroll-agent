@@ -68,49 +68,65 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 
 ```bash
 mvn clean package
+cd frontend && npm ci && npm run build && cd ..
 
-# 本地 Web 管理台（Spring Boot 内嵌 Tomcat；员工 / 考核 / 政策 / 考勤 / 工资批次 / 智能问答 / Excel 导入）
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
-# 默认 http://127.0.0.1:8080 ，可用 --port 18080 或 PAYROLL_WEB_PORT 覆盖
+# 1) 智能体运行期（模型执行与动态团队，只暴露 /internal，默认 8100）
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
 
-# 离线演示：不调用大模型，直接验证核算引擎
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --demo
+# 2) Web 后端（鉴权、会话、管理台 API，默认 8080）
+PAYROLL_AGENT_RUNTIME_URLS=http://127.0.0.1:8100 \
+PAYROLL_AGENT_RUNTIME_TOKEN=local-demo-token-change-me \
+java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
+
+# 3) 前端（开发模式 http://localhost:5173 ，/api 代理到 8080；构建产物在 frontend/dist）
+cd frontend && npm run dev
+
+# 离线演示：不调用大模型，直接验证核算引擎（CLI 入口）
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --demo
 
 # 单人工资条 + 发薪前校验
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --payroll EMP001 --period 2026-10
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --payroll EMP001 --period 2026-10
 
 # 部门批量
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --department 研发部 --period 2026-10
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --department 研发部 --period 2026-10
 ```
 
-首次启动 `--web` 会创建 `data/payroll.mv.db` 并从 classpath 导入演示数据；
-之后所有修改都写入 H2，不再被演示数据覆盖。
+`mvn package` 产出三个可执行包：Web 为 `payroll-backend/target/payroll-backend-exec.jar`，
+运行期为 `payroll-agent/target/payroll-agent-runtime.jar`，CLI 为 `payroll-agent/target/payroll-agent-cli.jar`；
+模块普通 jar（`payroll-backend.jar`、`payroll-agent.jar`）留给模块间依赖，不要直接运行。
+
+Web 与运行期在同一台机器上请从仓库根目录启动，H2 默认落在 `./data/payroll`。
+Windows 下 8001–8100 属于系统保留区间，运行期改用 `PAYROLL_AGENT_PORT=18100`、Web 改用
+`PAYROLL_WEB_PORT=28080` 即可；两个进程必须使用相同的 `PAYROLL_AGENT_RUNTIME_TOKEN`。
+
+首次启动 Web 后端会创建 `data/payroll.mv.db` 并从 classpath 导入演示数据；
+之后所有修改都写入 H2，不再被演示数据覆盖（切换 MySQL 见下文）。
 
 首次建库会创建默认管理员 `admin / admin123`（仅当 `app_users` 为空时执行），
 请登录后立即使用右上角“修改密码”。生产环境应通过 `PAYROLL_ADMIN_PASSWORD` 指定初始密码；
 `PAYROLL_AUTH_ENABLED=false` 会跳过登录并授予全部权限，仅用于本地测试与离线演示。
 
-`--web` 由 Spring Boot 3.5 启动：`PayrollWebApplication` 创建内嵌 Tomcat，
-`PayrollConfiguration` 装配与 CLI 相同的 `PayrollServices`，`PayrollWebController` 暴露 REST 接口；
-CLI 的 `--demo`、`--payroll` 等模式不会启动 Spring 容器。端口、Jackson、H2 与输出目录集中在
-`src/main/resources/application.yml`，环境变量仍优先于默认值；IDEA 中也可直接运行
-`PayrollWebApplication` 的 `main` 方法。
+三个模块职责：`payroll-common` 是领域模型、H2/MySQL 存储、会话轮次与共享配置；
+`payroll-backend` 只做鉴权、会话、管理台 API 与 SSE 转发（`PayrollWebApplication`）；
+`payroll-agent` 负责模型编排、工具、流程、动态团队与智能体路由（`AgentRuntimeApplication`）。
+Web 不加载模型，未配置 `PAYROLL_AGENT_RUNTIME_URLS` 时对话接口直接返回明确错误；
+CLI 的 `--demo`、`--payroll` 等模式仍在 `payroll-agent-cli.jar` 中运行，不启动 Spring 容器。
 
 本地模型对话（默认，无需 API Key）：
 
 ```bash
 ollama serve
 ollama pull qwen2.5:3b-instruct
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
 ```
 
-管理台“智能问答”通过 `POST /api/chat/stream` 以 SSE 流式返回。若想看到类似 Qoder 的
+管理台“智能问答”通过 `POST /api/chat/sessions/{id}/stream` 以 SSE 流式返回。若想看到类似 Qoder 的
 “思考过程”，可换用带 thinking 能力的模型（启动时自动检测，无需额外开关）：
 
 ```bash
 ollama pull deepseek-r1:1.5b
 export PAYROLL_MODEL=ollama:deepseek-r1:1.5b  # Windows: set PAYROLL_MODEL=ollama:deepseek-r1:1.5b
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
 ```
 
 思考内容来自模型原生 reasoning 增量，不是前端模拟；工具调用、阶段提示与回答文本仍按事件分开推送。
@@ -122,7 +138,7 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
 ```bash
 export DASHSCOPE_API_KEY=sk-xxx          # Windows: set DASHSCOPE_API_KEY=sk-xxx
 export PAYROLL_MODEL=dashscope:qwen-plus # Windows: set PAYROLL_MODEL=dashscope:qwen-plus
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
 ```
 
 示例提问：
@@ -135,12 +151,11 @@ java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
 
 ## 管理台界面
 
-采用与 `knowledge-base-console` 一致的暖纸底色 + 墨绿主色 + 黄铜强调色：左侧 236px 深色导航按
-“人事运营 / 智能体 / 系统管理”分组，分组标题可点击折叠，顶栏菜单按钮可把侧边栏整体收起为
-64px 图标栏；两种折叠状态都写入 `localStorage`，刷新后保持。顶栏展示面包屑、数据连接状态与
-当前账号，页面统一为 eyebrow + 标题 + 说明。智能问答保留微信式左右气泡。页签的标题、副标题与
-面包屑由 `static/app.js` 的 `TAB_META` 统一维护；新增页签时需同时补充 `TAB_META` 与
-`data-permission`，否则导航或页头不会更新。
+前端为 `frontend/` 下的 Vue 3 + Vite 单页应用，与后端只通过 `/api` 交互。外壳由
+`frontend/src/components/AppLayout.vue` 提供：左侧导航按“协同 / 薪酬 / 系统”分组，可折叠为
+64px 图标栏；顶栏展示面包屑与当前账号。路由与页面标题集中在
+`frontend/src/router/index.js` 的 `meta.title`，新增页面时同时注册路由与侧边栏条目即可。
+智能问答保留微信式左右气泡。构建产物由 Nginx 托管，`/api` 反向代理到 Web 节点。
 
 ## 管理台使用流程
 
@@ -361,7 +376,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
   ```bash
   ollama pull nomic-embed-text
-  PAYROLL_MEMORY_ENABLED=true java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  PAYROLL_MEMORY_ENABLED=true java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
   ```
 
   管理员可调用 `POST /api/admin/vector/rebuild` 清空索引并按 H2 历史重建。
@@ -376,7 +391,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
     {"name":"hr","transport":"sse","url":"http://localhost:9000/sse",
      "allowedTools":["get_employee_profile","get_attendance_summary"],
      "readOnlyTools":["get_employee_profile"],"timeoutSeconds":15}
-  ]' java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  ]' java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
   ```
 
 - **路由透明化与写操作确认**：每条助手消息都记录实际回答链路（`PIPELINE`/`AGENT`/`FLOW`/
@@ -430,7 +445,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   ```bash
   PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
   PAYROLL_NACOS_GROUP=payroll-agent \
-  java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+  java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
   ```
 
 - **运行期实例复用**：技能仓库（含 Nacos HTTP 客户端）与模型按进程级单例复用；智能体按
@@ -575,7 +590,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_DB_USER` | `sa` | 数据库用户 |
 | `PAYROLL_DB_PASSWORD` | 空 | 数据库密码 |
 | `PAYROLL_OUTPUT_DIR` | `output` | Excel 输出目录 |
-| `PAYROLL_WEB_PORT` | `8080` | 管理台端口（`--port` 优先） |
+| `PAYROLL_WEB_PORT` | `8080` | 后端（Web 节点）监听端口 |
 | `PAYROLL_MODEL` | `ollama:qwen2.5:3b-instruct` | 模型标识；Ollama 用 `ollama:<模型名>`，DashScope 用 `dashscope:<模型名>` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
 | `PAYROLL_OLLAMA_NUM_CTX` | `8192` | Ollama 上下文窗口 |
@@ -592,6 +607,14 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_TEAM_ACTIVE_USER_IDS` | 空 | `ACTIVE` 用户白名单（逗号分隔用户 id）；留空表示全部用户 |
 | `PAYROLL_TEAM_ACTIVE_SESSION_IDS` | 空 | `ACTIVE` 会话白名单（逗号分隔会话 id）；留空表示全部会话 |
 | `PAYROLL_MCP_SERVERS` | 空 | MCP 服务 JSON 数组；为空不启用。支持 `stdio`/`sse`/`http`、`allowedTools`、`readOnlyTools`、`timeoutSeconds` |
+| `PAYROLL_NODE_ROLE` | `all` | `all` 单进程；`web` 只转发与续流；`runtime` 只执行内部轮次 |
+| `PAYROLL_NODE_ID` | `local` | 节点标识，写入 `chat_turns.owner_node` |
+| `PAYROLL_AGENT_RUNTIME_URLS` | 空 | Web 调用的 runtime 地址（逗号分隔）；为空则对话接口返回“智能体运行期未配置”，不做本机回退 |
+| `PAYROLL_AGENT_RUNTIME_TOKEN` | 空 | runtime 内部接口 HMAC 密钥；为空时内部提交不可用 |
+| `PAYROLL_SERVER_ADDRESS` | `127.0.0.1` | 监听地址；容器/跨机部署需设为 `0.0.0.0` |
+| `PAYROLL_TURN_LEASE_TTL_SECONDS` | `30` | 轮次租约 TTL |
+| `PAYROLL_TURN_EVENT_TTL_HOURS` | `24` | 轮次事件流保留时长（续流窗口） |
+| `PAYROLL_SEMANTIC_CACHE_ENABLED` | `false` | 语义缓存开关（仅 AGENT 路径、无工具调用） |
 | `PAYROLL_ROUTING_ENABLED` | `true` | 是否把本轮路由快照写入 `chat_messages.routing_json`；关闭后 SSE `done` 不带 `routing` |
 | `PAYROLL_ACTION_CONFIRM_ENABLED` | `false` | 写操作会话内确认开关；关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度 |
 | `PAYROLL_ACTION_PROPOSAL_TTL_MINUTES` | `15` | 提案有效期（分钟）；过期后卡片失效，确认返回 410 |
@@ -620,7 +643,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。
 - Redis：Spring Session 会话共享、登录失败锁定、单用户对话并发配额（超出返回 429）、
   同一会话跨实例互斥（`payroll:chat:lock:<sessionId>`，锁随请求结束释放，实例崩溃后按 TTL 自动过期）。
-- 存量数据：`java -jar target/payroll-agent.jar --migrate-to-mysql [--force]`，执行前必须停止 Web 实例。
+- 存量数据：`java -jar payroll-agent/target/payroll-agent-cli.jar --migrate-to-mysql [--force]`，执行前必须停止 Web 实例。
 
 常用环境变量：`PAYROLL_DB_URL`、`PAYROLL_DB_USER`、`PAYROLL_DB_PASSWORD`、`PAYROLL_DB_POOL_SIZE`、
 `PAYROLL_REDIS_HOST`、`PAYROLL_REDIS_PORT`、`PAYROLL_REDIS_PASSWORD`、
@@ -634,6 +657,28 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 > Nacos 定义重建；因此多实例部署无需共享缓存，单实例内存也不会无限增长。
 
 管理与监控端点：`/actuator/health`、`/actuator/metrics`、`/actuator/prometheus`。
+
+### 多节点（Web / agent-runtime 拆分）
+
+`PAYROLL_NODE_ROLE` 控制节点职责：`all`（单进程调试）、`web`（鉴权、会话 API、SSE 转发与续流，
+拒绝 `/internal/*`）、`runtime`（只执行内部轮次）。Web 通过 `PAYROLL_AGENT_RUNTIME_URLS` 把轮次
+按 HMAC 签名提交给 runtime，事件写入 Redis Stream，任意 Web 节点都能按 `turn_id + after_seq` 续流；
+会话与消息仍在 MySQL，登录态与租约在 Redis。拆分部署下 Web 没有本机回退：runtime 全部不可达时
+对话接口返回“智能体运行期不可达”，不会静默改用本机模型。
+
+Docker 三镜像编排见 [docker/docker-compose.yml](docker/docker-compose.yml)：
+
+```bash
+mvn -DskipTests package
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+镜像与职责：`payroll-frontend:local`（Nginx 托管 Vue3 产物并代理 `/api`）、
+`payroll-backend:local`（2 个 Web 节点）、`payroll-runtime:local`（2 个运行期节点）；
+另有 MySQL、Redis、Ollama 容器，入口 `http://127.0.0.1:18088`。
+Web/runtime 共享 `kb-data` 与 `output-data` 卷，避免多实例各写本地文件。
+轮次状态、续流、取消、语义缓存与容器化 Ollama 的细节见
+[docs/multi-node-deploy.md](docs/multi-node-deploy.md)。
 
 ## 管理台 API
 

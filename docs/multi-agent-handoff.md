@@ -130,7 +130,8 @@ Web 层另有 `[SSE] 对话开始 / 完成 / 失败` 日志。
   `PAYROLL_OLLAMA_TEMPERATURE` 语义不变。
 - 阶段超时：150s；上下文压缩超时：60s；SSE 超时：600s。
 - 上下文阈值：保留最近 4 轮、超过 6 轮或 3000 字触发压缩、单次最多折叠 12 轮。
-- 管理台：`java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web --port 18080`。
+- 管理台：`java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar`
+  （端口用 `PAYROLL_WEB_PORT`；对话还需同时启动 `payroll-agent-runtime.jar` 并配置 `PAYROLL_AGENT_RUNTIME_URLS`）。
 - 默认登录：首次建库创建 `admin / admin123`，可用 `PAYROLL_ADMIN_PASSWORD` 指定初始密码；
   `PAYROLL_AUTH_ENABLED=false` 仅用于测试与离线演示。
 - 多会话：`ChatSessionManager` 为每个会话缓存一个独立 `PayrollChat`，会话之间互不共享上下文；
@@ -559,7 +560,7 @@ ChatTraceWebTest test
 
    ```bash
    PAYROLL_AUTH_ENABLED=false PAYROLL_DB_URL="jdbc:h2:mem:verify;DB_CLOSE_DELAY=-1" \
-   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
    ```
 
 2. 打开“智能问答”，提问“张伟 2026-10 的工资是多少”。
@@ -659,7 +660,7 @@ ChatTraceWebTest test
    ```bash
    PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
    PAYROLL_DB_URL="jdbc:h2:mem:agent-verify;DB_CLOSE_DELAY=-1" \
-   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+   PAYROLL_WEB_PORT=18080 java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
    ```
 
 2. 管理员登录，打开“Agent 管理”：应显示三个内置智能体，顶部提示 Nacos 存储位置。

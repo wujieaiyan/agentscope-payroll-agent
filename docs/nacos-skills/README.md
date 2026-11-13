@@ -93,7 +93,7 @@ curl -s -X POST "http://127.0.0.1:8848/nacos/v1/cs/configs" \
 
 ```bash
 PAYROLL_NACOS_SERVER=http://127.0.0.1:8848 \
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar
 ```
 
 启动日志应出现：
