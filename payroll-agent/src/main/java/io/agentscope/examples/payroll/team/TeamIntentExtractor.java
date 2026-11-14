@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.team;
 
+import io.agentscope.examples.payroll.agent.KbChatIntent;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.time.YearMonth;
 import java.util.ArrayList;
@@ -34,6 +35,14 @@ public final class TeamIntentExtractor {
             List.of(
                     "工资", "薪资", "薪酬", "核算", "个税", "社保", "公积金", "计算", "应发",
                     "实发", "扣款");
+    private static final List<String> KB_KEYWORDS =
+            List.of(
+                    "知识库", "建库", "分块", "topk", "top k", "召回", "rerank", "入库任务",
+                    "重建索引", "解析任务", "目录权限");
+    private static final List<String> KB_WRITE_KEYWORDS =
+            List.of(
+                    "建", "新建", "创建", "保存", "调到", "改成", "设为", "调整", "加成员",
+                    "添加", "移除", "移出", "移动", "重建", "触发", "执行");
 
     private static final Pattern PERIOD_WITH_YEAR =
             Pattern.compile("(20\\d{2})\\s*[-年/.]\\s*(\\d{1,2})");
@@ -45,16 +54,17 @@ public final class TeamIntentExtractor {
     private static final String INSTRUCTION =
             """
             把用户问题解析为薪酬团队意图。输出字段：
-            task_type: CALCULATE | PAYSLIP_QUERY | REVIEW | POLICY_EXPLAIN | BATCH_QUERY | OTHER
+            task_type: CALCULATE | PAYSLIP_QUERY | REVIEW | POLICY_EXPLAIN | BATCH_QUERY | KB_CONFIG | OTHER
             employee_ids: 字符串数组，只填明确的工号，如 EMP001
             employee_names: 字符串数组
             departments: 字符串数组
             period: yyyy-MM，未提及时填当前月
             risk_level: LOW | MEDIUM | HIGH
             needs_validation: 涉及金额时必须为 true
-            write_action: 发薪、审批、入账、打款等写操作填 true
+            write_action: 发薪、审批、入账、打款等写操作填 true；知识库建库、保存配置、
+              调整参数、加/移成员、移动目录、触发重建同样填 true
             required_capabilities: 从 PAYROLL_CALC / PAYROLL_VALIDATE / ACCOUNTING /
-              PAYROLL_QUERY / POLICY_KNOWLEDGE 中选择
+              PAYROLL_QUERY / POLICY_KNOWLEDGE / KB_CONFIG 中选择
             confidence: 0 到 1 的小数
 
             判断规则：
@@ -63,7 +73,8 @@ public final class TeamIntentExtractor {
             3. 部门/全员/批量查询 → BATCH_QUERY
             4. 要求核算、计算、发薪前检查 → CALCULATE
             5. 只要求复核已有结果 → REVIEW
-            6. 无法判断 → OTHER，confidence 低于 0.6
+            6. 知识库的建库、解析分块、检索召回参数、目录/成员权限、入库任务 → KB_CONFIG
+            7. 无法判断 → OTHER，confidence 低于 0.6
             """;
 
     private final TeamLlmClient llm;
@@ -77,8 +88,20 @@ public final class TeamIntentExtractor {
     }
 
     public TeamIntent extract(String question) {
+        return extract(question, false);
+    }
+
+    /**
+     * 提取意图；{@code kbBound=true} 表示会话已绑定知识库，此时制度/流程/条款类问题
+     * 直接按 {@code KB_CONFIG} 处理，避免被薪酬政策模板接管。
+     */
+    public TeamIntent extract(String question, boolean kbBound) {
         String text = question == null ? "" : question.trim();
-        TeamIntent ruleIntent = rules(text);
+        TeamIntent ruleIntent = rules(text, kbBound);
+        if (kbBound && KbChatIntent.matches(text)) {
+            log.info("[动态团队] 会话已绑定知识库，按 KB 问题处理：{}", text);
+            return ruleIntent;
+        }
         String json = llm.completeJson(INSTRUCTION, text, "intent-" + System.nanoTime());
         if (json == null) {
             return ruleIntent;
@@ -142,10 +165,20 @@ public final class TeamIntentExtractor {
 
     /** 规则兜底：关键词只用于分类与槽位，不做金额或员工解析。 */
     public static TeamIntent rules(String question) {
+        return rules(question, false);
+    }
+
+    public static TeamIntent rules(String question, boolean kbBound) {
         String text = question == null ? "" : question.trim();
         String lower = text.toLowerCase(Locale.ROOT);
         boolean writeAction = containsAny(lower, WRITE_KEYWORDS);
         String task = classify(lower);
+        boolean kbQuestion =
+                containsAny(lower, KB_KEYWORDS) || (kbBound && KbChatIntent.matches(text));
+        if (kbQuestion) {
+            task = TeamIntent.TASK_KB_CONFIG;
+            writeAction = writeAction || containsAny(lower, KB_WRITE_KEYWORDS);
+        }
         List<String> capabilities = TeamIntent.capabilitiesFor(task);
         String period = period(text);
         List<String> employeeIds = matches(EMPLOYEE_ID, text).stream()
@@ -203,6 +236,9 @@ public final class TeamIntentExtractor {
         }
         if (TeamIntent.TASK_CALCULATE.equals(task)
                 || TeamIntent.TASK_PAYSLIP_QUERY.equals(task)) {
+            return 0.8D;
+        }
+        if (TeamIntent.TASK_KB_CONFIG.equals(task)) {
             return 0.8D;
         }
         return containsAny(lower, POLICY_KEYWORDS) ? 0.75D : 0.7D;

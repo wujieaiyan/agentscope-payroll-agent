@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import io.agentscope.examples.payroll.support.JsonSupport;
@@ -198,7 +199,7 @@ public final class H2ChatStore implements ChatContextStore {
         String sql =
                 """
                 SELECT message_id, session_id, role, content, tools_json, model, routing_json,
-                       created_at
+                       citations_json, created_at
                 FROM chat_messages WHERE session_id = ? ORDER BY message_id
                 """;
         Map<Long, List<ActionProposal>> proposals = proposalsByMessage(sessionId);
@@ -225,7 +226,7 @@ public final class H2ChatStore implements ChatContextStore {
         String sql =
                 """
                 SELECT message_id, session_id, role, content, tools_json, model, routing_json,
-                       created_at
+                       citations_json, created_at
                 FROM chat_messages WHERE session_id = ? AND message_id = ?
                 """;
         List<ActionProposal> proposals =
@@ -273,15 +274,36 @@ public final class H2ChatStore implements ChatContextStore {
 
     public ChatMessage append(
             long sessionId, String role, String content, List<String> tools, String model) {
+        LocalDateTime now = LocalDateTime.now();
+        long id;
+        try (Connection connection = database.connection()) {
+            id = insertMessage(connection, sessionId, role, content, tools, model, null, now);
+        } catch (SQLException e) {
+            throw new IllegalStateException("保存会话消息失败：" + e.getMessage(), e);
+        }
+        touch(sessionId);
+        return new ChatMessage(id, sessionId, role, content, tools, model, now);
+    }
+
+    /** 供轮次事务复用的消息写入；不提交、不 touch 会话，由调用方控制事务边界。 */
+    static long insertMessage(
+            Connection connection,
+            long sessionId,
+            String role,
+            String content,
+            List<String> tools,
+            String model,
+            String turnId,
+            LocalDateTime now)
+            throws SQLException {
         String sql =
                 """
-                INSERT INTO chat_messages (session_id, role, content, tools_json, model, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO chat_messages (session_id, role, content, tools_json, model,
+                    turn_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """;
-        long id;
-        try (Connection connection = database.connection();
-                PreparedStatement statement =
-                        connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement statement =
+                connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             statement.setLong(1, sessionId);
             statement.setString(2, role);
             statement.setString(3, content == null ? "" : content);
@@ -291,17 +313,14 @@ public final class H2ChatStore implements ChatContextStore {
                 statement.setString(4, JsonSupport.toJson(tools));
             }
             statement.setString(5, model);
-            statement.setObject(6, LocalDateTime.now());
+            statement.setString(6, turnId);
+            statement.setObject(7, now);
             statement.executeUpdate();
             try (ResultSet keys = statement.getGeneratedKeys()) {
                 keys.next();
-                id = keys.getLong(1);
+                return keys.getLong(1);
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("保存会话消息失败：" + e.getMessage(), e);
         }
-        touch(sessionId);
-        return new ChatMessage(id, sessionId, role, content, tools, model, LocalDateTime.now());
     }
 
     /**
@@ -313,13 +332,9 @@ public final class H2ChatStore implements ChatContextStore {
             List<String> tools,
             String model,
             List<ChatToolTrace> traces) {
-        return appendAssistant(sessionId, content, tools, model, traces, null, List.of());
+        return appendAssistant(sessionId, content, tools, model, traces, null, List.of(), null);
     }
 
-    /**
-     * 助手回复、路由快照、待确认提案与工具追溯在同一事务内落库，
-     * 避免出现“有卡片无消息”或“有消息无依据”的半条记录。
-     */
     public ChatMessage appendAssistant(
             long sessionId,
             String content,
@@ -328,13 +343,61 @@ public final class H2ChatStore implements ChatContextStore {
             List<ChatToolTrace> traces,
             ChatRouting routing,
             List<ActionProposal> proposals) {
+        return appendAssistant(sessionId, content, tools, model, traces, routing, proposals, null);
+    }
+
+    public ChatMessage appendAssistant(
+            long sessionId,
+            String content,
+            List<String> tools,
+            String model,
+            List<ChatToolTrace> traces,
+            ChatRouting routing,
+            List<ActionProposal> proposals,
+            String turnId) {
+        return appendAssistant(
+                sessionId, content, tools, model, traces, routing, proposals, turnId, List.of());
+    }
+
+    /**
+     * 助手回复、路由快照、待确认提案、引用与工具追溯在同一事务内落库，
+     * 避免出现“有卡片无消息”或“有消息无依据”的半条记录。
+     *
+     * <p>带 turnId 时按唯一索引幂等：重复提交与接管重放只会保留一条助手消息。
+     */
+    public ChatMessage appendAssistant(
+            long sessionId,
+            String content,
+            List<String> tools,
+            String model,
+            List<ChatToolTrace> traces,
+            ChatRouting routing,
+            List<ActionProposal> proposals,
+            String turnId,
+            List<Citation> citations) {
         String sql =
                 """
                 INSERT INTO chat_messages (session_id, role, content, tools_json, model,
-                    routing_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    routing_json, turn_id, citations_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         LocalDateTime now = LocalDateTime.now();
+        if (turnId != null) {
+            Optional<Long> existing = findMessageIdByTurn(turnId);
+            if (existing.isPresent()) {
+                return new ChatMessage(
+                        existing.get(),
+                        sessionId,
+                        ROLE_ASSISTANT,
+                        content,
+                        tools,
+                        model,
+                        routing,
+                        proposals,
+                        now,
+                        citations);
+            }
+        }
         long id;
         try (Connection connection = database.connection()) {
             connection.setAutoCommit(false);
@@ -355,7 +418,13 @@ public final class H2ChatStore implements ChatContextStore {
                     } else {
                         statement.setString(6, JsonSupport.toJson(routing));
                     }
-                    statement.setObject(7, now);
+                    statement.setString(7, turnId);
+                    if (citations == null || citations.isEmpty()) {
+                        statement.setNull(8, java.sql.Types.CLOB);
+                    } else {
+                        statement.setString(8, JsonSupport.toJson(citations));
+                    }
+                    statement.setObject(9, now);
                     statement.executeUpdate();
                     try (ResultSet keys = statement.getGeneratedKeys()) {
                         keys.next();
@@ -379,11 +448,58 @@ public final class H2ChatStore implements ChatContextStore {
                 throw e;
             }
         } catch (SQLException e) {
+            if (turnId != null && isDuplicateKey(e)) {
+                Optional<Long> existing = findMessageIdByTurn(turnId);
+                if (existing.isPresent()) {
+                    return new ChatMessage(
+                            existing.get(),
+                            sessionId,
+                            ROLE_ASSISTANT,
+                            content,
+                            tools,
+                            model,
+                            routing,
+                            proposals,
+                            now,
+                            citations);
+                }
+            }
             throw new IllegalStateException("保存会话消息失败：" + e.getMessage(), e);
         }
         touch(sessionId);
         return new ChatMessage(
-                id, sessionId, ROLE_ASSISTANT, content, tools, model, routing, proposals, now);
+                id,
+                sessionId,
+                ROLE_ASSISTANT,
+                content,
+                tools,
+                model,
+                routing,
+                proposals,
+                now,
+                citations);
+    }
+
+    /** 按轮次查找已落库的助手消息，用于重复提交与接管重放。 */
+    public Optional<Long> findMessageIdByTurn(String turnId) {
+        if (turnId == null || turnId.isBlank()) {
+            return Optional.empty();
+        }
+        String sql = "SELECT message_id FROM chat_messages WHERE turn_id = ?";
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, turnId);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? Optional.of(rs.getLong(1)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询轮次消息失败：" + e.getMessage(), e);
+        }
+    }
+
+    private static boolean isDuplicateKey(SQLException e) {
+        String state = e.getSQLState();
+        return state != null && state.startsWith("23");
     }
 
     private static long insertTrace(
@@ -575,6 +691,47 @@ public final class H2ChatStore implements ChatContextStore {
         return new H2ActionProposalStore(database).cancelPendingForSession(sessionId);
     }
 
+    /** 会话绑定的知识库 ID；空表示未启用知识库。 */
+    @Override
+    public List<Long> kbSeriesIds(long sessionId) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "SELECT kb_series_ids FROM chat_sessions WHERE session_id = ?")) {
+            statement.setLong(1, sessionId);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return List.of();
+                }
+                String value = rs.getString(1);
+                if (value == null || value.isBlank()) {
+                    return List.of();
+                }
+                return JsonSupport.fromJson(value, new TypeReference<List<Long>>() {});
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取会话知识库绑定失败：" + e.getMessage(), e);
+        }
+    }
+
+    public void saveKbSeriesIds(long sessionId, List<Long> seriesIds) {
+        String value =
+                seriesIds == null || seriesIds.isEmpty()
+                        ? null
+                        : JsonSupport.toJson(seriesIds);
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "UPDATE chat_sessions SET kb_series_ids = ?, updated_at = ? WHERE session_id = ?")) {
+            statement.setString(1, value);
+            statement.setObject(2, LocalDateTime.now());
+            statement.setLong(3, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("保存会话知识库绑定失败：" + e.getMessage(), e);
+        }
+    }
+
     @Override
     public ChatContextSnapshot loadContext(long sessionId) {
         String sql =
@@ -733,7 +890,20 @@ public final class H2ChatStore implements ChatContextStore {
                 rs.getString("model"),
                 routingOf(rs.getString("routing_json")),
                 proposals,
-                rs.getObject("created_at", LocalDateTime.class));
+                rs.getObject("created_at", LocalDateTime.class),
+                citationsOf(rs.getString("citations_json")));
+    }
+
+    /** 旧消息没有引用列；损坏的引用按无引用处理，避免历史加载整体失败。 */
+    private static List<Citation> citationsOf(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return JsonSupport.fromJson(json, new TypeReference<List<Citation>>() {});
+        } catch (IllegalArgumentException e) {
+            return List.of();
+        }
     }
 
     /** 旧消息没有路由列；损坏的快照按未记录处理，避免历史加载整体失败。 */

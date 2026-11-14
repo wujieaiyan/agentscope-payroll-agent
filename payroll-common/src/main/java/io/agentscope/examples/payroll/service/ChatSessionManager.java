@@ -16,15 +16,22 @@ import io.agentscope.examples.payroll.memory.MemorySource;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.team.ActiveTeamCoordinator;
 import io.agentscope.examples.payroll.team.ShadowEvaluator;
+import io.agentscope.examples.payroll.support.JsonSupport;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,7 +39,7 @@ import org.slf4j.LoggerFactory;
  * 多用户、多窗口对话管理：每个会话拥有独立的 PayrollChat 实例与消息记录。
  *
  * <p>会话归属在每次读写前校验；同一会话同时只允许一轮回答，避免上下文交错。会话运行时对象
- * 无法跨实例共享，因此缓存在进程内，并通过 {@link SessionLockService} 在 Redis 上做分布式互斥。
+ * 无法跨实例共享，因此缓存在进程内；跨实例互斥统一由 {@link TurnLeaseService} 的轮次租约承担。
  */
 public final class ChatSessionManager implements AutoCloseable {
 
@@ -41,6 +48,10 @@ public final class ChatSessionManager implements AutoCloseable {
     private static final int TITLE_LIMIT = 24;
     private static final int DEFAULT_MAX_CHATS = 200;
     private static final int DEFAULT_IDLE_MINUTES = 60;
+    private static final int DEFAULT_TURN_DEADLINE_MINUTES = 30;
+    private static final int DEFAULT_PROGRESS_TIMEOUT_SECONDS = 300;
+    /** 单事件负载上限：超限事件会截断文本增量，避免撑爆 Stream 与 SSE 连接。 */
+    private static final int MAX_EVENT_BYTES = 64 * 1024;
 
     private final H2ChatStore store;
     private final PayrollChatFactory chatFactory;
@@ -48,20 +59,25 @@ public final class ChatSessionManager implements AutoCloseable {
     private final StaticRunRecorder runs;
     private final ShadowEvaluator shadow;
     private final ActiveTeamCoordinator activeTeams;
-    private final SessionLockService locks;
     private final int maxCachedChats;
     private final long cacheIdleMillis;
     private final AuditService audit;
     private final H2ChatTurnStore turnStore;
     private final TurnLeaseService leases;
     private final TurnEventBus events;
+    private final TurnEventFanout fanout;
     private final String nodeId;
     private final Map<Long, CachedChat> chats = new ConcurrentHashMap<>();
     private final Map<Long, StaticRunRecorder.ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<Long, String> questions = new ConcurrentHashMap<>();
-    private final Map<Long, String> sessionLocks = new ConcurrentHashMap<>();
+    private final Map<Long, String> sessionLeases = new ConcurrentHashMap<>();
     private final Set<Long> busy = ConcurrentHashMap.newKeySet();
     private final Set<String> remoteExecuting = ConcurrentHashMap.newKeySet();
+    private final Map<String, Heartbeat> executing = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService maintenance;
+    private final long staleMillis;
+    private final Duration turnDeadline;
+    private final long progressTimeoutMillis;
 
     public ChatSessionManager(H2ChatStore store, PayrollChatFactory chatFactory) {
         this(store, chatFactory, VectorMemoryService.disabled(), StaticRunRecorder.disabled());
@@ -103,7 +119,6 @@ public final class ChatSessionManager implements AutoCloseable {
                 runs,
                 shadow,
                 activeTeams,
-                SessionLockService.disabled(),
                 DEFAULT_MAX_CHATS,
                 DEFAULT_IDLE_MINUTES);
     }
@@ -115,7 +130,6 @@ public final class ChatSessionManager implements AutoCloseable {
             StaticRunRecorder runs,
             ShadowEvaluator shadow,
             ActiveTeamCoordinator activeTeams,
-            SessionLockService locks,
             int maxCachedChats,
             int cacheIdleMinutes) {
         this(
@@ -125,7 +139,6 @@ public final class ChatSessionManager implements AutoCloseable {
                 runs,
                 shadow,
                 activeTeams,
-                locks,
                 maxCachedChats,
                 cacheIdleMinutes,
                 null);
@@ -138,7 +151,6 @@ public final class ChatSessionManager implements AutoCloseable {
             StaticRunRecorder runs,
             ShadowEvaluator shadow,
             ActiveTeamCoordinator activeTeams,
-            SessionLockService locks,
             int maxCachedChats,
             int cacheIdleMinutes,
             AuditService audit) {
@@ -149,7 +161,6 @@ public final class ChatSessionManager implements AutoCloseable {
                 runs,
                 shadow,
                 activeTeams,
-                locks,
                 maxCachedChats,
                 cacheIdleMinutes,
                 audit,
@@ -166,7 +177,6 @@ public final class ChatSessionManager implements AutoCloseable {
             StaticRunRecorder runs,
             ShadowEvaluator shadow,
             ActiveTeamCoordinator activeTeams,
-            SessionLockService locks,
             int maxCachedChats,
             int cacheIdleMinutes,
             AuditService audit,
@@ -174,13 +184,80 @@ public final class ChatSessionManager implements AutoCloseable {
             TurnLeaseService leases,
             TurnEventBus events,
             String nodeId) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                maxCachedChats,
+                cacheIdleMinutes,
+                audit,
+                turnStore,
+                leases,
+                events,
+                nodeId,
+                10);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowEvaluator shadow,
+            ActiveTeamCoordinator activeTeams,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit,
+            H2ChatTurnStore turnStore,
+            TurnLeaseService leases,
+            TurnEventBus events,
+            String nodeId,
+            int heartbeatSeconds) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                maxCachedChats,
+                cacheIdleMinutes,
+                audit,
+                turnStore,
+                leases,
+                events,
+                nodeId,
+                heartbeatSeconds,
+                DEFAULT_TURN_DEADLINE_MINUTES,
+                DEFAULT_PROGRESS_TIMEOUT_SECONDS);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowEvaluator shadow,
+            ActiveTeamCoordinator activeTeams,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit,
+            H2ChatTurnStore turnStore,
+            TurnLeaseService leases,
+            TurnEventBus events,
+            String nodeId,
+            int heartbeatSeconds,
+            int turnDeadlineMinutes,
+            int progressTimeoutSeconds) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
         this.runs = runs == null ? StaticRunRecorder.disabled() : runs;
         this.shadow = shadow == null ? ShadowEvaluator.disabled() : shadow;
         this.activeTeams = activeTeams == null ? ActiveTeamCoordinator.disabled() : activeTeams;
-        this.locks = locks == null ? SessionLockService.disabled() : locks;
         this.maxCachedChats = Math.max(1, maxCachedChats);
         this.cacheIdleMillis =
                 cacheIdleMinutes <= 0
@@ -190,7 +267,27 @@ public final class ChatSessionManager implements AutoCloseable {
         this.turnStore = turnStore;
         this.leases = leases == null ? TurnLeaseService.disabled() : leases;
         this.events = events == null ? new InMemoryTurnEventBus() : events;
+        this.fanout = new TurnEventFanout(this.events);
         this.nodeId = nodeId == null || nodeId.isBlank() ? "node" : nodeId;
+        long heartbeatMillis = Math.max(1L, heartbeatSeconds) * 1000L;
+        this.staleMillis = Math.max(30_000L, heartbeatMillis * 3L);
+        this.turnDeadline = Duration.ofMinutes(Math.max(1, turnDeadlineMinutes));
+        this.progressTimeoutMillis =
+                Math.max(30_000L, Math.max(1, progressTimeoutSeconds) * 1000L);
+        this.maintenance =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "turn-maintenance");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        this.maintenance.scheduleWithFixedDelay(
+                this::heartbeatExecuting,
+                heartbeatMillis,
+                heartbeatMillis,
+                TimeUnit.MILLISECONDS);
+        this.maintenance.scheduleWithFixedDelay(
+                this::scanStaleTurns, 60_000L, 60_000L, TimeUnit.MILLISECONDS);
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -221,6 +318,16 @@ public final class ChatSessionManager implements AutoCloseable {
     public List<ChatMessage> messages(long userId, long sessionId) {
         store.requireOwned(sessionId, userId);
         return store.messages(sessionId);
+    }
+
+    public List<Long> kbSeriesIds(long userId, long sessionId) {
+        store.requireOwned(sessionId, userId);
+        return store.kbSeriesIds(sessionId);
+    }
+
+    public void updateKbSeriesIds(long userId, long sessionId, List<Long> seriesIds) {
+        store.requireOwned(sessionId, userId);
+        store.saveKbSeriesIds(sessionId, seriesIds);
     }
 
     public boolean vectorMemoryReady() {
@@ -280,12 +387,13 @@ public final class ChatSessionManager implements AutoCloseable {
         if (!busy.add(sessionId)) {
             throw new PayrollException("该会话正在生成回答，请稍后再试");
         }
-        Optional<String> lock = locks.acquire(sessionId);
-        if (lock.isEmpty()) {
+        Optional<String> lease = leases.acquire(sessionId, TurnLeaseService.newTurnId(), 0L);
+        if (lease.isEmpty()) {
             busy.remove(sessionId);
             throw new PayrollException("该会话正在其他实例上生成回答，请稍后再试");
         }
-        sessionLocks.put(sessionId, lock.get());
+        leases.track(sessionId, lease.get());
+        sessionLeases.put(sessionId, lease.get());
         try {
             PayrollChat chat = chatFor(userId, sessionId);
             ChatMessage saved =
@@ -300,7 +408,7 @@ public final class ChatSessionManager implements AutoCloseable {
             return chat;
         } catch (RuntimeException e) {
             questions.remove(sessionId);
-            releaseSessionLock(sessionId);
+            releaseSessionLease(sessionId);
             busy.remove(sessionId);
             throw e;
         }
@@ -314,6 +422,11 @@ public final class ChatSessionManager implements AutoCloseable {
     }
 
     private Long saveReply(long userId, long sessionId, PayrollChat.Reply reply) {
+        return saveReply(userId, sessionId, reply, null);
+    }
+
+    private Long saveReply(
+            long userId, long sessionId, PayrollChat.Reply reply, String turnId) {
         StaticRunRecorder.ActiveRun run = activeRuns.remove(sessionId);
         String question = questions.remove(sessionId);
         try {
@@ -325,7 +438,9 @@ public final class ChatSessionManager implements AutoCloseable {
                             reply.model(),
                             reply.traces(),
                             reply.routing(),
-                            reply.proposals());
+                            reply.proposals(),
+                            turnId,
+                            reply.citations());
             log.info(
                     "[会话] 回答已保存：sessionId={}，messageId={}，工具追溯={}条",
                     sessionId,
@@ -358,7 +473,7 @@ public final class ChatSessionManager implements AutoCloseable {
             failRun(run, sessionId, 0L, "保存回答失败：" + rootMessage(e));
             return null;
         } finally {
-            releaseSessionLock(sessionId);
+            releaseSessionLease(sessionId);
             busy.remove(sessionId);
         }
     }
@@ -424,7 +539,7 @@ public final class ChatSessionManager implements AutoCloseable {
             log.error("[会话] 保存错误消息失败：sessionId={}", sessionId, e);
         } finally {
             failRun(activeRuns.remove(sessionId), sessionId, messageId, message);
-            releaseSessionLock(sessionId);
+            releaseSessionLease(sessionId);
             busy.remove(sessionId);
         }
     }
@@ -442,7 +557,7 @@ public final class ChatSessionManager implements AutoCloseable {
                         e.getMessage());
             }
         }
-        releaseSessionLock(sessionId);
+        releaseSessionLease(sessionId);
         busy.remove(sessionId);
     }
 
@@ -475,42 +590,66 @@ public final class ChatSessionManager implements AutoCloseable {
             busy.remove(sessionId);
             throw new PayrollException("该会话正在其他实例上生成回答，请稍后再试");
         }
+        String resolvedNode = ownerNode == null || ownerNode.isBlank() ? nodeId : ownerNode;
+        ChatTurn created = null;
         try {
             // Web 节点不执行模型：chatFactory 为空时只负责落轮次，由 agent 节点接管执行。
             PayrollChat chat = chatFactory == null ? null : chatFor(userId, sessionId);
-            ChatMessage saved =
-                    store.append(sessionId, H2ChatStore.ROLE_USER, message, null, null);
-            questions.put(sessionId, message);
-            memory.indexQuestion(
-                    userId, sessionId, saved.id(), store.userTurnCount(sessionId), message);
-            if (DEFAULT_TITLE.equals(session.title())) {
-                store.rename(sessionId, autoTitle(message));
-            }
+            long userMessageId;
             if (turnStore != null) {
-                LocalDateTime now = LocalDateTime.now();
-                turnStore.create(
-                        new ChatTurn(
+                created =
+                        turnStore.createWithUserMessage(
                                 turnId,
                                 sessionId,
                                 userId,
-                                saved.id(),
-                                0L,
-                                ChatTurn.RUNNING,
-                                ownerNode == null || ownerNode.isBlank() ? nodeId : ownerNode,
+                                message,
+                                resolvedNode,
                                 fencing,
-                                0L,
-                                null,
-                                now,
-                                now,
-                                null));
+                                turnDeadline);
+                userMessageId = created.userMessageId();
+            } else {
+                ChatMessage saved =
+                        store.append(sessionId, H2ChatStore.ROLE_USER, message, null, null);
+                userMessageId = saved.id();
+            }
+            questions.put(sessionId, message);
+            try {
+                memory.indexQuestion(
+                        userId, sessionId, userMessageId, store.userTurnCount(sessionId), message);
+            } catch (RuntimeException e) {
+                log.warn("[记忆] 写入问题向量失败：sessionId={}，原因={}", sessionId, e.getMessage());
+            }
+            if (DEFAULT_TITLE.equals(session.title())) {
+                try {
+                    store.rename(sessionId, autoTitle(message));
+                } catch (RuntimeException e) {
+                    log.warn("[会话] 自动命名失败：sessionId={}，原因={}", sessionId, e.getMessage());
+                }
             }
             if (chat != null) {
+                leases.track(sessionId, lease.get());
+                executing.put(
+                        turnId,
+                        new Heartbeat(
+                                sessionId,
+                                fencing,
+                                lease.get(),
+                                created == null ? null : created.deadlineAt()));
                 startRun(chat, userId, sessionId);
             }
             return new TurnContext(
-                    turnId, userId, sessionId, saved.id(), fencing, lease.get(), ownerNode, chat);
+                    turnId, userId, sessionId, userMessageId, fencing, lease.get(), ownerNode, chat);
         } catch (RuntimeException e) {
             questions.remove(sessionId);
+            executing.remove(turnId);
+            if (created != null) {
+                // 用户消息与轮次已提交：标记失败而不是留下永远 RUNNING 的孤儿。
+                try {
+                    turnStore.finish(turnId, fencing, ChatTurn.FAILED, 0L, "开启轮次失败");
+                } catch (RuntimeException ignored) {
+                    log.debug("[轮次] 补偿失败轮次异常：turnId={}", turnId, ignored);
+                }
+            }
             leases.release(sessionId, lease.get());
             busy.remove(sessionId);
             throw e;
@@ -562,7 +701,17 @@ public final class ChatSessionManager implements AutoCloseable {
                 return Optional.empty();
             }
             PayrollChat chat = chatFor(userId, sessionId);
+            if (!turnStore.heartbeat(turnId, fencingToken)) {
+                leases.release(sessionId, token);
+                remoteExecuting.remove(turnId);
+                busy.remove(sessionId);
+                return Optional.empty();
+            }
             questions.put(sessionId, message);
+            executing.put(
+                    turnId,
+                    new Heartbeat(
+                            sessionId, fencingToken, token, found.get().deadlineAt()));
             startRun(chat, userId, sessionId);
             return Optional.of(
                     new TurnContext(
@@ -585,6 +734,9 @@ public final class ChatSessionManager implements AutoCloseable {
     /** 运行时执行结束（成功/失败/取消）后清理本地占用。 */
     public void finishRemoteTurn(String turnId) {
         remoteExecuting.remove(turnId);
+        if (turnId != null && !turnId.isBlank()) {
+            events.clearCancel(turnId);
+        }
     }
 
     /** 内部取消：不校验用户归属，仅供已签名的 runtime 接口调用。 */
@@ -610,7 +762,21 @@ public final class ChatSessionManager implements AutoCloseable {
             discardTurn(turn);
             return null;
         }
-        Long messageId = saveReply(turn.userId(), turn.sessionId(), reply);
+        if (turnStore != null) {
+            Optional<ChatTurn> current = turnStore.find(turn.turnId());
+            if (current.isPresent() && ChatTurn.terminal(current.get().status())) {
+                // 重复提交或接管重放：直接复用已落库的终态消息，不再写第二条。
+                long existing = current.get().assistantMessageId();
+                questions.remove(turn.sessionId());
+                finishTurn(turn, current.get().status(), existing, current.get().errorMessage());
+                return existing > 0 ? existing : null;
+            }
+            if (current.isPresent() && current.get().fencingToken() != turn.fencingToken()) {
+                releaseTurn(turn, "轮次已被新执行端接管");
+                return null;
+            }
+        }
+        Long messageId = saveReply(turn.userId(), turn.sessionId(), reply, turn.turnId());
         finishTurn(
                 turn,
                 messageId == null ? ChatTurn.FAILED : ChatTurn.SUCCEEDED,
@@ -623,7 +789,7 @@ public final class ChatSessionManager implements AutoCloseable {
     private void discardTurn(TurnContext turn) {
         questions.remove(turn.sessionId());
         cancelRun(activeRuns.remove(turn.sessionId()), turn.sessionId(), "用户已取消本轮回答");
-        releaseSessionLock(turn.sessionId());
+        releaseSessionLease(turn.sessionId());
         finishTurn(turn, ChatTurn.CANCELED, 0L, "用户已取消本轮回答");
     }
 
@@ -692,7 +858,18 @@ public final class ChatSessionManager implements AutoCloseable {
 
     /** 写入一条轮次事件并返回序号；增量事件不刷新数据库游标，降低写放大。 */
     public long emit(TurnContext turn, String event, Map<String, Object> data) {
-        long seq = events.append(turn.turnId(), event, data);
+        if (!TurnEventBus.isKnownEvent(event)) {
+            // 兼容性检查：新事件仍会下发，但先暴露给发布方登记，避免前后端契约悄悄漂移。
+            log.warn("[轮次] 未注册的事件类型：turnId={}，event={}", turn.turnId(), event);
+        }
+        int[] size = new int[1];
+        Map<String, Object> payload = limitEventSize(turn.turnId(), event, data, size);
+        long seq = events.append(turn.turnId(), event, payload);
+        TurnMetrics.eventBytes(size[0]);
+        Heartbeat heartbeat = executing.get(turn.turnId());
+        if (heartbeat != null) {
+            heartbeat.progress(seq);
+        }
         if (turnStore != null && structural(event)) {
             try {
                 turnStore.updateLastSeq(turn.turnId(), turn.fencingToken(), seq);
@@ -703,16 +880,219 @@ public final class ChatSessionManager implements AutoCloseable {
         return seq;
     }
 
+    /**
+     * 限制单条事件的序列化大小。常见超限来源是超长文本增量：
+     * 先按 3/4 递减截断文本字段，仍超限则只保留标量字段并附截断标记，
+     * 保证事件仍是合法 JSON、前端可继续拼接并最终以落库消息为准。
+     */
+    static Map<String, Object> limitEventSize(
+            String turnId, String event, Map<String, Object> data) {
+        return limitEventSize(turnId, event, data, null);
+    }
+
+    /**
+     * 同 {@link #limitEventSize(String, String, Map)}，并回写最终负载字节数供指标采样，
+     * 避免调用方为统计再序列化一次。
+     */
+    static Map<String, Object> limitEventSize(
+            String turnId, String event, Map<String, Object> data, int[] sizeOut) {
+        if (data == null || data.isEmpty()) {
+            return data;
+        }
+        int originalBytes = utf8Length(JsonSupport.toJson(data));
+        if (originalBytes <= MAX_EVENT_BYTES) {
+            if (sizeOut != null) {
+                sizeOut[0] = originalBytes;
+            }
+            return data;
+        }
+        Map<String, Object> capped = new LinkedHashMap<>(data);
+        for (String key : List.of("text", "reply", "args", "message")) {
+            Object value = capped.get(key);
+            if (!(value instanceof String text) || text.isEmpty()) {
+                continue;
+            }
+            String current = text;
+            while (!current.isEmpty()
+                    && utf8Length(JsonSupport.toJson(capped)) > MAX_EVENT_BYTES) {
+                current = current.substring(0, current.length() * 3 / 4);
+                capped.put(key, current);
+            }
+            if (utf8Length(JsonSupport.toJson(capped)) <= MAX_EVENT_BYTES) {
+                break;
+            }
+        }
+        if (utf8Length(JsonSupport.toJson(capped)) <= MAX_EVENT_BYTES) {
+            capped.put("truncated", true);
+            if (sizeOut != null) {
+                sizeOut[0] = utf8Length(JsonSupport.toJson(capped));
+            }
+            log.warn(
+                    "[轮次] 事件负载超限，已截断文本字段：turnId={}，event={}，原始字节={}",
+                    turnId,
+                    event,
+                    originalBytes);
+            return capped;
+        }
+        Map<String, Object> minimal = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : data.entrySet()) {
+            Object value = entry.getValue();
+            if (value == null || value instanceof Number || value instanceof Boolean) {
+                minimal.put(entry.getKey(), value);
+            } else if (value instanceof String text) {
+                minimal.put(entry.getKey(), text.substring(0, Math.min(text.length(), 256)));
+            }
+        }
+        minimal.put("truncated", true);
+        minimal.put("dropped_bytes", originalBytes);
+        if (sizeOut != null) {
+            sizeOut[0] = utf8Length(JsonSupport.toJson(minimal));
+        }
+        log.warn(
+                "[轮次] 事件负载超限，仅保留标量字段：turnId={}，event={}，原始字节={}",
+                turnId,
+                event,
+                originalBytes);
+        return minimal;
+    }
+
+    private static int utf8Length(String value) {
+        return value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length;
+    }
+
     public List<TurnEventBus.TurnEvent> turnEvents(
             long userId, long sessionId, String turnId, long afterSeq, int max) {
         store.requireOwned(sessionId, userId);
         return events.read(turnId, afterSeq, max);
     }
 
+    /** 该轮次仍可读取的最早事件序号；0 表示没有可用事件。 */
+    public long earliestTurnSeq(long userId, long sessionId, String turnId) {
+        store.requireOwned(sessionId, userId);
+        return events.earliestSeq(turnId);
+    }
+
+    /** 冷恢复快照；null 表示没有可用快照，调用方应回退到事件重放。 */
+    public TurnEventBus.TurnSnapshot turnSnapshot(
+            long userId, long sessionId, String turnId) {
+        store.requireOwned(sessionId, userId);
+        return events.snapshot(turnId);
+    }
+
     public List<TurnEventBus.TurnEvent> waitTurnEvents(
             long userId, long sessionId, String turnId, long afterSeq, Duration block, int max) {
         store.requireOwned(sessionId, userId);
-        return events.readBlocking(turnId, afterSeq, block, max);
+        // 同一轮次的多个订阅者共享一个节点内读取循环，Redis 读取次数不再随连接数放大。
+        return fanout.await(turnId, afterSeq, block, max);
+    }
+
+    /**
+     * 启动清理与周期扫描共用：先清孤儿轮次，再只终止「心跳超时且租约缺失」的轮次。
+     *
+     * <p>慢回答只要执行端仍在续租并写心跳就不会被误杀；执行端宕机后租约与心跳同时停止。
+     */
+    public int expireStaleTurns(Duration olderThan, String reason) {
+        if (turnStore == null) {
+            return 0;
+        }
+        int expired = 0;
+        try {
+            expired += turnStore.expireOrphanedRunning(reason);
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 清理孤儿轮次失败：{}", e.getMessage());
+        }
+        try {
+            // 绝对截止时间不依赖本机是否持有轮次：执行节点整体失联时由扫描统一收尾。
+            expired += turnStore.expireOverdueRunning("轮次超过最长执行时间");
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 清理超时轮次失败：{}", e.getMessage());
+        }
+        List<ChatTurn> stale;
+        try {
+            stale = turnStore.findStaleRunning(olderThan, 200);
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 查询失联轮次失败：{}", e.getMessage());
+            return expired;
+        }
+        for (ChatTurn turn : stale) {
+            boolean alive;
+            try {
+                alive = leases.alive(turn.sessionId());
+            } catch (RuntimeException e) {
+                alive = true;
+            }
+            if (alive) {
+                continue;
+            }
+            try {
+                if (turnStore.finish(
+                        turn.turnId(), turn.fencingToken(), ChatTurn.EXPIRED, 0L, reason)) {
+                    executing.remove(turn.turnId());
+                    events.clearCancel(turn.turnId());
+                    TurnMetrics.leaseLost();
+                    expired++;
+                }
+            } catch (RuntimeException e) {
+                log.warn("[轮次] 标记失联轮次失败：turnId={}，原因={}", turn.turnId(), e.getMessage());
+            }
+        }
+        if (expired > 0) {
+            log.info("[轮次] 标记失联轮次 {} 条：{}", expired, reason);
+        }
+        return expired;
+    }
+
+    private void heartbeatExecuting() {
+        if (turnStore == null || executing.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Heartbeat> entry : executing.entrySet()) {
+            String turnId = entry.getKey();
+            Heartbeat heartbeat = entry.getValue();
+            try {
+                if (!turnStore.heartbeat(turnId, heartbeat.fencingToken())) {
+                    executing.remove(turnId);
+                    continue;
+                }
+            } catch (RuntimeException e) {
+                log.debug("[轮次] 心跳写入失败：turnId={}，原因={}", turnId, e.getMessage());
+                continue;
+            }
+            String stalled = heartbeat.stallReason(now, progressTimeoutMillis);
+            if (stalled != null) {
+                abortStalledTurn(turnId, heartbeat, stalled);
+            }
+        }
+    }
+
+    /** 看门狗主动终止：截止时间已到或 last_seq 长时间不前进。 */
+    private void abortStalledTurn(String turnId, Heartbeat heartbeat, String reason) {
+        try {
+            if (!turnStore.finish(
+                    turnId, heartbeat.fencingToken(), ChatTurn.FAILED, 0L, reason)) {
+                executing.remove(turnId);
+                return;
+            }
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 看门狗结束轮次失败：turnId={}，原因={}", turnId, e.getMessage());
+            return;
+        }
+        executing.remove(turnId);
+        remoteExecuting.remove(turnId);
+        events.cancel(turnId);
+        leases.release(heartbeat.sessionId(), heartbeat.leaseToken());
+        busy.remove(heartbeat.sessionId());
+        cancelRun(activeRuns.remove(heartbeat.sessionId()), heartbeat.sessionId(), reason);
+        log.warn("[轮次] 看门狗终止轮次：turnId={}，原因={}", turnId, reason);
+    }
+
+    private void scanStaleTurns() {
+        try {
+            expireStaleTurns(Duration.ofMillis(staleMillis), "心跳超时且租约缺失");
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 周期扫描失联轮次失败：{}", e.getMessage());
+        }
     }
 
     /** 长时间无事件的运行中轮次标记为过期，避免前端无限等待。 */
@@ -724,12 +1104,18 @@ public final class ChatSessionManager implements AutoCloseable {
         if (turn.isEmpty() || !ChatTurn.RUNNING.equals(turn.get().status())) {
             return false;
         }
-        return turnStore.finish(
-                turnId, turn.get().fencingToken(), ChatTurn.EXPIRED, 0L, reason);
+        boolean expired =
+                turnStore.finish(
+                        turnId, turn.get().fencingToken(), ChatTurn.EXPIRED, 0L, reason);
+        if (expired) {
+            events.clearCancel(turnId);
+        }
+        return expired;
     }
 
     private void finishTurn(
             TurnContext turn, String status, long assistantMessageId, String errorMessage) {
+        executing.remove(turn.turnId());
         if (turnStore != null) {
             try {
                 turnStore.finish(
@@ -742,6 +1128,7 @@ public final class ChatSessionManager implements AutoCloseable {
                 log.warn("[轮次] 结束轮次失败：turnId={}，原因={}", turn.turnId(), e.getMessage());
             }
         }
+        events.clearCancel(turn.turnId());
         leases.release(turn.sessionId(), turn.token());
         busy.remove(turn.sessionId());
     }
@@ -753,7 +1140,7 @@ public final class ChatSessionManager implements AutoCloseable {
      * 必须在续流结束时清掉 busy 与本地锁记录，否则该节点会一直误判会话正在生成。
      */
     public void releaseLocalChat(long sessionId) {
-        releaseSessionLock(sessionId);
+        releaseSessionLease(sessionId);
         busy.remove(sessionId);
     }
 
@@ -773,10 +1160,10 @@ public final class ChatSessionManager implements AutoCloseable {
         return turn != null && events.cancelled(turn.turnId());
     }
 
-    private void releaseSessionLock(long sessionId) {
-        String token = sessionLocks.remove(sessionId);
+    private void releaseSessionLease(long sessionId) {
+        String token = sessionLeases.remove(sessionId);
         if (token != null) {
-            locks.release(sessionId, token);
+            leases.release(sessionId, token);
         }
     }
 
@@ -936,10 +1323,65 @@ public final class ChatSessionManager implements AutoCloseable {
 
     @Override
     public void close() {
+        maintenance.shutdownNow();
+        fanout.close();
         chats.keySet().forEach(this::closeChat);
         busy.clear();
-        sessionLocks.forEach(locks::release);
-        sessionLocks.clear();
+        executing.clear();
+        sessionLeases.forEach(leases::release);
+        sessionLeases.clear();
+    }
+
+    static final class Heartbeat {
+
+        private final long sessionId;
+        private final long fencingToken;
+        private final String leaseToken;
+        private final long deadlineMillis;
+        private volatile long lastSeq = -1L;
+        private volatile long lastProgressAt = System.currentTimeMillis();
+
+        Heartbeat(
+                long sessionId,
+                long fencingToken,
+                String leaseToken,
+                LocalDateTime deadlineAt) {
+            this.sessionId = sessionId;
+            this.fencingToken = fencingToken;
+            this.leaseToken = leaseToken;
+            this.deadlineMillis =
+                    deadlineAt == null
+                            ? 0L
+                            : deadlineAt.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        }
+
+        private long sessionId() {
+            return sessionId;
+        }
+
+        private long fencingToken() {
+            return fencingToken;
+        }
+
+        private String leaseToken() {
+            return leaseToken;
+        }
+
+        void progress(long seq) {
+            lastSeq = seq;
+            lastProgressAt = System.currentTimeMillis();
+        }
+
+        /** 返回终止原因；null 表示仍在正常推进。 */
+        String stallReason(long now, long progressTimeoutMillis) {
+            if (deadlineMillis > 0 && now >= deadlineMillis) {
+                return "轮次超过最长执行时间";
+            }
+            if (now - lastProgressAt >= progressTimeoutMillis) {
+                return "轮次长时间无事件进展（last_seq=" + lastSeq + "）";
+            }
+            return null;
+        }
     }
 
     private static final class CachedChat {

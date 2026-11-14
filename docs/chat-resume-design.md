@@ -447,66 +447,124 @@ idle ──发送──> streaming ──断线──> recovering ──成功�
 
 ### P0 正确性（必须先做）
 
-- [ ] **P0-1 修正失联轮次误杀**
+- [x] **P0-1 修正失联轮次误杀**
   - 改动：`chat_turns` 增加 `heartbeat_at`，由执行端每 10s 独立更新（与结构事件解耦）；`expireStale` 只处理心跳超时且租约缺失的轮次；启动清理保留，另加每 60s 周期扫描。
   - 涉及：`H2ChatTurnStore.java:177`、`PayrollCoreConfiguration.java:499`、`ChatSessionManager.java`。
   - 验收：纯文本长回答运行超过 2 分钟期间重启任一 Web 节点，轮次仍为 `RUNNING`；执行端真正宕机后 ≤ 90s 变 `EXPIRED`。
+  - 已实现：执行端注册 `turn-maintenance` 心跳，每 10s 写 `heartbeat_at`；扫描取「30s 无心跳」候选后逐个校验租约，租约存活则跳过；MySQL 走 V5，H2 内联 DDL 同步。
 
-- [ ] **P0-2 终态消息幂等**
+- [x] **P0-2 终态消息幂等**
   - 改动：`chat_messages` 增加 `turn_id` 列与唯一索引（MySQL migration + H2 DDL 同步）；`completeTurn` 按 `turn_id` 先查后写或 UPSERT；保存消息与 `finishTurn` 同事务，或都带 fencing 条件更新。
   - 涉及：`ChatSessionManager.java:608`、`H2ChatStore`、`V1__payroll_core.sql`。
   - 验收：同一 `turn_id` 重复提交、接管重放 3 次，助手消息仍只有 1 条。
+  - 已实现：`turn_id` 只标记终态助手消息（用户消息经 `user_message_id` 关联，避免唯一索引冲突）；先查后写并用唯一索引兜底重复；`completeTurn` 终态短路，旧令牌直接放弃写回。
 
-- [ ] **P0-3 `beginTurn` 事务化与孤儿清理**
+- [x] **P0-3 `beginTurn` 事务化与孤儿清理**
   - 改动：用户消息与 `chat_turns` 写入放在同一数据库事务；租约获取失败时补偿；启动清理「RUNNING 但无用户消息」和「用户消息无轮次」的孤儿数据。
   - 涉及：`ChatSessionManager.java:466`。
   - 验收：在两次写入之间注入异常不产生孤儿数据；修复后 `/turns/active` 不返回异常轮次。
+  - 已实现：`createWithUserMessage` 在同一事务内写消息与轮次；提交后的副作用失败会把轮次补偿为 `FAILED`；启动与周期扫描标记「用户消息缺失」的 `RUNNING` 轮次。
+  - 说明：历史「用户消息无轮次」不做删除——升级前的消息本就没有轮次，删除会损失会话历史；事务化后不会再产生这类半写数据。
 
-- [ ] **P0-4 事件写放大治理**
+- [x] **P0-4 事件写放大治理**
   - 改动：在 `ChatSse` / `ChatSessionManager.emit` 增加 50~100ms 的 `text` / `thinking` 增量合并；`RedisTurnEventBus.append` 用 pipeline 或 Lua 一次提交；TTL 只在首事件或每 N 秒刷新；裁剪改为时间优先（`MINID`），保留 `MAXLEN` 兜底。
   - 涉及：`RedisTurnEventBus.java:53`、`ChatSse.java`、`ChatSessionManager.java:694`。
   - 验收：同样一轮回答的 Redis 命令数下降 ≥ 5 倍；文本仍按 50~100ms 粒度到达，首字延迟无明显退化。
+  - 已实现：`ChatSse` 以 80ms 窗口合并 `text` / `thinking` / `agent_text` / `tool_args`，任一非增量事件（工具、阶段、done）前强制冲刷，取消后丢弃未发增量。
+  - 已实现：`RedisTurnEventBus.append` 改为单次 Lua（INCR + XADD + 条件 EXPIRE + MINID/MAXLEN 裁剪），由每事件约 6 条命令降为 1 次脚本往返；TTL 首事件或每 64 条刷新，裁剪每 32 条执行，时长维度由键 TTL 负责。
 
-- [ ] **P0-5 断点过期契约**
+- [x] **P0-5 断点过期契约**
   - 改动：事件读取返回最早可用 `seq`；`resume` 发现 `after_seq` 早于最早事件时，下发 `gap` 事件（带 `earliest_seq`）或返回 410；前端收到后停止拼接，改为展示数据库最终消息并明确提示「部分过程已跳过」。
   - 涉及：`ChatSessionController.java:470`、`frontend/src/api/sse.js`、`ChatView.vue`。
   - 验收：人为 `XTRIM` 掉前半段事件后重连，前端不展示残缺回答，且提示清晰。
+  - 已实现：`TurnEventBus.earliestSeq`（内存取队首、Redis `XRANGE ... COUNT 1`）；续流开始与循环内发现序号不连续时下发 `gap`（`after_seq` / `earliest_seq` / `message`），并从最早可用序号继续重放。
+  - 已实现：前端收到 `gap` 后清空已拼接文本与思考、忽略后续增量，顶部常驻提示「部分过程已跳过」，`done`/收尾时以落库消息展示完整回答。
 
 ### P1 成本、可靠性与扩展性
 
-- [ ] **P1-1 轮次快照与冷恢复优化**
+- [x] **P1-1 轮次快照与冷恢复优化**
   - 改动：Redis 增加 `events:{turnId}:snapshot`，每 N 个事件或每 1~2s UPSERT `{seq,text,tools,agents,phase}`；刷新时先取快照再补增量；读侧合并连续 `text` 后再下发。
   - 验收：1 万事件轮次刷新后首屏 < 1s，SSE 帧数下降 ≥ 50%。
+  - 已实现：`RedisTurnEventBus` 维护 `payroll:chat:snapshot:{turnId}`（`{seq,text,tools,agents,phase}`，文本保留最近 20k、工具/智能体去重封顶 50），每 16 个事件或 `done`/`error` 时持久化；`InMemoryTurnEventBus` 按同样契约重放事件生成快照。
+  - 已实现：续流先下发 `snapshot` 再补增量（`ChatSessionController`），后端把连续 `text` 合并为一帧下发；前端收到 `snapshot` 直接替换文本/工具/智能体/阶段状态，不再逐字重放历史。
 
-- [ ] **P1-2 绝对截止时间与进度看门狗**
+- [x] **P1-2 绝对截止时间与进度看门狗**
   - 改动：`chat_turns` 增加 `deadline_at`，创建时固定；续流按绝对截止时间判断，不再每次连接重置；执行端每 30s 检查 `last_seq` 是否前进，长时间不前进则主动失败。
   - 验收：执行端 hang 但租约仍在续期时，轮次在配置上限内结束，不会因客户端重连无限延长。
+  - 已实现：`ChatTurn.deadlineAt` 创建时按 `payroll.chat.turn-max-minutes`（默认 30）固定；H2 内联 DDL 与 MySQL `V6__turn_deadline.sql` 加列并为历史运行中轮次回填，扫描节点 `expireOverdueRunning` 兜底置 `EXPIRED`；续流按绝对截止时间判断，不再以连接开始时间重置。
+  - 已实现：执行端心跳每轮比较 `last_seq`，超过 `payroll.chat.turn-progress-timeout-seconds`（默认 300）无进展或到达截止时间即主动 `FAILED`、归还租约并取消运行。
 
-- [ ] **P1-3 围栏令牌原子分配**
+- [x] **P1-3 围栏令牌原子分配**
   - 改动：改为 Redis 每会话 `INCR payroll:chat:fencing:{sessionId}`，或数据库增加唯一索引 `(session_id, fencing_token)` 并在冲突时重试；所有写路径继续校验令牌。
   - 验收：并发与 Redis 降级场景下无重复 fencing；旧令牌写回影响 0 行。
+  - 已实现：新增 `chat_fencing` 计数器表（H2 内联 DDL、MySQL `V7__chat_fencing.sql`），`H2ChatTurnStore.nextFencing` 在单事务内以行锁自增并按已有轮次最大令牌校准，不再依赖 `SELECT MAX + 1` 的读改写，Redis 是否可用不影响分配正确性；全部写回仍带 `fencing_token` 条件，旧令牌影响 0 行。
+  - 已实现：`ChatTurnLifecycleTest.concurrentFencingAllocation` 以 8 线程并发分配 160 次，令牌互不重复且连续递增。
 
-- [ ] **P1-4 事件总线降级可恢复**
+- [x] **P1-4 事件总线降级可恢复**
   - 改动：用断路器替换永久 `degraded`：失败阈值、半开探测、恢复后自动切回；降级范围限制在当前轮次。
   - 涉及：`RedisTurnEventBus.java:237`。
   - 验收：断开 Redis 30s 后恢复，无需重启即可重新跨节点续流。
+  - 已实现：`RedisTurnEventBus` 内置断路器（连续失败 3 次打开，10s→20s→40s→60s 退避封顶，半开仅放行单次探测），Redis 调用期间降级到进程内总线；探测成功自动恢复并记日志；`readBlocking` 命令超时视为 Redis 可达，不计入失败。
 
-- [ ] **P1-5 单节点事件分发器**
+- [x] **P1-5 单节点事件分发器**
   - 改动：每节点每轮只保留一个读取循环，本地 fan-out 给多个 SSE 订阅者；或采用 Pub/Sub 通知 + Stream 补放。
   - 验收：1000 并发连接时 Redis QPS 与连接数解耦，稳定在每轮约 1 次/秒量级。
+  - 已实现：新增 `TurnEventFanout`，每节点每轮一个读取线程（`turn-events-*`），本地环形缓冲 2048 条供所有订阅者共享；订阅者只在自己的游标上取数，缓冲裁剪后落后订阅者按既有 `gap` 契约收尾；无订阅 60s 后自动退出，`ChatSessionManager.close()` 统一释放。
+  - 已实现：`TurnEventFanoutTest` 用 3 个并发订阅者验证读取次数不随连接数放大（等待期只由一个循环轮询）。
 
-- [ ] **P1-6 事件 schema 版本化**
+- [x] **P1-6 事件 schema 版本化**
   - 改动：事件统一为 `{v,type,seq,ts,payload}`；客户端忽略未知事件；发布前做兼容性检查。
   - 验收：新旧前端混跑期间，旧前端不因新增事件报错。
+  - 已实现：`TurnEventBus.VERSION = 1`，`TurnEvent` 增加 `version` / `timestamp` 元数据；Redis Stream 每条事件写入 `v` / `ts` 字段，读取时高于当前版本的事件跳过并告警，缺失版本按 1 兼容；`ChatSse` 在所有 SSE 负载上补齐 `v` / `ts`（重放保留原始 `ts`），前端 `handleEvent` 的 `default` 分支天然忽略未知事件。
+  - 已实现：事件类型登记表 `TurnEventBus.KNOWN_EVENTS`，`ChatSessionManager.emit` 发布未登记类型时记录告警；负载仍保持平坦字段而非嵌套 `payload`，避免破坏既有前端读取契约。
 
 ### P2 可运维性与安全
 
-- [ ] **P2-1 多标签页协调**：`BroadcastChannel` 选主，或服务端限制每会话单活跃订阅者。
-- [ ] **P2-2 清理会话锁死路径**：把 `SessionLockService` 接入 `beginTurn`，或删除该路径，避免「看起来有锁、实际未生效」。
-- [ ] **P2-3 事件大小上限与 Redis 隔离**：单事件 ≤ 64KB；事件流使用独立实例或独立库；禁止 `allkeys-lru` 误淘汰。
-- [ ] **P2-4 指标与告警**：补齐 `gap` 次数、降级次数、租约丢失、重放事件数、事件字节数、续流 p99。
-- [ ] **P2-5 取消标记生命周期**：TTL 与轮次绝对上限对齐，轮次结束时主动删除取消键。
-- [ ] **P2-6 裁剪策略统一**：时间优先（`MINID`）+ `MAXLEN` 兜底，避免条数与时长脱节。
+- [x] **P2-1 多标签页协调**：`BroadcastChannel` 选主，或服务端限制每会话单活跃订阅者。
+  - 已实现：新增 `frontend/src/stores/tabSync.js`，同一浏览器内以 `BroadcastChannel` 协调：打开会话时先 `probe` 探测其它标签页是否已在拉同一条流，已有主人则拉取 `state` 快照并镜像渲染后续 `event`；发送新问题前同样探测，若其它标签页正在生成则提示并转为镜像，避免重复写入。流主人关闭页面时广播 `end{handoff}`，镜像页自动接管续流。
+  - 兼容：不支持 `BroadcastChannel` 或探测超时（300ms）时退化为各标签页独立拉流，行为与改造前一致。
+- [x] **P2-2 清理会话锁死路径**：把 `SessionLockService` 接入 `beginTurn`，或删除该路径，避免「看起来有锁、实际未生效」。
+  - 已实现：删除 `SessionLockService` 及其测试与 Spring Bean；遗留 `begin()` 改走 `TurnLeaseService`（`acquire` + `track`，释放时 `release`），与 `beginTurn` 共用同一套短租约，多实例互斥不再依赖 15 分钟长锁。
+- [x] **P2-3 事件大小上限与 Redis 隔离**：单事件 ≤ 64KB；事件流使用独立实例或独立库；禁止 `allkeys-lru` 误淘汰。
+  - 已实现（上限）：`ChatSessionManager.emit` 统一走 `limitEventSize`，序列化超过 64KB 时先按 `text`/`reply`/`args`/`message` 字段迭代截断并标记 `truncated=true`，仍超限则只保留标量与短字符串，附 `dropped_bytes` 告警；`EventSizeLimitTest` 覆盖小负载、超长文本、超大集合三种情况。
+  - 已实现（淘汰策略）：`RedisTurnEventBus` 构造时执行 `INFO memory` 自检，`maxmemory-policy` 以 `allkeys` 开头即记录 WARNING；`docker/docker-compose.yml` 的 redis 启动参数显式声明 `--maxmemory-policy noeviction`。
+  - 取舍：未做代码级「独立连接工厂 + 独立库」。额外 `RedisConnectionFactory` Bean 会让 Spring Boot Redis 自动配置因 `@ConditionalOnMissingBean` 回退，反而影响会话、限流等全部 Redis 用途；改以部署级隔离（独立实例或 `SELECT` 独立库）+ 启动自检告警落实，需在部署文档中要求事件流使用独立 Redis 实例或库。
+- [x] **P2-4 指标与告警**：补齐 `gap` 次数、降级次数、租约丢失、重放事件数、事件字节数、续流 p99。
+  - 已实现：新增 `TurnMetrics`，默认写入 `Metrics.globalRegistry`（Boot 的 `MeterRegistryPostProcessor` 会把 Prometheus 注册表并入全局），指标如下：
+    | 指标 | 类型 | 埋点 |
+    | --- | --- | --- |
+    | `payroll.chat.turn.gap` | Counter | `ChatSessionController.sendGap` |
+    | `payroll.chat.turn.degrade` | Counter | `RedisTurnEventBus.acquire` 熔断期间的操作 |
+    | `payroll.chat.turn.lease.lost` | Counter | 续流校验租约失败、扫描清理失联轮次 |
+    | `payroll.chat.turn.event.bytes` | DistributionSummary（histogram） | `ChatSessionManager.emit` |
+    | `payroll.chat.turn.replay.events` | DistributionSummary（histogram） | 每次续流重放条数 |
+    | `payroll.chat.turn.resume` | Timer（histogram） | 续流追上存量事件的耗时 |
+  - 告警建议：`increase(payroll_chat_turn_gap_total[5m]) > 0` 需要关注裁剪配置；`increase(payroll_chat_turn_degrade_total[5m]) > 0` 检查 Redis 与熔断；`histogram_quantile(0.99, rate(payroll_chat_turn_resume_seconds_bucket[5m])) > 2` 检查续流追平延迟。指标随 `/actuator/prometheus` 暴露。
+- [x] **P2-5 取消标记生命周期**：TTL 与轮次绝对上限对齐，轮次结束时主动删除取消键。
+  - 已实现：取消键 TTL 改为 `payroll.chat.turn-max-minutes`（默认 30 分钟，与轮次绝对上限一致），不再固定 1 小时；新增 `TurnEventBus.clearCancel(turnId)`，在 `finishTurn`、`finishRemoteTurn`、`expireTurn` 与失联轮次扫描落终态后主动删除取消键。看门狗终止轮次时保留取消标记作为执行线程的停止信号，由执行线程收尾时清理，异常退出则由 TTL 兜底。
+- [x] **P2-6 裁剪策略统一**：时间优先（`MINID`）+ `MAXLEN` 兜底，避免条数与时长脱节。
+  - 已实现：事件 ID 保持 `<seq>-0`（序号是续流游标，不能改用时间戳当首部），因此把两个维度拆开统一：**条数**用 `seq - maxLen` 作为 MINID 水位裁剪、再以 `MAXLEN` 兜底；**时长**不再按固定条数间隔刷新 TTL，而是在写入时检查 `PTTL`，剩余不足一半即重置，避免「条数没到、键已过期」或「条数到了、时间远超」的脱节。仍每 32 条事件执行一次裁剪，控制单次脚本开销。
+
+### 业务模块扩展
+
+- [x] **B-1 知识库系统配置流程融合到协同智能体**
+  - 目标：在对话内用自然语言完成知识库的建库、解析/分块/检索配置、目录与成员权限调整、入库任务查询；写操作仍走既有提案确认，用户不必再跳到「知识库」页逐项点选。
+  - 改动：
+    - 把 `payroll-backend/.../kb/KbConfigController.java`、`KbDirectoryController.java`、`KbMemberController.java`、`KbDocumentController.java` 背后已有服务抽成一组 `KbSkill` 工具，按只读/写入分级注册给协同智能体；
+    - 写操作（建库、保存配置版本、加/移成员、移动目录、触发重建）标记风险等级并生成提案卡片，确认后执行，结果写审计；只读查询（库列表、配置详情、任务状态）直接调用，不产生提案；
+    - `AgentRouter` 增加知识库配置类能力标签，`TeamTemplate` 增加 `KB_CONFIG` 单角色模板，避免与薪酬核算模板混流；
+    - 权限沿用 `kb:read` / `kb:create` / `kb:manage`，无权限时工具返回明确拒绝，不静默降级到通用回答。
+  - 验收：
+    - 对话输入「给研发部建一个知识库，检索 topK 调到 8」能生成一条待确认提案，确认后库与配置版本真实落库；
+    - 未授权账号触发写操作被拒绝，审计有记录；
+    - 只读问句不产生提案，也不会被路由进团队核算模板；
+    - 原「知识库」页面行为与接口契约不变。
+  - 批次：第 6 批（业务扩展），依赖现有 P0 正确性修复完成。
+  - 已实现（2026-11-14）：
+    - 工具与通道：`payroll-common/.../agent/KbTools.java` 提供 7 个只读与 6 个写工具；`KbSkillClient` 以 HMAC 签名调用 Web 的 `/internal/kb/check` 与 `/internal/kb/execute`，未配置令牌或 `PAYROLL_KB_SKILL_ENABLED=false` 时不注册工具。
+    - Web 执行：`KbSkillService` 复用既有系列、配置、成员、目录、文档与任务服务，按 `kb:read` / `kb:create` / `kb:manage` 做全局权限加库级角色双重校验；`KbActionContributor` 把写工具注册为本地动作，提案确认后由 Web 节点执行；拒绝写入审计 `kb.skill.denied`。
+    - 对话侧：写工具先权限预检再交 `ActionGuard` 生成提案，只读直接执行并保留工具追溯；`PayrollAgentFactory` 只向非流水线协同智能体注册工具并注入知识库提示；`AgentRouter` 对知识库写操作禁止选择 pipeline；`TeamIntent` / `TeamTemplate` 新增 `KB_CONFIG` 单角色模板承接只读问答，写操作仍不进入动态团队。
+    - 验收对应：`KbToolsTest`、`ToolSafetyTest`、`TeamIntentTest` 覆盖读写分级、拒绝不执行与模板选择；`KbSkillInternalTest` 以真实 Spring Boot 实例验证签名内部接口（未签名 401）、只读放行、无权限写入拒绝并落 `kb.skill.denied` 审计、按 `department_name` 建库后 `recallTopK=8` 真实落库；原知识库控制器与接口契约未改动。
 
 ### 不建议做
 
@@ -523,3 +581,4 @@ idle ──发送──> streaming ──断线──> recovering ──成功�
 | 第 3 批 | P1-1、P1-2、P1-4 | 提升刷新体验，限制失控轮次，恢复 Redis 降级能力 |
 | 第 4 批 | P1-3、P1-5、P1-6 | 加固多节点一致性与扩展性 |
 | 第 5 批 | P2-1 ~ P2-6 | 运维、安全与长期可维护性 |
+| 第 6 批 | B-1 | 知识库配置能力进入对话（业务扩展） |

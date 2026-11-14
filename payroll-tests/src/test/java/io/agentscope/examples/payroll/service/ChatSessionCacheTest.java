@@ -35,7 +35,7 @@ class ChatSessionCacheTest {
     void evictsLeastRecentlyUsedWhenOverLimit() {
         long first = store.create(USER_ID, "会话一").id();
         long second = store.create(USER_ID, "会话二").id();
-        ChatSessionManager manager = manager(SessionLockService.disabled(), 1);
+        ChatSessionManager manager = manager(TurnLeaseService.disabled(), 1);
 
         manager.chatFor(USER_ID, first);
         manager.chatFor(USER_ID, second);
@@ -48,9 +48,9 @@ class ChatSessionCacheTest {
     @DisplayName("共享会话锁的另一个实例不能同时处理同一会话")
     void secondInstanceCannotBeginWhileLocked() {
         long sessionId = store.create(USER_ID, "互斥会话").id();
-        SessionLockService sharedLocks = new SessionLockService(null, 15);
-        ChatSessionManager first = manager(sharedLocks, 10);
-        ChatSessionManager second = manager(sharedLocks, 10);
+        TurnLeaseService sharedLeases = new TurnLeaseService(null, 30, 10);
+        ChatSessionManager first = manager(sharedLeases, 10);
+        ChatSessionManager second = manager(sharedLeases, 10);
 
         first.begin(USER_ID, sessionId, "第一条");
         assertThrows(
@@ -61,7 +61,7 @@ class ChatSessionCacheTest {
         second.release(sessionId);
     }
 
-    private ChatSessionManager manager(SessionLockService locks, int maxCachedChats) {
+    private ChatSessionManager manager(TurnLeaseService leases, int maxCachedChats) {
         PayrollChatFactory factory =
                 (sessionId, userId) ->
                         new PayrollChat() {
@@ -82,8 +82,12 @@ class ChatSessionCacheTest {
                 StaticRunRecorder.disabled(),
                 ShadowTeamService.disabled(),
                 ActiveTeamService.disabled(),
-                locks,
                 maxCachedChats,
-                60);
+                60,
+                null,
+                null,
+                leases,
+                new InMemoryTurnEventBus(),
+                "local");
     }
 }

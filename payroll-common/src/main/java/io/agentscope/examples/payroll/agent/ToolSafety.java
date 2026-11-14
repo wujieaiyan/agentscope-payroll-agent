@@ -171,10 +171,12 @@ public final class ToolSafety {
     /** 内置工具以注解为唯一来源，新增方法无需改本类。 */
     private static Map<String, Boolean> scanBuiltinReadOnly() {
         Map<String, Boolean> result = new LinkedHashMap<>();
-        for (Method method : PayrollTools.class.getDeclaredMethods()) {
-            Tool tool = method.getAnnotation(Tool.class);
-            if (tool != null) {
-                result.put(tool.name(), tool.readOnly());
+        for (Class<?> type : new Class<?>[] {PayrollTools.class, KbTools.class}) {
+            for (Method method : type.getDeclaredMethods()) {
+                Tool tool = method.getAnnotation(Tool.class);
+                if (tool != null) {
+                    result.put(tool.name(), tool.readOnly());
+                }
             }
         }
         return Map.copyOf(result);

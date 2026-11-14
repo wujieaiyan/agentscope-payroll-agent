@@ -3,14 +3,22 @@ package io.agentscope.examples.payroll.web;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.ChatStreamListener;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.TurnEventBus;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +28,17 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 public final class ChatSse {
 
     private static final Logger log = LoggerFactory.getLogger(ChatSse.class);
+
+    /** 文本类增量合并窗口：同一窗口内的 token 合并成一条事件，降低总线与 SSE 写入次数。 */
+    private static final long DELTA_FLUSH_MILLIS = 80L;
+
+    private static final ScheduledExecutorService DELTA_FLUSH_POOL =
+            Executors.newSingleThreadScheduledExecutor(
+                    runnable -> {
+                        Thread thread = new Thread(runnable, "sse-delta-flush");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
     private ChatSse() {
     }
@@ -56,6 +75,10 @@ public final class ChatSse {
             Function<PayrollChat.Reply, Long> onDone) {
         return new ChatStreamListener() {
 
+            private final DeltaCoalescer deltas =
+                    new DeltaCoalescer(
+                            (event, data) -> publish(channel, manager, turn, event, data),
+                            this::cancelled);
             private long cancelCheckedAt;
             private boolean cancelled;
 
@@ -71,10 +94,7 @@ public final class ChatSse {
 
             @Override
             public void onAgentOutput(String agent, String delta) {
-                if (cancelled()) {
-                    return;
-                }
-                emit("agent_text", payload("agent", agent, "text", delta));
+                deltas.add("agent:" + agent, "agent_text", payload("agent", agent), delta);
             }
 
             @Override
@@ -84,10 +104,7 @@ public final class ChatSse {
 
             @Override
             public void onThinking(String delta) {
-                if (cancelled()) {
-                    return;
-                }
-                emit("thinking", payload("text", delta));
+                deltas.add("thinking", "thinking", null, delta);
             }
 
             @Override
@@ -112,10 +129,11 @@ public final class ChatSse {
 
             @Override
             public void onToolArgs(String toolCallId, String delta) {
-                if (cancelled()) {
-                    return;
-                }
-                emit("tool_args", payload("tool_call_id", toolCallId, "text", delta));
+                deltas.add(
+                        "tool:" + toolCallId,
+                        "tool_args",
+                        payload("tool_call_id", toolCallId),
+                        delta);
             }
 
             @Override
@@ -148,15 +166,19 @@ public final class ChatSse {
 
             @Override
             public void onText(String delta) {
-                if (cancelled()) {
-                    return;
-                }
-                emit("text", payload("text", delta));
+                deltas.add("text", "text", null, delta);
             }
 
             @Override
             public void onActionProposal(ActionProposal proposal) {
                 emit("action_proposal", payload("proposal", proposal));
+            }
+
+            @Override
+            public void onCitations(List<Citation> citations) {
+                if (citations != null && !citations.isEmpty()) {
+                    emit("citation", payload("citations", citations));
+                }
             }
 
             @Override
@@ -185,6 +207,10 @@ public final class ChatSse {
                                         reply.proposals().isEmpty()
                                                 ? null
                                                 : reply.proposals(),
+                                "citations",
+                                        reply.citations().isEmpty()
+                                                ? null
+                                                : reply.citations(),
                                 "cache", reply.cache()));
             }
 
@@ -201,9 +227,88 @@ public final class ChatSse {
             }
 
             private void emit(String event, Map<String, Object> data) {
-                publish(channel, manager, turn, event, data);
+                deltas.emit(event, data);
             }
         };
+    }
+
+    /**
+     * 按 key 合并短窗口内的增量事件，并在非增量事件之前强制冲刷，保证事件顺序。
+     *
+     * <p>text / thinking / agent_text / tool_args 都是逐 token 产生，逐条写入会放大
+     * Redis 与 SSE 的写次数；合并到 80ms 粒度后对前端仍近似实时。
+     */
+    private static final class DeltaCoalescer {
+
+        private final BiConsumer<String, Map<String, Object>> sink;
+        private final BooleanSupplier cancelled;
+        private final Map<String, Delta> pending = new LinkedHashMap<>();
+        private final Object lock = new Object();
+        private boolean scheduled;
+
+        DeltaCoalescer(
+                BiConsumer<String, Map<String, Object>> sink, BooleanSupplier cancelled) {
+            this.sink = sink;
+            this.cancelled = cancelled;
+        }
+
+        void add(String key, String event, Map<String, Object> base, String text) {
+            if (text == null || text.isEmpty() || cancelled.getAsBoolean()) {
+                return;
+            }
+            synchronized (lock) {
+                pending.computeIfAbsent(key, ignored -> new Delta(event, base))
+                        .text
+                        .append(text);
+                if (!scheduled) {
+                    scheduled = true;
+                    DELTA_FLUSH_POOL.schedule(
+                            this::flush, DELTA_FLUSH_MILLIS, TimeUnit.MILLISECONDS);
+                }
+            }
+        }
+
+        void emit(String event, Map<String, Object> data) {
+            synchronized (lock) {
+                flushLocked();
+                sink.accept(event, data);
+            }
+        }
+
+        private void flush() {
+            synchronized (lock) {
+                scheduled = false;
+                flushLocked();
+            }
+        }
+
+        private void flushLocked() {
+            if (pending.isEmpty()) {
+                return;
+            }
+            List<Delta> batch = new ArrayList<>(pending.values());
+            pending.clear();
+            if (cancelled.getAsBoolean()) {
+                return;
+            }
+            for (Delta delta : batch) {
+                Map<String, Object> data = new LinkedHashMap<>(delta.base);
+                data.put("text", delta.text.toString());
+                sink.accept(delta.event, data);
+            }
+        }
+
+        private static final class Delta {
+
+            private final String event;
+            private final Map<String, Object> base;
+            private final StringBuilder text = new StringBuilder();
+
+            private Delta(String event, Map<String, Object> base) {
+                this.event = event;
+                this.base = base == null ? new LinkedHashMap<>() : base;
+            }
+        }
     }
 
     private static void publish(
@@ -239,7 +344,19 @@ public final class ChatSse {
             data = new LinkedHashMap<>();
         }
         data.put("seq", event.seq());
+        data.put("v", event.version());
+        if (event.timestamp() > 0) {
+            data.put("ts", event.timestamp());
+        }
         channel.send(event.event(), data, event.seq());
+    }
+
+    /** 重放合并后的文本块：id 取最后一条事件的序号，前端游标继续有效。 */
+    public static void replayText(Channel channel, long seq, String text) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        channel.send("text", payload("text", text, "seq", seq), seq);
     }
 
     /** 空闲心跳：不带 SSE id，避免污染 Last-Event-ID 游标。 */
@@ -306,12 +423,17 @@ public final class ChatSse {
             if (closed || emitter == null) {
                 return;
             }
+            // 信封字段统一补齐：旧前端忽略新增字段，新前端可据 v/ts 做兼容与耗时统计。
+            Map<String, Object> payload =
+                    data == null ? new LinkedHashMap<>() : new LinkedHashMap<>(data);
+            payload.putIfAbsent("v", TurnEventBus.VERSION);
+            payload.putIfAbsent("ts", System.currentTimeMillis());
             try {
                 SseEmitter.SseEventBuilder builder = SseEmitter.event().name(event);
                 if (id > 0) {
                     builder.id(Long.toString(id));
                 }
-                emitter.send(builder.data(JsonSupport.toJson(data)));
+                emitter.send(builder.data(JsonSupport.toJson(payload)));
             } catch (IOException | IllegalStateException e) {
                 closed = true;
                 log.debug("SSE 连接已关闭，停止推送 {} 事件", event);

@@ -37,6 +37,11 @@ public enum TeamTemplate {
             "知识问答",
             List.of(TeamRole.KNOWLEDGE),
             List.of(Link.startTo(TeamRole.KNOWLEDGE), Link.toEnd(TeamRole.KNOWLEDGE))),
+    KB_CONFIG(
+            "KB_CONFIG",
+            "知识库配置",
+            List.of(TeamRole.KB_CONFIG),
+            List.of(Link.startTo(TeamRole.KB_CONFIG), Link.toEnd(TeamRole.KB_CONFIG))),
     QUERY_THEN_CALC(
             "QUERY_THEN_CALC",
             "查询 + 核算 → 复核",
@@ -107,6 +112,7 @@ public enum TeamTemplate {
             }
             case TeamIntent.TASK_PAYSLIP_QUERY, TeamIntent.TASK_BATCH_QUERY -> QUERY_ONLY;
             case TeamIntent.TASK_POLICY_EXPLAIN -> KNOWLEDGE_ONLY;
+            case TeamIntent.TASK_KB_CONFIG -> KB_CONFIG;
             default -> FALLBACK;
         };
     }

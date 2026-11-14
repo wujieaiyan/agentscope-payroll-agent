@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { api } from '../api/http';
 import { resumeTurn, streamChat } from '../api/sse';
 import { clearActiveTurn, loadActiveTurn, saveActiveTurn } from '../stores/activeTurn';
+import { createTabSync } from '../stores/tabSync';
 import { auth } from '../stores/auth';
 import { toast } from '../stores/toast';
 
@@ -19,11 +20,15 @@ const routeBusy = ref(false);
 const editingId = ref(null);
 const editingTitle = ref('');
 const messageBox = ref(null);
+const gapNotice = ref('');
 
 let controller = null;
 let turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
 let scrollQueued = false;
 let resuming = false;
+let tabSync = null;
+let mirroring = false;
+let mirrorFinishing = false;
 let persistTimer = null;
 let unmounted = false;
 const RESUME_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
@@ -38,6 +43,13 @@ let typeTimer = null;
 
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value) || null);
 const canSend = computed(() => !busy.value && draft.value.trim().length > 0);
+
+const questionRail = computed(() =>
+  messages.value
+    .filter((item) => item.role === 'USER' && item.id)
+    .map((item, index) => ({ id: String(item.id), no: index + 1, text: item.content || '' }))
+);
+const activeQuestion = ref(null);
 
 const suggestions = [
   '帮我把 2026-10 的工资算一下',
@@ -83,6 +95,90 @@ function showTime(index) {
   return new Date(current.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60_000;
 }
 
+function fullTime(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function excerpt(text, limit = 80) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return '未命名问题';
+  return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+/* 右侧问题导航：滚动时高亮当前问题，点击平滑定位。 */
+function onMessagesScroll() {
+  const box = messageBox.value;
+  if (!box) return;
+  const top = box.getBoundingClientRect().top;
+  let current = null;
+  box.querySelectorAll('[data-question-id]').forEach((node) => {
+    if (node.getBoundingClientRect().top - top <= 96) current = node.dataset.questionId;
+  });
+  activeQuestion.value = current;
+}
+
+function jumpToQuestion(id) {
+  const box = messageBox.value;
+  if (!box) return;
+  const node = box.querySelector(`[data-question-id="${id}"]`);
+  if (!node) return;
+  const target = Math.max(
+    node.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - 12,
+    0
+  );
+  const before = box.scrollTop;
+  box.scrollTo({ top: target, behavior: 'smooth' });
+  // 无头浏览器或禁用动画的环境会忽略平滑滚动，此时回退为直接定位。
+  window.setTimeout(() => {
+    if (box.scrollTop === before && before !== target) box.scrollTop = target;
+  }, 320);
+  activeQuestion.value = String(id);
+}
+
+/* 会话导出：纯前端拼 Markdown，包含角色、时间、正文与助手链路信息。 */
+function exportMarkdown() {
+  if (!activeId.value || busy.value || !messages.value.length) return;
+  const title = activeSession.value?.title || '未命名会话';
+  const lines = [
+    `# ${title}`,
+    '',
+    `> 会话 #${activeId.value} · 导出时间 ${fullTime(new Date())} · 共 ${messages.value.length} 条消息`,
+    '',
+  ];
+  messages.value.forEach((message) => {
+    const who = message.role === 'USER' ? '我' : message.role === 'ERROR' ? '系统' : '协同智能体';
+    lines.push(`## ${who} · ${fullTime(message.created_at) || '—'}`);
+    if (message.role === 'ASSISTANT' && (message.routing || message.model)) {
+      const meta = [];
+      if (message.routing) meta.push(`链路 ${pathLabel(message.routing)}（${message.routing.path}）`);
+      if (message.model) meta.push(`模型 ${message.model}`);
+      if (message.routing?.agent_ids?.length) meta.push(`智能体 ${message.routing.agent_ids.join('、')}`);
+      if (meta.length) lines.push('', `> ${meta.join(' · ')}`);
+    }
+    if (message.tools?.length) lines.push('', `> 工具调用 ${message.tools.length} 次`);
+    lines.push('', message.content || '（空）', '');
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const safe = title.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || 'conversation';
+  const now = new Date();
+  const pad = (part) => String(part).padStart(2, '0');
+  link.href = url;
+  link.download = `${safe}-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+    + `-${pad(now.getHours())}${pad(now.getMinutes())}.md`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function pretty(value) {
   if (value === null || value === undefined || value === '') return '';
   if (typeof value === 'string') {
@@ -122,6 +218,8 @@ async function loadMessages(silent = false) {
     messages.value = list;
     loadFeedback(list);
     if (!silent) scrollBottom(true);
+    await nextTick();
+    onMessagesScroll();
   } catch (error) {
     if (!silent) toast(error.message, 'error');
   }
@@ -155,6 +253,7 @@ async function selectSession(id) {
   routePanel.value = null;
   stopTyping();
   streaming.value = null;
+  gapNotice.value = '';
   await loadMessages();
   // 刷新或切回会话时接上仍在执行的轮次
   await resumeActiveTurn(id, { rebuild: true });
@@ -169,6 +268,7 @@ async function createSession() {
     messages.value = [];
     detail.value = null;
     draft.value = '';
+    gapNotice.value = '';
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -223,6 +323,7 @@ async function resetSession() {
     detail.value = null;
     stopTyping();
     streaming.value = null;
+    gapNotice.value = '';
     clearTurnMarker(activeId.value);
     await loadMessages();
     toast('会话已重置', 'success');
@@ -278,6 +379,7 @@ function newStreamingState() {
     tools: [],
     agents: [],
     proposals: [],
+    citations: [],
     routing: null,
     model: '',
     messageId: null,
@@ -287,6 +389,8 @@ function newStreamingState() {
     cancelled: false,
     recovering: false,
     resumable: false,
+    gap: false,
+    gapMessage: '',
   };
 }
 
@@ -379,6 +483,34 @@ function handleEvent(event, data) {
         persistTurn(true);
       }
       break;
+    case 'snapshot':
+      // 冷恢复直接替换为已合并状态，不再逐字重放历史增量。
+      stopTyping();
+      state.pendingText = '';
+      state.text = data.text || '';
+      if (Array.isArray(data.tools)) {
+        state.tools = data.tools.map((name) => ({
+          id: name,
+          name,
+          args: '',
+          state: 'DONE',
+          duration: null,
+        }));
+      }
+      if (Array.isArray(data.agents)) {
+        state.agents = data.agents.map((id) => {
+          const known = state.agents.find((item) => item.id === id);
+          return known || { id, label: id, text: '' };
+        });
+      }
+      if (data.phase) state.phase = data.phase;
+      if (Array.isArray(data.citations)) state.citations = data.citations;
+      if (state.gap) {
+        state.gap = false;
+        state.gapMessage = '';
+        gapNotice.value = '';
+      }
+      break;
     case 'start':
       state.model = data.model || state.model;
       break;
@@ -387,6 +519,7 @@ function handleEvent(event, data) {
       pushEvent('智能体', 'agent', `${data.label || data.agent} 开始工作`);
       break;
     case 'agent_text': {
+      if (state.gap) break;
       const agent = state.agents.find((item) => item.id === data.agent);
       if (agent) agent.text += data.text || '';
       break;
@@ -397,6 +530,7 @@ function handleEvent(event, data) {
       break;
     }
     case 'thinking':
+      if (state.gap) break;
       state.thinking += data.text || '';
       break;
     case 'phase':
@@ -417,6 +551,7 @@ function handleEvent(event, data) {
       pushEvent('工具', 'tool', `调用 ${data.name}`);
       break;
     case 'tool_args': {
+      if (state.gap) break;
       const tool = state.tools.find((item) => item.id === data.tool_call_id);
       if (tool) tool.args += data.text || '';
       break;
@@ -435,11 +570,29 @@ function handleEvent(event, data) {
       pushEvent('工具', 'tool', `${data.name} ${data.state === 'ERROR' ? '失败' : '完成'}`);
       break;
     }
+    case 'gap':
+      // 断点已过期：丢弃残缺前缀并停止拼接，完成后以落库消息呈现完整回答。
+      state.gap = true;
+      state.gapMessage = data.message || '部分回答过程已过期，完成后将以最终消息展示';
+      state.text = '';
+      state.pendingText = '';
+      state.thinking = '';
+      state.agents.forEach((agent) => {
+        agent.text = '';
+      });
+      stopTyping();
+      gapNotice.value = state.gapMessage;
+      toast(state.gapMessage, 'warning');
+      break;
     case 'text':
+      if (state.gap) break;
       enqueueText(data.text || '');
       break;
     case 'action_proposal':
       if (data.proposal) state.proposals.push(data.proposal);
+      break;
+    case 'citation':
+      if (Array.isArray(data.citations)) state.citations = data.citations;
       break;
     case 'done':
       state.finished = true;
@@ -447,9 +600,10 @@ function handleEvent(event, data) {
       state.model = data.model || state.model;
       state.messageId = data.message_id || null;
       state.cache = data.cache || null;
+      if (Array.isArray(data.citations)) state.citations = data.citations;
       if (Array.isArray(data.proposals)) state.proposals = data.proposals;
-      // 模型没有流式文本时才用 done 的整段回复兜底，避免与队列重复。
-      if (!state.text && !state.pendingText && data.reply) enqueueText(data.reply);
+      // 模型没有流式文本时才用 done 的整段回复兜底，避免与队列重复；断点过期时交给落库消息。
+      if (!state.gap && !state.text && !state.pendingText && data.reply) enqueueText(data.reply);
       clearTurnMarker(activeId.value, turnState.turnId);
       break;
     case 'error':
@@ -464,6 +618,112 @@ function handleEvent(event, data) {
     default:
       break;
   }
+}
+
+/* 多标签页：一个标签页拉流，其余标签页镜像事件，避免重复连接与重复写入。 */
+function streamSnapshot() {
+  const state = streaming.value;
+  if (!state) return null;
+  return {
+    turnId: turnState.turnId || null,
+    lastSeq: turnState.lastSeq,
+    state: {
+      text: state.text + state.pendingText,
+      thinking: state.thinking,
+      phase: state.phase,
+      events: state.events,
+      tools: state.tools,
+      agents: state.agents,
+      proposals: state.proposals,
+      citations: state.citations,
+      routing: state.routing,
+      model: state.model,
+      messageId: state.messageId,
+      cache: state.cache,
+      error: state.error,
+      finished: state.finished,
+      cancelled: state.cancelled,
+      gap: state.gap,
+      gapMessage: state.gapMessage,
+    },
+  };
+}
+
+function beginMirror(sessionId) {
+  mirroring = true;
+  busy.value = true;
+  if (!streaming.value) streaming.value = newStreamingState();
+  if (sessionId === activeId.value) scrollBottom();
+}
+
+function applyMirrorState(sessionId, turnId, snapshot) {
+  if (sessionId !== activeId.value) return;
+  beginMirror(sessionId);
+  if (snapshot && snapshot.state) {
+    stopTyping();
+    Object.assign(streaming.value, snapshot.state, {
+      pendingText: '',
+      recovering: false,
+      resumable: false,
+    });
+    turnState.lastSeq = Math.max(turnState.lastSeq, Number(snapshot.lastSeq) || 0);
+  }
+  if (turnId) {
+    turnState = { turnId, lastSeq: turnState.lastSeq, startedAt: turnState.startedAt || Date.now() };
+    persistTurn(true);
+  }
+}
+
+function applyMirrorEvent(sessionId, turnId, event, data) {
+  if (sessionId !== activeId.value) return;
+  if (!streaming.value) beginMirror(sessionId);
+  if (turnId && !turnState.turnId) {
+    turnState = { turnId, lastSeq: 0, startedAt: Date.now() };
+  }
+  handleEvent(event, data);
+}
+
+async function finishMirror(sessionId, turnId, flags) {
+  if (sessionId !== activeId.value) return;
+  if (flags && flags.handoff) {
+    mirroring = false;
+    await takeoverMirror(sessionId, turnId);
+    return;
+  }
+  if (mirrorFinishing || !streaming.value) return;
+  mirrorFinishing = true;
+  try {
+    const state = streaming.value;
+    state.finished = !!flags.finished;
+    state.cancelled = !!flags.cancelled;
+    state.error = flags.error || '';
+    state.resumable = !!flags.resumable;
+    mirroring = false;
+    await finalizeStream();
+  } finally {
+    mirrorFinishing = false;
+  }
+}
+
+/** 流主人关闭页面后由镜像页接手，避免轮次无人读取。 */
+async function takeoverMirror(sessionId, turnId) {
+  if (sessionId !== activeId.value || !streaming.value) return;
+  tabSync?.claim(sessionId, turnId);
+  busy.value = true;
+  controller = new AbortController();
+  try {
+    await resumeLoop(sessionId, turnState.lastSeq);
+  } finally {
+    controller = null;
+    await finalizeStream();
+  }
+}
+
+function streamHandler(sessionId) {
+  return (event, data) => {
+    handleEvent(event, data);
+    tabSync?.event(sessionId, turnState.turnId, event, data);
+  };
 }
 
 function streamFailed(message, resumable = false) {
@@ -523,7 +783,7 @@ async function resumeLoop(sessionId, fromSeq) {
         cursor = Math.max(cursor, turn.last_seq);
       }
       controller = new AbortController();
-      await resumeTurn(sessionId, turnId, cursor, handleEvent, controller.signal);
+      await resumeTurn(sessionId, turnId, cursor, streamHandler(sessionId), controller.signal);
       if (streamInterrupted()) return;
       if (streaming.value.error) return;
       // 服务端正常收流但本轮未结束（例如刚好在 done 前断开）：继续下一轮续传。
@@ -574,6 +834,7 @@ async function findActiveTurn(sessionId) {
 async function resumeActiveTurn(sessionId, { rebuild = false } = {}) {
   if (!sessionId || resuming) return;
   resuming = true;
+  let mirrored = false;
   try {
     const found = await findActiveTurn(sessionId);
     if (!found) {
@@ -599,13 +860,21 @@ async function resumeActiveTurn(sessionId, { rebuild = false } = {}) {
     streaming.value.resumable = false;
     streaming.value.error = '';
     busy.value = true;
+    if (tabSync && !mirroring) {
+      mirrored = await tabSync.follow(sessionId);
+      if (mirrored) {
+        beginMirror(sessionId);
+        return;
+      }
+    }
+    tabSync?.claim(sessionId, turnState.turnId);
     controller = new AbortController();
     try {
       await resumeTurn(
         sessionId,
         turnState.turnId,
         turnState.lastSeq,
-        handleEvent,
+        streamHandler(sessionId),
         controller.signal
       );
       const state = streaming.value;
@@ -616,7 +885,7 @@ async function resumeActiveTurn(sessionId, { rebuild = false } = {}) {
       if (error.name !== 'AbortError') await resumeLoop(sessionId, turnState.lastSeq);
     } finally {
       controller = null;
-      if (activeId.value === sessionId) await finalizeStream();
+      if (!mirrored && activeId.value === sessionId) await finalizeStream();
     }
   } finally {
     resuming = false;
@@ -627,6 +896,14 @@ async function resumeActiveTurn(sessionId, { rebuild = false } = {}) {
 async function finalizeStream() {
   const state = streaming.value;
   if (!state) return;
+  if (tabSync) {
+    tabSync.release(activeId.value, turnState.turnId, {
+      finished: state.finished,
+      cancelled: state.cancelled,
+      error: state.error,
+      resumable: state.resumable,
+    });
+  }
   state.recovering = false;
   // 先让打印机把队列吐完，再切换到落库消息，避免最后一段被瞬间截断。
   await waitTyping();
@@ -648,10 +925,19 @@ async function retryResume() {
   state.error = '';
   state.resumable = false;
   busy.value = true;
+  let mirrored = false;
   try {
+    if (tabSync && !mirroring) {
+      mirrored = await tabSync.follow(activeId.value);
+      if (mirrored) {
+        beginMirror(activeId.value);
+        return;
+      }
+    }
+    tabSync?.claim(activeId.value, turnState.turnId);
     await resumeLoop(activeId.value, turnState.lastSeq);
   } finally {
-    await finalizeStream();
+    if (!mirrored) await finalizeStream();
   }
 }
 
@@ -679,11 +965,21 @@ async function send() {
     if (!activeId.value) return;
   }
   const sessionId = activeId.value;
+  if (tabSync && !mirroring) {
+    const mirrored = await tabSync.follow(sessionId);
+    if (mirrored) {
+      beginMirror(sessionId);
+      toast('该会话正在其他标签页中生成回答，已同步显示', 'warning');
+      return;
+    }
+  }
+  tabSync?.claim(sessionId, null);
   busy.value = true;
   draft.value = '';
   turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
   stopTyping();
   streaming.value = newStreamingState();
+  gapNotice.value = '';
   messages.value.push({
     id: `local-${Date.now()}`,
     role: 'USER',
@@ -695,7 +991,7 @@ async function send() {
 
   controller = new AbortController();
   try {
-    await streamChat(sessionId, text, handleEvent, controller.signal);
+    await streamChat(sessionId, text, streamHandler(sessionId), controller.signal);
     const state = streaming.value;
     // 服务端正常收流但轮次仍未结束（如网关超时）：继续续传而不是当作完成
     if (state && !state.finished && !state.cancelled && !state.error && turnState.turnId) {
@@ -813,6 +1109,15 @@ async function openDetail(message, kind) {
     detail.value = null;
     return;
   }
+  if (kind === 'citations') {
+    detail.value = {
+      messageId: message.id,
+      kind,
+      loading: false,
+      data: message.citations || [],
+    };
+    return;
+  }
   detail.value = { messageId: message.id, kind, loading: true, data: null };
   try {
     const data = await api(
@@ -885,6 +1190,12 @@ watch(
 );
 
 onMounted(async () => {
+  tabSync = createTabSync({
+    snapshot: streamSnapshot,
+    onEvent: applyMirrorEvent,
+    onState: applyMirrorState,
+    onEnd: finishMirror,
+  });
   window.addEventListener('online', retryOnNetwork);
   document.addEventListener('visibilitychange', onVisibilityChange);
   await loadSessions();
@@ -902,6 +1213,11 @@ onBeforeUnmount(() => {
   if (persistTimer) window.clearTimeout(persistTimer);
   stopTyping();
   if (controller) controller.abort();
+  if (tabSync) {
+    tabSync.release(activeId.value, turnState.turnId, { handoff: true });
+    tabSync.close();
+    tabSync = null;
+  }
 });
 </script>
 
@@ -956,6 +1272,12 @@ onBeforeUnmount(() => {
           <span v-if="streaming && streaming.phase" class="badge blue">{{ streaming.phase }}</span>
         </div>
         <div class="chat-actions">
+          <button
+            class="ghost sm"
+            :disabled="busy || !messages.length"
+            title="导出当前会话为 Markdown"
+            @click="exportMarkdown"
+          >导出</button>
           <button class="ghost sm" :disabled="routeBusy" @click="previewRoute">
             {{ routeBusy ? '路由中…' : '路由预览' }}
           </button>
@@ -964,7 +1286,11 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <div ref="messageBox" class="messages">
+      <div ref="messageBox" class="messages" @scroll.passive="onMessagesScroll">
+        <div v-if="gapNotice" class="stream-gap">
+          <span>{{ gapNotice }}</span>
+          <button class="ghost sm" @click="gapNotice = ''">知道了</button>
+        </div>
         <div v-if="!messages.length && !streaming" class="empty" style="margin: auto">
           <p>问我任何薪酬核算、政策或员工数据问题。</p>
           <div class="toolbar" style="justify-content: center; margin-top: 12px">
@@ -983,7 +1309,11 @@ onBeforeUnmount(() => {
           <div v-if="showTime(index)" class="msg-meta" style="justify-content: center">
             {{ formatTime(message.created_at) }}
           </div>
-          <div class="msg" :class="message.role === 'USER' ? 'user' : 'assistant'">
+          <div
+            class="msg"
+            :class="message.role === 'USER' ? 'user' : 'assistant'"
+            :data-question-id="message.role === 'USER' ? message.id : null"
+          >
             <div class="bubble-avatar">
               {{ message.role === 'USER' ? (auth.user?.display_name || '我').slice(0, 1) : '协' }}
             </div>
@@ -1008,6 +1338,13 @@ onBeforeUnmount(() => {
                 <button v-if="message.model" class="chip plain">{{ message.model }}</button>
                 <button class="chip" @click="openDetail(message, 'traces')">
                   计算依据{{ message.tools?.length ? `（${message.tools.length}）` : '' }}
+                </button>
+                <button
+                  v-if="message.citations?.length"
+                  class="chip"
+                  @click="openDetail(message, 'citations')"
+                >
+                  引用（{{ message.citations.length }}）
                 </button>
                 <button class="chip" @click="openDetail(message, 'team')">团队运行</button>
                 <button
@@ -1063,7 +1400,9 @@ onBeforeUnmount(() => {
                         ? '计算依据'
                         : detail.kind === 'team'
                           ? '团队运行'
-                          : '路由详情'
+                          : detail.kind === 'citations'
+                            ? '知识库引用'
+                            : '路由详情'
                     }}
                   </span>
                   <button class="subtle sm" @click="detail = null">收起</button>
@@ -1099,6 +1438,38 @@ onBeforeUnmount(() => {
                         <pre v-if="trace.args_json" class="trace-pre">{{ pretty(trace.args_json) }}</pre>
                         <pre v-if="trace.result_json" class="trace-pre">{{ pretty(trace.result_json) }}</pre>
                       </details>
+                    </div>
+                  </template>
+
+                  <template v-else-if="detail.kind === 'citations'">
+                    <div v-if="!detail.data || !detail.data.length" class="muted">
+                      本轮没有知识库引用。
+                    </div>
+                    <div
+                      v-for="cite in detail.data || []"
+                      :key="`${cite.series_id}-${cite.chunk_id}`"
+                      class="trace-item"
+                    >
+                      <div class="trace-head">
+                        <span class="badge">{{ cite.index }}</span>
+                        <strong>{{ cite.series_name || '知识库' }}</strong>
+                        <span class="muted">{{ cite.document_name }}</span>
+                      </div>
+                      <div class="panel-row">
+                        <span class="k">位置</span>
+                        <span class="v">
+                          {{ cite.title_path || '—' }}
+                          <template v-if="cite.page_no"> · 第 {{ cite.page_no }} 页</template>
+                        </span>
+                      </div>
+                      <div class="panel-row">
+                        <span class="k">召回</span>
+                        <span class="v mono">
+                          {{ (cite.routes || []).join(' / ') || 'keyword' }} ·
+                          {{ Number(cite.score || 0).toFixed(3) }}
+                        </span>
+                      </div>
+                      <div class="muted" style="white-space: pre-wrap">{{ cite.snippet }}</div>
                     </div>
                   </template>
 
@@ -1198,15 +1569,17 @@ onBeforeUnmount(() => {
             <div class="msg-meta">
               <span>协同智能体</span>
               <span v-if="streaming.recovering">正在恢复连接…</span>
+              <span v-else-if="streaming.gap">部分过程已跳过</span>
               <span v-else-if="streaming.text">正在输出</span>
               <span v-else-if="busy">正在思考</span>
               <span v-else-if="streaming.resumable">连接已中断</span>
             </div>
             <div class="bubble" :class="{ error: streaming.error }">
               <template v-if="streaming.text">{{ streaming.text }}</template>
-              <span v-else-if="!streaming.error" class="typing"><i></i><i></i><i></i></span>
+              <span v-else-if="!streaming.error && !streaming.gap" class="typing"><i></i><i></i><i></i></span>
               <template v-if="streaming.error">{{ streaming.error }}</template>
               <template v-else-if="streaming.cancelled">（本轮回答已取消）</template>
+              <template v-else-if="streaming.gap">{{ streaming.gapMessage }}</template>
             </div>
 
             <div v-if="streaming.resumable && !busy" class="msg-tools">
@@ -1246,6 +1619,40 @@ onBeforeUnmount(() => {
               </div>
             </details>
 
+            <details v-if="streaming.citations.length" class="panel">
+              <summary class="panel-head" style="cursor: pointer">
+                知识库引用（{{ streaming.citations.length }}）
+              </summary>
+              <div class="panel-body">
+                <div
+                  v-for="cite in streaming.citations"
+                  :key="`${cite.series_id}-${cite.chunk_id}`"
+                  class="trace-item"
+                >
+                  <div class="trace-head">
+                    <span class="badge">{{ cite.index }}</span>
+                    <strong>{{ cite.series_name || '知识库' }}</strong>
+                    <span class="muted">{{ cite.document_name }}</span>
+                  </div>
+                  <div class="panel-row">
+                    <span class="k">位置</span>
+                    <span class="v">
+                      {{ cite.title_path || '—' }}
+                      <template v-if="cite.page_no"> · 第 {{ cite.page_no }} 页</template>
+                    </span>
+                  </div>
+                  <div class="panel-row">
+                    <span class="k">召回</span>
+                    <span class="v mono">
+                      {{ (cite.routes || []).join(' / ') || 'keyword' }} ·
+                      {{ Number(cite.score || 0).toFixed(3) }}
+                    </span>
+                  </div>
+                  <div class="muted" style="white-space: pre-wrap">{{ cite.snippet }}</div>
+                </div>
+              </div>
+            </details>
+
             <div
               v-for="proposal in streaming.proposals"
               :key="proposal.proposal_id"
@@ -1273,11 +1680,26 @@ onBeforeUnmount(() => {
               <span class="chip plain" :class="pathClass(streaming.routing)">
                 <span class="dot"></span>{{ pathLabel(streaming.routing) }}
               </span>
+              <span v-if="streaming.citations.length" class="chip plain">
+                引用 {{ streaming.citations.length }} 条
+              </span>
               <span v-if="streaming.cache" class="chip plain">缓存命中</span>
             </div>
           </div>
         </div>
       </div>
+
+      <nav v-if="questionRail.length > 1" class="question-rail" aria-label="问题导航">
+        <div v-for="item in questionRail" :key="item.id" class="rail-item">
+          <button
+            class="rail-dash"
+            :class="{ active: activeQuestion === item.id }"
+            :aria-label="`跳到第 ${item.no} 个问题`"
+            @click="jumpToQuestion(item.id)"
+          ></button>
+          <span class="rail-tip"><b>Q{{ item.no }}</b>{{ excerpt(item.text) }}</span>
+        </div>
+      </nav>
 
       <footer class="composer">
         <div class="composer-box">

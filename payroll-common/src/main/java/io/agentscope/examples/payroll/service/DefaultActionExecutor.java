@@ -43,6 +43,11 @@ public final class DefaultActionExecutor implements ActionExecutor {
     }
 
     public DefaultActionExecutor(
+            Map<String, LocalAction> localActions, Map<String, String> toolPermissions) {
+        this(localActions, toolPermissions, McpServerConfig::fromEnvironment);
+    }
+
+    public DefaultActionExecutor(
             Map<String, LocalAction> localActions,
             Map<String, String> toolPermissions,
             Supplier<List<McpServerConfig>> mcpServers) {

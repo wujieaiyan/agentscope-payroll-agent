@@ -29,6 +29,21 @@ class ToolSafetyTest {
     }
 
     @Test
+    @DisplayName("知识库工具沿用 @Tool(readOnly)：查询放行，写操作进入提案")
+    void kbToolsUseAnnotation() {
+        ToolSafety.Decision read =
+                defaults.classify(KbTools.LIST_LIBRARIES, false, false, false, Map.of());
+        assertTrue(read.readOnly());
+        assertEquals(ToolSafety.SOURCE_HINT_READ_ONLY, read.source());
+
+        ToolSafety.Decision write =
+                defaults.classify(
+                        KbTools.SAVE_CONFIG, false, false, false, Map.of("retrieval_top_k", 8));
+        assertFalse(write.readOnly());
+        assertEquals(ActionProposal.RISK_NORMAL, write.riskLevel());
+    }
+
+    @Test
     @DisplayName("MCP 只读声明三态：true 放行，false 与未声明视为写")
     void mcpReadOnlyHintTriState() {
         assertTrue(defaults.classify("doc_search", true, true, false, Map.of()).readOnly());

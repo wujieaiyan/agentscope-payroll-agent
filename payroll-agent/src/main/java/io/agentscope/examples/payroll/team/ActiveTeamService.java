@@ -4,6 +4,7 @@ import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AgentTeamRun;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.TraceScope;
 import io.agentscope.examples.payroll.service.AgentStatsService;
@@ -86,6 +87,18 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             String question,
             String executionInput,
             ChatStreamListener listener) {
+        return attempt(chat, userId, sessionId, question, executionInput, listener, false);
+    }
+
+    /** {@code kbBound=true} 时，制度/条款类问题按 KB_CONFIG 模板组队。 */
+    public Attempt attempt(
+            PayrollChatService chat,
+            long userId,
+            long sessionId,
+            String question,
+            String executionInput,
+            ChatStreamListener listener,
+            boolean kbBound) {
         if (!allowed(userId, sessionId)) {
             return Attempt.skipped();
         }
@@ -93,7 +106,7 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
         String planId = "active-" + sessionId + "-" + System.nanoTime();
         TeamPlanPipeline.Attempt prepared;
         try {
-            prepared = pipeline.prepare(question, planId);
+            prepared = pipeline.prepare(question, planId, kbBound);
         } catch (RuntimeException e) {
             log.warn("[动态团队] ACTIVE 组队准备失败，回退静态：{}", rootMessage(e));
             return recordFallback(
@@ -198,7 +211,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                     result.tools(),
                     result.traces(),
                     List.copyOf(plan.agents().keySet()),
-                    result.streamedText());
+                    result.streamedText(),
+                    result.citations());
         } catch (RuntimeException e) {
             log.warn(
                     "[动态团队] ACTIVE 执行失败，回退静态：runId={}，plan={}，原因={}",
@@ -315,7 +329,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                     List.of(),
                     List.of(),
                     List.of(),
-                    "");
+                    "",
+                    List.of());
         } catch (RuntimeException e) {
             log.warn("[动态团队] 保存 ACTIVE 回退失败：{}", rootMessage(e));
             return Attempt.skipped();
@@ -346,7 +361,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                 List.of(),
                 List.of(),
                 List.of(),
-                "");
+                "",
+                List.of());
     }
 
     private void finishRun(long runId, String status, String reason, long elapsed) {
@@ -415,7 +431,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             List<String> tools,
             List<ChatToolTrace> traces,
             List<String> agentIds,
-            String streamedText) {
+            String streamedText,
+            List<Citation> citations) {
 
         public Attempt {
             planId = planId == null ? "" : planId;
@@ -426,11 +443,22 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             traces = traces == null ? List.of() : List.copyOf(traces);
             agentIds = agentIds == null ? List.of() : List.copyOf(agentIds);
             streamedText = streamedText == null ? "" : streamedText;
+            citations = citations == null ? List.of() : List.copyOf(citations);
         }
 
         public static Attempt skipped() {
             return new Attempt(
-                    0L, "", "SKIPPED", null, "", "", List.of(), List.of(), List.of(), "");
+                    0L,
+                    "",
+                    "SKIPPED",
+                    null,
+                    "",
+                    "",
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    "",
+                    List.of());
         }
 
         public boolean recorded() {

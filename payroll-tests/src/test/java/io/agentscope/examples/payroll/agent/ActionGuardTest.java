@@ -85,6 +85,37 @@ class ActionGuardTest {
     }
 
     @Test
+    @DisplayName("全局开关关闭时知识库写工具仍强制生成提案")
+    void kbWritesAlwaysConfirmWhenDisabled() {
+        ActionGuard guard = guard(ToolSafety.defaults(), false);
+
+        String result =
+                guard.intercept("kb_save_config", Map.of("series_id", 7), false, false, false);
+
+        assertNotNull(result);
+        Map<String, Object> payload =
+                JsonSupport.fromJson(result, new TypeReference<Map<String, Object>>() {});
+        assertEquals("PENDING_CONFIRM", payload.get("status"));
+        assertEquals("kb_save_config", guard.firstProposal().toolName());
+        assertEquals(1, events.size());
+    }
+
+    @Test
+    @DisplayName("强制清单不区分大小写，且不包含普通写工具")
+    void alwaysConfirmListIsCaseInsensitiveAndNarrow() {
+        ActionGuard guard =
+                guard(
+                        ToolSafety.defaults(),
+                        false,
+                        java.util.Set.of("KB_Save_Config "));
+
+        assertNotNull(
+                guard.intercept("Kb_Save_Config", Map.of("series_id", 7), false, false, false));
+        assertNull(guard.intercept("disable_employee", Map.of(), false, false, false));
+        assertEquals(java.util.Set.of("kb_save_config"), guard.alwaysConfirmTools());
+    }
+
+    @Test
     @DisplayName("本地覆盖为只读时即使服务端声明修改也放行")
     void overrideReadOnlyWins() {
         ToolSafety safety =
@@ -144,5 +175,10 @@ class ActionGuardTest {
 
     private ActionGuard guard(ToolSafety safety, boolean enabled) {
         return new ActionGuard(7L, 1001L, "AGENT", enabled, 15, safety, listener);
+    }
+
+    private ActionGuard guard(ToolSafety safety, boolean enabled, java.util.Set<String> alwaysConfirmTools) {
+        return new ActionGuard(
+                7L, 1001L, "AGENT", enabled, 15, safety, listener, alwaysConfirmTools);
     }
 }

@@ -43,6 +43,8 @@ Web 无状态：登录态在 Redis Session，消息与轮次在 MySQL，事件�
 | `PAYROLL_NODE_ID` | `local` | 节点标识，写入 `chat_turns.owner_node` 与日志 |
 | `PAYROLL_AGENT_RUNTIME_URLS` | 空 | Web 调用的 runtime 地址，逗号分隔；为空时对话接口直接返回“智能体运行期未配置”，不做本机回退 |
 | `PAYROLL_AGENT_RUNTIME_TOKEN` | 空 | 内部接口 HMAC 密钥；为空时内部提交不可用。生产环境必须替换默认值 |
+| `PAYROLL_WEB_NODE_URLS` | `http://127.0.0.1:8080` | runtime 调用 Web 知识库内部接口的地址，逗号分隔；知识库工具注册在 runtime，执行与鉴权仍由 Web 完成 |
+| `PAYROLL_KB_SKILL_ENABLED` | `true` | 是否向协同智能体注册 `kb_*` 工具；关闭后对话不提供知识库配置能力，页面功能不受影响 |
 | `PAYROLL_INTERNAL_MAX_SKEW_SECONDS` | `120` | 内部请求时间戳允许偏差 |
 | `PAYROLL_SERVER_ADDRESS` | `127.0.0.1` | 容器内必须设为 `0.0.0.0`，否则只监听回环、Nginx/Web 无法跨容器访问 |
 | `MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED` | `true` | 未部署 ES 时设为 `false`，否则 `/actuator/health` 因 ES 探测失败返回 503 |

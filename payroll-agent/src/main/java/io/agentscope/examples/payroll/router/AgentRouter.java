@@ -38,7 +38,10 @@ public final class AgentRouter {
             判断规则：
             1. 工资计算、批量核算、工资条明细等需要严格核算的问题，优先 "pipeline"，需要多角色协作且团队可用时选 "team"；
             2. 单一专家即可胜任的制度问答、政策解释、数据查询，选 "agent" 并给出最匹配的 agent_id；
-            3. 无法确定或候选都不匹配时选 "pipeline"，并给出较低的 confidence。
+            3. 知识库类问题（建库、解析/分块/检索配置、目录与成员权限、入库任务）不要选 "pipeline"；
+               其中建库、保存配置、加/移成员、移动目录、重建索引等写操作只能选 "agent"，
+               并优先 tags 含 kb 或 kb-config 的候选智能体；只读问答同样优先该智能体；
+            4. 无法确定或候选都不匹配时选 "pipeline"，并给出较低的 confidence。
             """;
 
     /** 模型调用抽象，便于单测注入固定输出。 */
@@ -212,6 +215,8 @@ public final class AgentRouter {
                         .append(nullSafe(agent.name()))
                         .append(" | ")
                         .append(limit(nullSafe(agent.description()), DESCRIPTION_LIMIT))
+                        .append(" | tags=")
+                        .append(agent.tags())
                         .append('\n');
             }
         }

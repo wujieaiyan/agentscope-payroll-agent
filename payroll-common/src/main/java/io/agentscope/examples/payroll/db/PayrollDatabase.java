@@ -92,6 +92,7 @@ public final class PayrollDatabase {
                 content CLOB NOT NULL,
                 tools_json CLOB,
                 model VARCHAR(128),
+                turn_id VARCHAR(36),
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
@@ -106,6 +107,14 @@ public final class PayrollDatabase {
             """
             ALTER TABLE chat_sessions
                 ADD COLUMN IF NOT EXISTS persona_key VARCHAR(128)
+            """,
+            """
+            ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS kb_series_ids CLOB
+            """,
+            """
+            ALTER TABLE chat_messages
+                ADD COLUMN IF NOT EXISTS citations_json CLOB
             """,
             """
             ALTER TABLE chat_messages
@@ -133,6 +142,7 @@ public final class PayrollDatabase {
                 error_message VARCHAR(500),
                 started_at TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL,
+                heartbeat_at TIMESTAMP,
                 finished_at TIMESTAMP
             )
             """,
@@ -143,6 +153,39 @@ public final class PayrollDatabase {
             """
             CREATE INDEX IF NOT EXISTS idx_chat_turns_status
                 ON chat_turns (status, updated_at)
+            """,
+            """
+            ALTER TABLE chat_turns
+                ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP
+            """,
+            """
+            UPDATE chat_turns SET heartbeat_at = updated_at WHERE heartbeat_at IS NULL
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_turns_heartbeat
+                ON chat_turns (status, heartbeat_at)
+            """,
+            """
+            ALTER TABLE chat_turns
+                ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMP
+            """,
+            """
+            UPDATE chat_turns SET deadline_at = DATEADD(MINUTE, 30, started_at)
+                WHERE deadline_at IS NULL AND finished_at IS NULL
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_fencing (
+                session_id BIGINT PRIMARY KEY,
+                fencing_token BIGINT NOT NULL
+            )
+            """,
+            """
+            ALTER TABLE chat_messages
+                ADD COLUMN IF NOT EXISTS turn_id VARCHAR(36)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_messages_turn
+                ON chat_messages (turn_id)
             """,
             """
             CREATE TABLE IF NOT EXISTS chat_tool_traces (

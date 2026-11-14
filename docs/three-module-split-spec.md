@@ -73,7 +73,7 @@ payroll-common   ← payroll-backend
 - 轮次仍由 backend 创建（`chat_turns` + 用户消息 + 租约），随后通过 `POST /internal/turns` 提交给 agent。
 - agent 接管后执行并落助手消息；backend 通过 `GET /api/chat/sessions/{id}/turns/{turnId}/events?after_seq=` 续流。
 - backend 在续流结束时只释放本机 busy/会话锁，不写业务数据。
-- `/internal/**` 只在 agent 暴露，继续使用 HMAC-SHA256；后端配置 `PAYROLL_AGENT_RUNTIME_URLS` 与 `PAYROLL_AGENT_RUNTIME_TOKEN`。
+- `/internal/**` 使用 HMAC-SHA256：agent 暴露轮次接口，backend 暴露知识库执行接口（`/internal/kb/execute`、`/internal/kb/check`，供 runtime 的 `kb_*` 工具调用）；两侧统一配置 `PAYROLL_AGENT_RUNTIME_URLS` / `PAYROLL_WEB_NODE_URLS` 与 `PAYROLL_AGENT_RUNTIME_TOKEN`。
 - 未配置运行期或提交失败时，backend 返回 `PayrollException`（HTTP 502/503），**不本地执行**。
 - 同步接口 `POST /messages` 在拆分部署下改为“提交 + 等待轮次终态 + 读取最后一条助手消息”；超时返回 504。
 

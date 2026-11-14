@@ -137,7 +137,8 @@ public final class CapabilityIndex {
             return AgentCapabilityProfile.LATENCY_NORMAL;
         }
         if (capabilities.contains(TeamIntent.CAP_PAYROLL_QUERY)
-                || capabilities.contains(TeamIntent.CAP_POLICY_KNOWLEDGE)) {
+                || capabilities.contains(TeamIntent.CAP_POLICY_KNOWLEDGE)
+                || capabilities.contains(TeamIntent.CAP_KB_CONFIG)) {
             return AgentCapabilityProfile.LATENCY_FAST;
         }
         return AgentCapabilityProfile.LATENCY_NORMAL;
@@ -161,6 +162,9 @@ public final class CapabilityIndex {
         if (capabilities.contains(TeamIntent.CAP_POLICY_KNOWLEDGE)) {
             types.add(TeamIntent.TASK_POLICY_EXPLAIN);
         }
+        if (capabilities.contains(TeamIntent.CAP_KB_CONFIG)) {
+            types.add(TeamIntent.TASK_KB_CONFIG);
+        }
         return Set.copyOf(types);
     }
 
@@ -181,6 +185,9 @@ public final class CapabilityIndex {
         map.put(
                 TeamIntent.CAP_POLICY_KNOWLEDGE,
                 Set.of("政策", "规则", "解释", "知识", "法规", "policy", "knowledge"));
+        map.put(
+                TeamIntent.CAP_KB_CONFIG,
+                Set.of("知识库", "建库", "分块", "检索配置", "topk", "入库任务", "重建索引", "kb"));
         return Map.copyOf(map);
     }
 

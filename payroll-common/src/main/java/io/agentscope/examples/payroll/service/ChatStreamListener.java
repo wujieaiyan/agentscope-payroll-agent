@@ -2,6 +2,8 @@ package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
+import java.util.List;
 
 /**
  * 对话流式回调：把 ReActAgent 的思考、工具调用与回答增量转成前端可渲染的事件。
@@ -65,6 +67,10 @@ public interface ChatStreamListener {
 
     /** 本轮生成了待确认写操作提案；本轮随后不再执行任何写工具。 */
     default void onActionProposal(ActionProposal proposal) {
+    }
+
+    /** 本轮知识库引用；在 done 之前发送一次，工具层不直接操作 SSE。 */
+    default void onCitations(List<Citation> citations) {
     }
 
     /** 本轮回答结束。 */

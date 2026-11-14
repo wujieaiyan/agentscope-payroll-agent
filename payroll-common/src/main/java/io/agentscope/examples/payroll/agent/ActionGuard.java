@@ -11,8 +11,11 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +31,16 @@ public final class ActionGuard {
     private static final Logger log = LoggerFactory.getLogger(ActionGuard.class);
     private static final int MAX_TEXT_CHARS = 8_000;
 
+    /** 知识库写工具无条件确认：全局开关关闭时也必须先出提案。 */
+    public static final Set<String> DEFAULT_ALWAYS_CONFIRM_TOOLS =
+            Set.of(
+                    KbTools.CREATE_LIBRARY,
+                    KbTools.SAVE_CONFIG,
+                    KbTools.GRANT_MEMBER,
+                    KbTools.REMOVE_MEMBER,
+                    KbTools.MOVE_DIRECTORY,
+                    KbTools.REBUILD_INDEX);
+
     private final long userId;
     private final long sessionId;
     private final String agentPath;
@@ -35,6 +48,7 @@ public final class ActionGuard {
     private final int ttlMinutes;
     private final ToolSafety safety;
     private final ChatStreamListener listener;
+    private final Set<String> alwaysConfirmTools;
     private final StringBuilder textBeforeProposal = new StringBuilder();
     private final List<ActionProposal> proposals = new ArrayList<>();
     private ActionProposal first;
@@ -47,6 +61,21 @@ public final class ActionGuard {
             int ttlMinutes,
             ToolSafety safety,
             ChatStreamListener listener) {
+        this(userId, sessionId, agentPath, enabled, ttlMinutes, safety, listener, null);
+    }
+
+    /**
+     * @param alwaysConfirmTools 无论全局开关如何都必须确认的工具；null 时使用默认知识库写工具
+     */
+    public ActionGuard(
+            long userId,
+            long sessionId,
+            String agentPath,
+            boolean enabled,
+            int ttlMinutes,
+            ToolSafety safety,
+            ChatStreamListener listener,
+            Set<String> alwaysConfirmTools) {
         this.userId = userId;
         this.sessionId = sessionId;
         this.agentPath = agentPath == null ? "" : agentPath;
@@ -54,6 +83,7 @@ public final class ActionGuard {
         this.ttlMinutes = Math.max(1, ttlMinutes);
         this.safety = safety == null ? ToolSafety.defaults() : safety;
         this.listener = listener == null ? ChatStreamListener.NOOP : listener;
+        this.alwaysConfirmTools = normalizeTools(alwaysConfirmTools);
     }
 
     /**
@@ -70,13 +100,21 @@ public final class ActionGuard {
         if (decision.readOnly()) {
             return null;
         }
-        if (!enabled) {
+        boolean forced = alwaysConfirm(toolName);
+        if (!enabled && !forced) {
             log.warn(
                     "[写操作] 确认开关关闭，按旧行为直接执行：tool={}，风险={}，来源={}",
                     toolName,
                     decision.riskLevel(),
                     decision.source());
             return null;
+        }
+        if (forced && !enabled) {
+            log.info(
+                    "[写操作] 强制确认工具忽略全局开关：tool={}，风险={}，来源={}",
+                    toolName,
+                    decision.riskLevel(),
+                    decision.source());
         }
         if (first != null) {
             log.warn(
@@ -143,6 +181,29 @@ public final class ActionGuard {
                 + "（影响："
                 + impact
                 + "）。请在下方卡片确认后执行，未确认前不会做任何改动。";
+    }
+
+    /** 生效的强制确认清单，供启动审计与测试核对。 */
+    public Set<String> alwaysConfirmTools() {
+        return alwaysConfirmTools;
+    }
+
+    private boolean alwaysConfirm(String toolName) {
+        return toolName != null
+                && alwaysConfirmTools.contains(toolName.trim().toLowerCase(Locale.ROOT));
+    }
+
+    private static Set<String> normalizeTools(Set<String> tools) {
+        if (tools == null) {
+            return DEFAULT_ALWAYS_CONFIRM_TOOLS;
+        }
+        Set<String> normalized = new LinkedHashSet<>();
+        for (String tool : tools) {
+            if (tool != null && !tool.isBlank()) {
+                normalized.add(tool.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return Set.copyOf(normalized);
     }
 
     private ActionProposal draft(

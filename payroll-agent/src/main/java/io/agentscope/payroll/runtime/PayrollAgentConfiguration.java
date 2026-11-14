@@ -19,8 +19,12 @@ import io.agentscope.examples.payroll.team.ShadowTeamService;
 import io.agentscope.examples.payroll.team.TeamLlmClient;
 import io.agentscope.examples.payroll.team.TeamSettings;
 import io.agentscope.examples.payroll.web.NodeRoleFilter;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -189,7 +193,10 @@ public class PayrollAgentConfiguration {
             @Value("${payroll.orchestrator:legacy}") String orchestrator,
             @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
             @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
-            @Value("${payroll.chat.action-confirm.ttl-minutes:15}") int actionProposalTtlMinutes) {
+            @Value("${payroll.chat.action-confirm.ttl-minutes:15}") int actionProposalTtlMinutes,
+            @Value("${payroll.chat.action-confirm.always-confirm-tools:}")
+                    String alwaysConfirmToolsCsv) {
+        Set<String> alwaysConfirmTools = parseTools(alwaysConfirmToolsCsv);
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
             log.info("[多智能体] 编排模式：langgraph4j 图编排（POC）");
@@ -199,8 +206,12 @@ public class PayrollAgentConfiguration {
             }
             log.info("[多智能体] 编排模式：手写状态机");
         }
-        if (!actionConfirmEnabled) {
+        if (!actionConfirmEnabled && alwaysConfirmTools.isEmpty()) {
             log.warn("[写操作] 会话内确认开关关闭：写工具将按旧行为直接执行");
+        } else if (!actionConfirmEnabled) {
+            log.warn(
+                    "[写操作] 会话内确认开关关闭，但以下工具仍强制确认：{}",
+                    String.join(",", alwaysConfirmTools));
         }
         return (sessionId, userId) ->
                 new PayrollChatService(
@@ -220,7 +231,22 @@ public class PayrollAgentConfiguration {
                         actionProposalTtlMinutes,
                         toolSafety,
                         answerCache,
-                        router);
+                        router,
+                        alwaysConfirmTools);
+    }
+
+    /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */
+    private static Set<String> parseTools(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return Set.of();
+        }
+        Set<String> tools = new LinkedHashSet<>();
+        for (String part : csv.split(",")) {
+            if (!part.isBlank()) {
+                tools.add(part.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return Collections.unmodifiableSet(tools);
     }
 
     /** runtime 只开放 /internal，避免模型执行入口被外部直接访问。 */

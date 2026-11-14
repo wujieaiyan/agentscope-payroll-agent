@@ -14,6 +14,10 @@ import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.ActionGuard;
+import io.agentscope.examples.payroll.agent.KbChatIntent;
+import io.agentscope.examples.payroll.agent.KbCitationCollector;
+import io.agentscope.examples.payroll.agent.KbSearchBudget;
+import io.agentscope.examples.payroll.agent.KbSearchScope;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.examples.payroll.agent.ToolSafety;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -23,6 +27,7 @@ import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AgentRunRecord;
 import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.FlowNode;
@@ -94,11 +99,14 @@ public final class PayrollChatService implements PayrollChat {
     private final boolean routingEnabled;
     private final boolean actionConfirmEnabled;
     private final int actionProposalTtlMinutes;
+    private final Set<String> alwaysConfirmTools;
     private final ToolSafety toolSafety;
     private final AnswerCache answerCache;
     private final AgentRouter router;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
+    private final KbCitationCollector citationCollector = new KbCitationCollector();
+    private final KbSearchBudget kbSearchBudget = new KbSearchBudget();
     private final List<ChatToolTrace> collectedTraces = new CopyOnWriteArrayList<>();
     private final List<PayrollChat.StageRun> stageRuns = new CopyOnWriteArrayList<>();
     private final RuntimeContext sessionContext;
@@ -299,6 +307,49 @@ public final class PayrollChatService implements PayrollChat {
             ToolSafety toolSafety,
             AnswerCache answerCache,
             AgentRouter router) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                routingEnabled,
+                actionConfirmEnabled,
+                actionProposalTtlMinutes,
+                toolSafety,
+                answerCache,
+                router,
+                null);
+    }
+
+    /**
+     * @param alwaysConfirmTools 无论全局开关如何都必须确认的写工具；null 时使用默认知识库写工具
+     */
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled,
+            boolean actionConfirmEnabled,
+            int actionProposalTtlMinutes,
+            ToolSafety toolSafety,
+            AnswerCache answerCache,
+            AgentRouter router,
+            Set<String> alwaysConfirmTools) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -313,6 +364,7 @@ public final class PayrollChatService implements PayrollChat {
         this.routingEnabled = routingEnabled;
         this.actionConfirmEnabled = actionConfirmEnabled;
         this.actionProposalTtlMinutes = Math.max(1, actionProposalTtlMinutes);
+        this.alwaysConfirmTools = alwaysConfirmTools;
         this.toolSafety = toolSafety == null ? ToolSafety.defaults() : toolSafety;
         this.answerCache = answerCache == null ? AnswerCache.disabled() : answerCache;
         this.router = router == null ? AgentRouter.disabled() : router;
@@ -321,8 +373,26 @@ public final class PayrollChatService implements PayrollChat {
                         .userId(String.valueOf(userId))
                         .sessionId(String.valueOf(sessionId))
                         .put(ToolTraceRecorder.class, traceRecorder)
+                        .put(KbCitationCollector.class, citationCollector)
+                        .put(KbSearchBudget.class, kbSearchBudget)
                         .build();
         this.context = loadContext(contextStore, sessionId);
+    }
+
+    /** 每轮重新读取会话绑定，保证顶部切换知识库后本轮立即生效。 */
+    private KbSearchScope kbSearchScope() {
+        if (sessionId <= 0 || contextStore == null) {
+            return KbSearchScope.unbound();
+        }
+        try {
+            return new KbSearchScope(contextStore.kbSeriesIds(sessionId));
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[知识库] 读取会话绑定失败：sessionId={}，原因={}",
+                    sessionId,
+                    rootMessage(e));
+            return KbSearchScope.unbound();
+        }
     }
 
     @Override
@@ -335,6 +405,7 @@ public final class PayrollChatService implements PayrollChat {
         Objects.requireNonNull(listener, "listener");
         listener.onStart(modelId());
         Reply reply = run(message, listener);
+        listener.onCitations(reply.citations());
         listener.onDone(reply);
     }
 
@@ -356,10 +427,17 @@ public final class PayrollChatService implements PayrollChat {
         synchronized (lock) {
             String question = message.trim();
             long startedAt = System.currentTimeMillis();
+            KbSearchScope kbScope = kbSearchScope();
+            boolean kbBound = kbScope.bound();
+            boolean kbQuestion = kbBound && KbChatIntent.matches(question);
+            sessionContext.put(KbSearchScope.class, kbScope);
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
             collectedTraces.clear();
             stageRuns.clear();
             traceRecorder.clear();
+            citationCollector.clear();
+            // 团队执行在同一轮内嵌套调用 executeDynamicFlow，这里统一清零，保证整轮共享 3 次额度。
+            kbSearchBudget.clear();
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             ResolvedFlow resolvedFlow = resolveActiveFlow();
@@ -481,7 +559,8 @@ public final class PayrollChatService implements PayrollChat {
                             actionConfirmEnabled,
                             actionProposalTtlMinutes,
                             toolSafety,
-                            events);
+                            events,
+                            alwaysConfirmTools);
             roundGuard = guard;
             sessionContext.put(ActionGuard.class, guard);
             try {
@@ -493,15 +572,28 @@ public final class PayrollChatService implements PayrollChat {
                 String calculatorInput = context.augment(question, memoryBlock);
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
+                // 已绑定知识库且当前就是协同智能体时，制度类问题不再交给团队接管，避免丢失检索。
+                boolean kbDirect =
+                        kbQuestion
+                                && resolvedFlow == null
+                                && !current.pipeline()
+                                && !ChatRouting.TEAM_ACTIVE.equals(plannedPath);
                 boolean teamGate =
                         resolvedFlow == null
                                 && activeTeam.enabled()
+                                && !kbDirect
                                 && (ChatRouting.TEAM_ACTIVE.equals(plannedPath)
                                         || (!routerDecided && current.pipeline()));
                 if (teamGate) {
                     teamAttempt =
                             activeTeam.attempt(
-                                    this, userId, sessionId, question, calculatorInput, events);
+                                    this,
+                                    userId,
+                                    sessionId,
+                                    question,
+                                    calculatorInput,
+                                    events,
+                                    kbBound);
                     if (teamAttempt.succeeded()) {
                         String teamReply = composeReply(teamAttempt.reply(), guard);
                         // 末端节点已实时流出正文时只补尾部差量，避免整段重复推送。
@@ -544,7 +636,8 @@ public final class PayrollChatService implements PayrollChat {
                                 teamAttempt.teamReply(),
                                 routing,
                                 guard.proposals(),
-                                null);
+                                null,
+                                teamAttempt.citations());
                     }
                     if (teamAttempt.recorded()) {
                         clearRoundState();
@@ -642,7 +735,8 @@ public final class PayrollChatService implements PayrollChat {
                         teamAttempt.teamReply(),
                         routing,
                         guard.proposals(),
-                        null);
+                        null,
+                        citationCollector.citations());
             } finally {
                 roundGuard = null;
                 sessionContext.put(ActionGuard.class, null);
@@ -1102,11 +1196,15 @@ public final class PayrollChatService implements PayrollChat {
         }
         String label = node.label();
         ToolTraceRecorder recorder = new ToolTraceRecorder();
+        boolean kbSearch = PayrollAgentFactory.kbSearchNode(role, agent);
+        KbSearchScope kbScope = sessionContext.get(KbSearchScope.class);
         RuntimeContext.Builder nodeContextBuilder =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
                         .sessionId(sessionId + ":" + node.id())
                         .put(ToolTraceRecorder.class, recorder)
+                        .put(KbCitationCollector.class, citationCollector)
+                        .put(KbSearchBudget.class, kbSearchBudget)
                         .put(
                                 TraceScope.class,
                                 new TraceScope(
@@ -1117,13 +1215,16 @@ public final class PayrollChatService implements PayrollChat {
                                         role,
                                         runScope.mode(),
                                         node.id()));
+        if (kbScope != null) {
+            nodeContextBuilder.put(KbSearchScope.class, kbScope);
+        }
         ActionGuard guard = roundGuard;
         if (guard != null) {
             nodeContextBuilder.put(ActionGuard.class, guard);
         }
         RuntimeContext nodeContext = nodeContextBuilder.build();
         PayrollAgentFactory.NodeAgent runtime =
-                PayrollAgentFactory.sharedFlowNodeAgent(engine, agent);
+                PayrollAgentFactory.sharedFlowNodeAgent(engine, agent, kbSearch);
         try {
             StageResult result =
                     runStage(
@@ -1252,6 +1353,7 @@ public final class PayrollChatService implements PayrollChat {
             collectedTraces.clear();
             stageRuns.clear();
             traceRecorder.clear();
+            citationCollector.clear();
             TraceScope previous = runScope;
             useRunScope(scope);
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
@@ -1283,7 +1385,8 @@ public final class PayrollChatService implements PayrollChat {
                         List.copyOf(collectedTraces),
                         List.copyOf(tools),
                         outcome.nodeResults(),
-                        outcome.streamedText());
+                        outcome.streamedText(),
+                        citationCollector.citations());
             } finally {
                 useRunScope(previous);
             }
@@ -2020,7 +2123,8 @@ public final class PayrollChatService implements PayrollChat {
             List<ChatToolTrace> traces,
             List<String> tools,
             Map<String, AgentFlowExecutor.NodeResult> nodeResults,
-            String streamedText) {
+            String streamedText,
+            List<Citation> citations) {
 
         public DynamicFlowResult {
             targets = targets == null ? List.of() : List.copyOf(targets);
@@ -2029,6 +2133,18 @@ public final class PayrollChatService implements PayrollChat {
             tools = tools == null ? List.of() : List.copyOf(tools);
             nodeResults = nodeResults == null ? Map.of() : Map.copyOf(nodeResults);
             streamedText = streamedText == null ? "" : streamedText;
+            citations = citations == null ? List.of() : List.copyOf(citations);
+        }
+
+        public DynamicFlowResult(
+                String reply,
+                List<CalcTarget> targets,
+                List<PayrollChat.StageRun> stages,
+                List<ChatToolTrace> traces,
+                List<String> tools,
+                Map<String, AgentFlowExecutor.NodeResult> nodeResults,
+                String streamedText) {
+            this(reply, targets, stages, traces, tools, nodeResults, streamedText, List.of());
         }
 
         public DynamicFlowResult(
@@ -2038,7 +2154,7 @@ public final class PayrollChatService implements PayrollChat {
                 List<ChatToolTrace> traces,
                 List<String> tools,
                 Map<String, AgentFlowExecutor.NodeResult> nodeResults) {
-            this(reply, targets, stages, traces, tools, nodeResults, "");
+            this(reply, targets, stages, traces, tools, nodeResults, "", List.of());
         }
     }
 

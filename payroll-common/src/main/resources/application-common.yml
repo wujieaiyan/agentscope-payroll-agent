@@ -76,6 +76,8 @@ payroll:
     action-confirm:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
       ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
+      # 命中清单的写工具无论 enabled 如何都先出确认提案；默认覆盖知识库 6 个写工具。
+      always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index}"
   # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
   routing:
     enabled: "${PAYROLL_ROUTING_ENABLED:true}"
@@ -126,6 +128,11 @@ payroll:
     threshold: "${PAYROLL_SEMANTIC_CACHE_THRESHOLD:0.95}"
     ttl-minutes: "${PAYROLL_SEMANTIC_CACHE_TTL_MINUTES:30}"
     max-entries: "${PAYROLL_SEMANTIC_CACHE_MAX_ENTRIES:10000}"
+  # 知识库对话工具：runtime 通过签名内部接口调用 Web 侧知识库服务。
+  kb-skill:
+    enabled: "${PAYROLL_KB_SKILL_ENABLED:true}"
+    # runtime 可见的 Web 节点地址，逗号分隔；本地单机默认 8080。
+    web-urls: "${PAYROLL_WEB_NODE_URLS:http://127.0.0.1:8080}"
   # 知识库：文件落盘、解析分块、ES 索引与 Ollama 回答生成。
   kb:
     storage-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
@@ -144,6 +151,22 @@ payroll:
     answer-model: "${PAYROLL_KB_ANSWER_MODEL:qwen2.5:3b-instruct}"
     answer-timeout: "${PAYROLL_KB_ANSWER_TIMEOUT:120s}"
     task-threads: "${PAYROLL_KB_TASK_THREADS:2}"
+    # 会话绑定知识库：单会话最多绑定库数；团队节点检索开关。
+    chat:
+      max-series: "${PAYROLL_KB_CHAT_MAX_SERIES:3}"
+      team-enabled: "${PAYROLL_KB_CHAT_TEAM_ENABLED:true}"
+    # 多路召回与知识点融合；fusion-enabled=false 时退回旧的向量+BM25 加权求和。
+    retrieval:
+      fusion-enabled: "${PAYROLL_KB_RETRIEVAL_FUSION:true}"
+      recall-routes: "${PAYROLL_KB_RETRIEVAL_ROUTES:VECTOR,BM25,TITLE_PATH}"
+      rrf-k: "${PAYROLL_KB_RETRIEVAL_RRF_K:60}"
+      vector-weight: "${PAYROLL_KB_RETRIEVAL_VECTOR_WEIGHT:1.0}"
+      bm25-weight: "${PAYROLL_KB_RETRIEVAL_BM25_WEIGHT:0.8}"
+      title-weight: "${PAYROLL_KB_RETRIEVAL_TITLE_WEIGHT:0.5}"
+      keyword-threshold: "${PAYROLL_KB_RETRIEVAL_KEYWORD_THRESHOLD:0.3}"
+      title-threshold: "${PAYROLL_KB_RETRIEVAL_TITLE_THRESHOLD:0.3}"
+      max-per-document: "${PAYROLL_KB_RETRIEVAL_MAX_PER_DOC:3}"
+      max-merge-chunks: "${PAYROLL_KB_RETRIEVAL_MAX_MERGE_CHUNKS:3}"
 
 # logback.xml 默认 WARN（CLI 保持安静），管理台启动日志需要 INFO。
 logging:

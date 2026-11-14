@@ -9,6 +9,7 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatSession;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.domain.TraceScope;
 import java.math.BigDecimal;
 import java.util.List;
@@ -137,6 +138,65 @@ class H2ChatTraceStoreTest {
         ChatToolTrace unbound = trace("call-3", "t", "1");
         assertEquals(0L, unbound.runId());
         assertNull(unbound.nodeId());
+    }
+
+    @Test
+    @DisplayName("知识库引用随助手消息落库并在读取时还原")
+    void persistsCitations() {
+        ChatSession session = store.create(1L, "引用会话");
+        Citation citation =
+                new Citation(
+                        1,
+                        "K-ANNUAL",
+                        7L,
+                        "人事制度",
+                        11L,
+                        "员工手册.pdf",
+                        101L,
+                        5,
+                        "第三章 > 休假",
+                        0.82,
+                        List.of("keyword", "vector"),
+                        "员工年假按工龄计算。");
+
+        ChatMessage saved =
+                store.appendAssistant(
+                        session.id(),
+                        "员工年假按工龄计算。",
+                        List.of(),
+                        "stub:test",
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(citation));
+
+        List<ChatMessage> messages = store.messages(session.id());
+        assertEquals(1, messages.size());
+        ChatMessage loaded = messages.get(0);
+        assertEquals(saved.id(), loaded.id());
+        assertEquals(1, loaded.citations().size());
+        Citation restored = loaded.citations().get(0);
+        assertEquals(1, restored.index());
+        assertEquals("K-ANNUAL", restored.pointId());
+        assertEquals(7L, restored.seriesId());
+        assertEquals("人事制度", restored.seriesName());
+        assertEquals(11L, restored.documentId());
+        assertEquals(101L, restored.chunkId());
+        assertEquals(5, restored.pageNo());
+        assertEquals("第三章 > 休假", restored.titlePath());
+        assertEquals(0.82, restored.score(), 0.0001);
+        assertEquals(List.of("keyword", "vector"), restored.routes());
+        assertEquals("员工年假按工龄计算。", restored.snippet());
+    }
+
+    @Test
+    @DisplayName("未携带引用的消息读取为空列表")
+    void emptyCitationsStayEmpty() {
+        ChatSession session = store.create(1L, "普通会话");
+        store.appendAssistant(session.id(), "回答", List.of(), "stub:test", List.of());
+
+        assertTrue(store.messages(session.id()).get(0).citations().isEmpty());
     }
 
     private static ChatToolTrace trace(String callId, String toolName, String netPay) {

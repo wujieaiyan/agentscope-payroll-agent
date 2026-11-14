@@ -21,6 +21,11 @@ public interface ChatContextStore {
     default void savePersona(long sessionId, String persona) {
     }
 
+    /** 会话绑定的知识库 ID；空表示未启用知识库。 */
+    default List<Long> kbSeriesIds(long sessionId) {
+        return List.of();
+    }
+
     /** 角色切换时作废会话内未确认的写操作提案，返回作废数量。 */
     default int cancelPendingActions(long sessionId) {
         return 0;

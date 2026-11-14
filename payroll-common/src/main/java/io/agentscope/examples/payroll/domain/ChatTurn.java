@@ -20,6 +20,8 @@ public record ChatTurn(
         String errorMessage,
         LocalDateTime startedAt,
         LocalDateTime updatedAt,
+        LocalDateTime heartbeatAt,
+        LocalDateTime deadlineAt,
         LocalDateTime finishedAt) {
 
     public static final String RUNNING = "RUNNING";
@@ -49,6 +51,8 @@ public record ChatTurn(
                 errorMessage,
                 startedAt,
                 updatedAt,
+                heartbeatAt,
+                deadlineAt,
                 finishedAt);
     }
 }

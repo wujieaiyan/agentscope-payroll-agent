@@ -71,8 +71,11 @@ mvn clean package
 cd frontend && npm ci && npm run build && cd ..
 
 # 1) 智能体运行期（模型执行与动态团队，只暴露 /internal，默认 8100）
-SPRING_PROFILES_ACTIVE=dept java -Dfile.encoding=UTF-8 \
-  -jar payroll-agent/target/payroll-agent-runtime.jar
+#    知识库工具需要与 Web 相同的内部令牌，并知道 Web 地址；未配置时 kb_* 工具不注册
+SPRING_PROFILES_ACTIVE=dept \
+PAYROLL_AGENT_RUNTIME_TOKEN=local-demo-token-change-me \
+PAYROLL_WEB_NODE_URLS=http://127.0.0.1:8080 \
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
 
 # 2) Web 后端（鉴权、会话、管理台 API，默认 8080）
 SPRING_PROFILES_ACTIVE=dept \
@@ -325,7 +328,8 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 | `agent_text` | `{"agent":"validator","text":"增量"}` | 追加中间智能体的阶段输出（计算记录 / 验证记录） |
 | `agent_end` | `{"agent":"calculator"}` | 标记智能体区块完成 |
 | `text` | `{"text":"增量"}` | 追加回答正文（仅核算智能体） |
-| `done` | `{"reply","tools","model","message_id","trace_count"}` | 收尾：移除光标、显示工具汇总、加载“计算依据”面板 |
+| `citation` | `{"citations":[...]}` | 在 `done` 前发送一次；渲染回答下方的“引用”chip 与来源抽屉 |
+| `done` | `{"reply","tools","model","message_id","trace_count","citations"}` | 收尾：移除光标、显示工具汇总、加载“计算依据”面板 |
 | `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
 | `turn` | `{"turn_id","user_message_id","owner_node"}` | 记录轮次号；断线或刷新后据此续流 |
 | `ping` | `{"after_seq":N,"ts":...}` | 空闲心跳（10 秒），不带 `id`，前端忽略 |
@@ -357,6 +361,19 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 ```
 
 追溯数据只随会话保存，不写入审计日志；查询前校验会话归属，跨用户返回 400。
+
+### 会话知识库检索与引用
+
+在“智能问答”顶部选择 1~3 个有 READER 权限的知识库后，助手回答制度、流程、条款类问题前会调用只读工具 `kb_search`：
+
+- 绑定接口 `GET/PUT /api/chat/sessions/{id}/knowledge`；绑定变更从下一轮生效，刷新/续流/跨节点后仍保留；
+- 检索在 Web 侧执行，runtime 经 HMAC 内部通道调用；默认按 `VECTOR`、`BM25`、`TITLE_PATH` 三路召回，RRF 融合后按内容指纹去重、相邻块合并，单文档默认最多保留 3 条；
+- 单轮最多 3 次检索：相同 `query/series_ids/top_k` 直接复用首次结果，团队多个节点共享同一份额度，超出后提示模型基于已有内容作答；
+- 命中通过 `citation` SSE 事件下发并随 assistant 消息写入 `chat_messages.citations_json`，前端在回答下方展示引用 chip 与来源抽屉；
+- 团队 `KB_CONFIG` 节点同样只注册只读 `kb_search`；薪酬、流程节点不注册，工资类问题不会触发检索；
+- 无命中、无权限或检索超时会分别提示，不会静默回退到通用知识；知识库写工具默认强制确认，即使 `PAYROLL_ACTION_CONFIRM_ENABLED=false` 也先出提案。
+
+`PAYROLL_KB_RETRIEVAL_FUSION=false` 可回退旧的向量+BM25 加权求和；召回参数见 `payroll.kb.retrieval.*`。
 
 ## 多智能体编排
 
@@ -625,13 +642,22 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_NODE_ID` | `local` | 节点标识，写入 `chat_turns.owner_node` |
 | `PAYROLL_AGENT_RUNTIME_URLS` | 空 | Web 调用的 runtime 地址（逗号分隔）；为空则对话接口返回“智能体运行期未配置”，不做本机回退 |
 | `PAYROLL_AGENT_RUNTIME_TOKEN` | 空 | runtime 内部接口 HMAC 密钥；为空时内部提交不可用 |
+| `PAYROLL_WEB_NODE_URLS` | `http://127.0.0.1:8080` | runtime 调用 Web 知识库内部接口的地址（逗号分隔）；未配置时知识库工具不注册 |
+| `PAYROLL_KB_SKILL_ENABLED` | `true` | 是否向协同智能体注册知识库配置工具；关闭后对话不提供 `kb_*` 能力，知识库页面不受影响 |
 | `PAYROLL_SERVER_ADDRESS` | `127.0.0.1` | 监听地址；容器/跨机部署需设为 `0.0.0.0` |
 | `PAYROLL_TURN_LEASE_TTL_SECONDS` | `30` | 轮次租约 TTL |
 | `PAYROLL_TURN_EVENT_TTL_HOURS` | `24` | 轮次事件流保留时长（续流窗口） |
 | `PAYROLL_SEMANTIC_CACHE_ENABLED` | `false` | 语义缓存开关（仅 AGENT 路径、无工具调用） |
 | `PAYROLL_ROUTING_ENABLED` | `true` | 是否把本轮路由快照写入 `chat_messages.routing_json`；关闭后 SSE `done` 不带 `routing` |
 | `PAYROLL_ACTION_CONFIRM_ENABLED` | `false` | 写操作会话内确认开关；关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度 |
+| `PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS` | 6 个 `kb_*` 写工具 | 无论全局开关如何都强制先出提案的工具清单（逗号分隔） |
 | `PAYROLL_ACTION_PROPOSAL_TTL_MINUTES` | `15` | 提案有效期（分钟）；过期后卡片失效，确认返回 410 |
+| `PAYROLL_KB_CHAT_MAX_SERIES` | `3` | 单会话最多绑定的知识库数 |
+| `PAYROLL_KB_CHAT_TEAM_ENABLED` | `true` | 是否允许团队 `KB_CONFIG` 节点注册只读检索工具 |
+| `PAYROLL_KB_RETRIEVAL_FUSION` | `true` | 多路召回+RRF 融合；`false` 回退旧的向量+BM25 加权求和 |
+| `PAYROLL_KB_RETRIEVAL_ROUTES` | `VECTOR,BM25,TITLE_PATH` | 启用的召回路径（逗号分隔）；VECTOR 索引策略下仅保留向量路 |
+| `PAYROLL_KB_RETRIEVAL_RRF_K` | `60` | RRF 平滑常数 |
+| `PAYROLL_KB_RETRIEVAL_MAX_PER_DOC` | `3` | 单个文档最多保留的知识点条数 |
 | `PAYROLL_MCP_TRUST_READ_ONLY_HINTS` | `true` | 是否采纳 MCP 服务端 `readOnlyHint`；`false` 时所有 MCP 工具都需确认 |
 | `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |

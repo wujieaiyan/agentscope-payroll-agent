@@ -73,7 +73,8 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # noeviction：轮次事件流与租约键不能被 LRU 提前淘汰，否则续流会出现空洞。
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports:
       - "16379:6379"
     volumes:
@@ -112,6 +113,9 @@ services:
       PAYROLL_NODE_ROLE: runtime
       PAYROLL_NODE_ID: runtime-1
       PAYROLL_AGENT_PORT: "8100"
+      # 知识库配置工具经签名内部接口由 Web 节点执行，runtime 需要 Web 地址。
+      PAYROLL_KB_SKILL_ENABLED: "true"
+      PAYROLL_WEB_NODE_URLS: http://web-1:8080,http://web-2:8080
     expose:
       - "8100"
     volumes:
@@ -129,6 +133,8 @@ services:
       PAYROLL_NODE_ROLE: runtime
       PAYROLL_NODE_ID: runtime-2
       PAYROLL_AGENT_PORT: "8100"
+      PAYROLL_KB_SKILL_ENABLED: "true"
+      PAYROLL_WEB_NODE_URLS: http://web-1:8080,http://web-2:8080
     expose:
       - "8100"
     volumes:

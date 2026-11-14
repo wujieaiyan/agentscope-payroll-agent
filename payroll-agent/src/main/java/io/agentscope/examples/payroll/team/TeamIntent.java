@@ -28,6 +28,7 @@ public record TeamIntent(
     public static final String TASK_REVIEW = "REVIEW";
     public static final String TASK_POLICY_EXPLAIN = "POLICY_EXPLAIN";
     public static final String TASK_BATCH_QUERY = "BATCH_QUERY";
+    public static final String TASK_KB_CONFIG = "KB_CONFIG";
     public static final String TASK_OTHER = "OTHER";
 
     public static final String CAP_PAYROLL_CALC = "PAYROLL_CALC";
@@ -35,13 +36,15 @@ public record TeamIntent(
     public static final String CAP_ACCOUNTING = "ACCOUNTING";
     public static final String CAP_PAYROLL_QUERY = "PAYROLL_QUERY";
     public static final String CAP_POLICY_KNOWLEDGE = "POLICY_KNOWLEDGE";
+    public static final String CAP_KB_CONFIG = "KB_CONFIG";
     public static final Set<String> CAPABILITIES =
             Set.of(
                     CAP_PAYROLL_CALC,
                     CAP_PAYROLL_VALIDATE,
                     CAP_ACCOUNTING,
                     CAP_PAYROLL_QUERY,
-                    CAP_POLICY_KNOWLEDGE);
+                    CAP_POLICY_KNOWLEDGE,
+                    CAP_KB_CONFIG);
 
     public static final Set<String> TASK_TYPES =
             Set.of(
@@ -50,6 +53,7 @@ public record TeamIntent(
                     TASK_REVIEW,
                     TASK_POLICY_EXPLAIN,
                     TASK_BATCH_QUERY,
+                    TASK_KB_CONFIG,
                     TASK_OTHER);
 
     public static final String RISK_LOW = "LOW";
@@ -109,6 +113,7 @@ public record TeamIntent(
             case TASK_PAYSLIP_QUERY, TASK_BATCH_QUERY -> List.of(CAP_PAYROLL_QUERY);
             case TASK_REVIEW -> List.of(CAP_PAYROLL_VALIDATE);
             case TASK_POLICY_EXPLAIN -> List.of(CAP_POLICY_KNOWLEDGE);
+            case TASK_KB_CONFIG -> List.of(CAP_KB_CONFIG);
             default -> List.of();
         };
     }

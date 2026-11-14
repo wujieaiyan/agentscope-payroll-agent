@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.support.JsonSupport;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -76,6 +78,41 @@ public final class InMemoryTurnEventBus implements TurnEventBus {
     }
 
     @Override
+    public long earliestSeq(String turnId) {
+        List<TurnEvent> source = events.get(turnId);
+        if (source == null) {
+            return 0L;
+        }
+        synchronized (source) {
+            return source.isEmpty() ? 0L : source.get(0).seq();
+        }
+    }
+
+    @Override
+    public TurnSnapshot snapshot(String turnId) {
+        List<TurnEvent> source = events.get(turnId);
+        if (source == null) {
+            return null;
+        }
+        TurnSnapshotState state = new TurnSnapshotState();
+        for (TurnEvent event : source) {
+            Map<String, Object> data;
+            try {
+                data =
+                        JsonSupport.fromJson(
+                                event.data(),
+                                new TypeReference<LinkedHashMap<String, Object>>() {
+                                });
+            } catch (RuntimeException e) {
+                data = Map.of();
+            }
+            state.apply(event.seq(), event.event(), data);
+        }
+        TurnSnapshot snapshot = state.toSnapshot();
+        return snapshot.seq() > 0 ? snapshot : null;
+    }
+
+    @Override
     public void cancel(String turnId) {
         cancelled.add(turnId);
     }
@@ -83,6 +120,11 @@ public final class InMemoryTurnEventBus implements TurnEventBus {
     @Override
     public boolean cancelled(String turnId) {
         return cancelled.contains(turnId);
+    }
+
+    @Override
+    public void clearCancel(String turnId) {
+        cancelled.remove(turnId);
     }
 
     @Override

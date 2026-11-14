@@ -17,6 +17,7 @@ import io.agentscope.examples.payroll.memory.SemanticCacheService;
 import io.agentscope.examples.payroll.memory.SemanticCacheSettings;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.memory.VectorMemorySettings;
+import io.agentscope.examples.payroll.service.ActionContributor;
 import io.agentscope.examples.payroll.service.ActionExecutor;
 import io.agentscope.examples.payroll.service.ActionProposalService;
 import io.agentscope.examples.payroll.service.AgentStatsService;
@@ -36,7 +37,6 @@ import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.RedisTurnEventBus;
-import io.agentscope.examples.payroll.service.SessionLockService;
 import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.service.TurnEventBus;
@@ -52,7 +52,9 @@ import io.agentscope.examples.payroll.team.TeamMode;
 import io.agentscope.examples.payroll.team.TeamSettings;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -104,14 +106,6 @@ public class PayrollCoreConfiguration {
         return new ChatQuotaService(redisProvider.getIfAvailable(), maxConcurrent);
     }
 
-    /** redis profile 下同一会话跨实例互斥；未启用 Redis 时退化为进程内锁。 */
-    @Bean
-    public SessionLockService sessionLockService(
-            ObjectProvider<StringRedisTemplate> redisProvider,
-            @Value("${payroll.chat.session-lock-minutes:15}") int ttlMinutes) {
-        return new SessionLockService(redisProvider.getIfAvailable(), ttlMinutes);
-    }
-
     @Bean
     public H2ChatTurnStore chatTurnStore(PayrollDatabase database) {
         return new H2ChatTurnStore(database);
@@ -132,12 +126,13 @@ public class PayrollCoreConfiguration {
     public TurnEventBus turnEventBus(
             ObjectProvider<StringRedisTemplate> redisProvider,
             @Value("${payroll.chat.turn-event-ttl-hours:24}") int ttlHours,
-            @Value("${payroll.chat.turn-event-max:10000}") int maxEvents) {
+            @Value("${payroll.chat.turn-event-max:10000}") int maxEvents,
+            @Value("${payroll.chat.turn-max-minutes:30}") int turnMaxMinutes) {
         StringRedisTemplate redis = redisProvider.getIfAvailable();
         if (redis == null) {
             return new InMemoryTurnEventBus();
         }
-        return new RedisTurnEventBus(redis, ttlHours, maxEvents);
+        return new RedisTurnEventBus(redis, ttlHours, maxEvents, turnMaxMinutes);
     }
 
     /**
@@ -325,8 +320,16 @@ public class PayrollCoreConfiguration {
     }
 
     @Bean
-    public ActionExecutor actionExecutor() {
-        return new DefaultActionExecutor();
+    public ActionExecutor actionExecutor(ObjectProvider<ActionContributor> contributors) {
+        Map<String, DefaultActionExecutor.LocalAction> actions = new LinkedHashMap<>();
+        Map<String, String> permissions = new LinkedHashMap<>();
+        contributors.orderedStream()
+                .forEach(
+                        contributor -> {
+                            actions.putAll(contributor.localActions());
+                            permissions.putAll(contributor.toolPermissions());
+                        });
+        return new DefaultActionExecutor(actions, permissions);
     }
 
     @Bean
@@ -434,13 +437,16 @@ public class PayrollCoreConfiguration {
             TeamSettings teamSettings,
             ObjectProvider<ShadowEvaluator> shadowProvider,
             ObjectProvider<ActiveTeamCoordinator> activeTeamProvider,
-            SessionLockService sessionLockService,
             TurnLeaseService turnLeaseService,
             TurnEventBus turnEventBus,
             AuditService auditService,
             @Value("${payroll.chat.cache-max-sessions:200}") int cacheMaxSessions,
             @Value("${payroll.chat.cache-idle-minutes:60}") int cacheIdleMinutes,
-            @Value("${payroll.node-id:local}") String nodeId) {
+            @Value("${payroll.node-id:local}") String nodeId,
+            @Value("${payroll.chat.turn-heartbeat-seconds:10}") int heartbeatSeconds,
+            @Value("${payroll.chat.turn-max-minutes:30}") int turnMaxMinutes,
+            @Value("${payroll.chat.turn-progress-timeout-seconds:300}")
+                    int progressTimeoutSeconds) {
         return new ChatSessionManager(
                 chatStore,
                 chatFactoryProvider.getIfAvailable(),
@@ -448,14 +454,16 @@ public class PayrollCoreConfiguration {
                 new StaticRunRecorder(agentTeamStore, teamSettings),
                 shadowProvider.getIfAvailable(),
                 activeTeamProvider.getIfAvailable(),
-                sessionLockService,
                 cacheMaxSessions,
                 cacheIdleMinutes,
                 auditService,
                 chatTurnStore,
                 turnLeaseService,
                 turnEventBus,
-                nodeId);
+                nodeId,
+                heartbeatSeconds,
+                turnMaxMinutes,
+                progressTimeoutSeconds);
     }
 
     @Bean
@@ -496,16 +504,16 @@ public class PayrollCoreConfiguration {
         };
     }
 
-    /** 启动时把心跳超时的运行中轮次标记为过期，避免续流端无限等待。 */
+    /** 启动时清理孤儿与失联轮次；运行期由会话管理器的 60s 扫描继续兜底。 */
     @Bean
     public ApplicationRunner turnRecoveryRunner(
-            H2ChatTurnStore turnStore,
-            @Value("${payroll.chat.turn-lease-seconds:30}") int leaseSeconds) {
+            ChatSessionManager chatSessionManager,
+            @Value("${payroll.chat.turn-heartbeat-seconds:10}") int heartbeatSeconds) {
         return args -> {
             try {
                 int expired =
-                        turnStore.expireStale(
-                                Duration.ofSeconds(Math.max(60L, leaseSeconds * 2L)),
+                        chatSessionManager.expireStaleTurns(
+                                Duration.ofSeconds(Math.max(30L, heartbeatSeconds * 3L)),
                                 "节点重启后清理失联轮次");
                 if (expired > 0) {
                     log.info("[轮次] 启动时标记失联轮次 {} 条", expired);

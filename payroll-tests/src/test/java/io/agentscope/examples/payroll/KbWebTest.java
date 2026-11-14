@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agentscope.examples.payroll.service.InternalAuth;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.CookieManager;
@@ -15,6 +16,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -31,6 +33,7 @@ import org.springframework.test.context.DynamicPropertySource;
 class KbWebTest {
 
     private static final String ADMIN_PASSWORD = "kb-admin-pass";
+    private static final String INTERNAL_TOKEN = "kb-web-internal-token";
     private static final Path OUTPUT_DIR = tempDir();
     private static final String DB_URL =
             "jdbc:h2:mem:kb-web-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
@@ -47,6 +50,7 @@ class KbWebTest {
         registry.add("payroll.kb.es-enabled", () -> "false");
         registry.add("payroll.kb.embedding-base-url", () -> "http://127.0.0.1:1");
         registry.add("payroll.kb.answer-enabled", () -> "false");
+        registry.add("payroll.internal.token", () -> INTERNAL_TOKEN);
     }
 
     @LocalServerPort
@@ -191,6 +195,132 @@ class KbWebTest {
 
         String summary = get(admin, "/api/kb/series/" + seriesId + "/documents/status-summary");
         assertTrue(summary.contains("\"ready\":1"), summary);
+    }
+
+    @Test
+    @DisplayName("kb_search 跨库合并、越权库不泄露、无文档返回原因并写审计")
+    void kbSearchMergesLibrariesAndHidesDeniedSeries() throws Exception {
+        HttpClient admin = newClient();
+        login(admin, "admin", ADMIN_PASSWORD);
+        long deptId = firstDepartmentId(admin);
+
+        long leaveSeries = createSeries(admin, deptId, "休假制度库");
+        uploadMarkdown(
+                admin,
+                leaveSeries,
+                "休假制度.md",
+                """
+                # 休假制度
+
+                员工入职满一年后享有带薪年假。
+
+                ## 天数
+
+                年假为 5 天，逐年递增。
+                """);
+        awaitDocumentsReady(admin, leaveSeries);
+
+        long expenseSeries = createSeries(admin, deptId, "报销制度库");
+        uploadMarkdown(
+                admin,
+                expenseSeries,
+                "报销制度.md",
+                """
+                # 报销制度
+
+                差旅报销需在出差结束后 7 天内提交。
+                """);
+        awaitDocumentsReady(admin, expenseSeries);
+
+        long emptySeries = createSeries(admin, deptId, "空制度库");
+
+        long adminId = userId(admin, "admin");
+        String both =
+                kbSearch(adminId, "制度", "[" + leaveSeries + "," + expenseSeries + "]", 4);
+        assertTrue(both.contains("\"status\":\"OK\""), both);
+        assertTrue(both.contains("休假制度库-"), both);
+        assertTrue(both.contains("报销制度库-"), both);
+        assertTrue(both.contains("\"point_id\":\"K1\""), both);
+        assertTrue(both.contains("\"denied_series\":[]"), both);
+
+        String empty = kbSearch(adminId, "制度", "[" + emptySeries + "]", 3);
+        assertTrue(empty.contains("\"reason\":\"NO_READY_DOCUMENT\""), empty);
+
+        String suffix = UUID.randomUUID().toString().substring(0, 6);
+        createUser(admin, "kb_search_viewer_" + suffix, "kb-search-pass", "VIEWER");
+        long viewerId = userId(admin, "kb_search_viewer_" + suffix);
+        post(
+                admin,
+                "/api/kb/series/" + leaveSeries + "/members",
+                """
+                {"subjectType":"USER","subjectIds":[%d],"role":"READER"}
+                """
+                        .formatted(viewerId));
+
+        String partial =
+                kbSearch(viewerId, "制度", "[" + leaveSeries + "," + expenseSeries + "]", 4);
+        assertTrue(partial.contains("\"status\":\"OK\""), partial);
+        assertTrue(partial.contains("休假制度库-"), partial);
+        assertFalse(partial.contains("报销制度库-"), partial);
+        assertTrue(partial.contains("\"denied_series\":[" + expenseSeries + "]"), partial);
+
+        String body =
+                """
+                {"user_id":%d,"tool":"kb_search",
+                 "arguments":{"query":"制度","series_ids":[%d],"top_k":3}}
+                """
+                        .formatted(viewerId, expenseSeries);
+        HttpResponse<String> denied = signedPost("/internal/kb/execute", body);
+        assertEquals(403, denied.statusCode(), denied.body());
+        assertTrue(denied.body().contains("\"status\":\"FORBIDDEN\""), denied.body());
+        assertFalse(denied.body().contains("报销制度库-"), denied.body());
+
+        String audits = get(admin, "/api/audit?action=kb.search");
+        assertTrue(audits.contains("kb.search"), audits);
+        assertTrue(audits.contains("hit_count"), audits);
+        assertTrue(audits.contains("制度"), audits);
+        assertFalse(audits.contains("差旅报销需在出差结束后"), audits);
+    }
+
+    private long createSeries(HttpClient admin, long deptId, String name) throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 6);
+        String created =
+                post(
+                        admin,
+                        "/api/kb/series",
+                        """
+                        {"name":"%s-%s","deptId":%d,"description":"检索测试",
+                         "indexStrategy":"HYBRID","draft":false}
+                        """
+                                .formatted(name, suffix, deptId));
+        return longField(created, "id");
+    }
+
+    private String kbSearch(long userId, String query, String seriesIds, int topK)
+            throws Exception {
+        String body =
+                """
+                {"user_id":%d,"tool":"kb_search",
+                 "arguments":{"query":"%s","series_ids":%s,"top_k":%d}}
+                """
+                        .formatted(userId, query, seriesIds, topK);
+        HttpResponse<String> response = signedPost("/internal/kb/execute", body);
+        assertEquals(200, response.statusCode(), response.body());
+        return response.body();
+    }
+
+    private HttpResponse<String> signedPost(String path, String body) throws Exception {
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String signature = InternalAuth.sign(INTERNAL_TOKEN, "POST", path, timestamp, body);
+        HttpRequest request =
+                HttpRequest.newBuilder(URI.create(baseUrl() + path))
+                        .header("Content-Type", "application/json")
+                        .header("X-Payroll-Timestamp", timestamp)
+                        .header("X-Payroll-Internal", signature)
+                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .build();
+        return HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }
 
     private String awaitDocumentsReady(HttpClient client, long seriesId) throws Exception {

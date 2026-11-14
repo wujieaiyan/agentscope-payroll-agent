@@ -285,7 +285,45 @@ public final class KbDtos {
             String content,
             String parentContent,
             String titlePath,
-            Integer pageNo) {
+            Integer pageNo,
+            String pointId,
+            List<String> routes,
+            Map<String, Integer> routeRanks,
+            int mergedChunks) {
+
+        public RetrievalHit {
+            routes = routes == null ? List.of() : List.copyOf(routes);
+            routeRanks = routeRanks == null ? Map.of() : Map.copyOf(routeRanks);
+            mergedChunks = Math.max(1, mergedChunks);
+        }
+
+        public RetrievalHit(
+                long chunkId,
+                long documentId,
+                String documentName,
+                double score,
+                double vectorScore,
+                double keywordScore,
+                String content,
+                String parentContent,
+                String titlePath,
+                Integer pageNo) {
+            this(
+                    chunkId,
+                    documentId,
+                    documentName,
+                    score,
+                    vectorScore,
+                    keywordScore,
+                    content,
+                    parentContent,
+                    titlePath,
+                    pageNo,
+                    null,
+                    List.of(),
+                    Map.of(),
+                    1);
+        }
     }
 
     @KbCamel

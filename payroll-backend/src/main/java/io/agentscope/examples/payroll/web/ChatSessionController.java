@@ -1,9 +1,18 @@
 package io.agentscope.examples.payroll.web;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.ChatFeedback;
 import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatTurn;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
+import io.agentscope.examples.payroll.kb.KbEnums.KbRole;
+import io.agentscope.examples.payroll.kb.KbEnums.SeriesStatus;
+import io.agentscope.examples.payroll.kb.KbModels;
+import io.agentscope.examples.payroll.kb.KbPermissionService;
+import io.agentscope.examples.payroll.kb.KbSeriesStore;
 import io.agentscope.examples.payroll.service.AgentRuntimeClient;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
@@ -14,10 +23,15 @@ import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.SemanticCacheContext;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.service.TurnEventBus;
+import io.agentscope.examples.payroll.service.TurnMetrics;
+import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
+import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -25,6 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -51,7 +66,7 @@ public class ChatSessionController {
     private static final long TURN_HEARTBEAT_MS = 10_000L;
     /** 无事件超过该时长后校验租约；租约有效说明模型/工具仍在执行。 */
     private static final long TURN_LEASE_GRACE_MS = 45_000L;
-    /** 单轮续流最长等待，防止异常轮次长期占用线程。 */
+    /** 单轮续流最长等待：仅在历史轮次缺少 deadline_at 时兜底。 */
     private static final long TURN_HARD_LIMIT_MS = 30 * 60_000L;
 
     private final ChatSessionManager manager;
@@ -62,6 +77,9 @@ public class ChatSessionController {
     private final ChatQuotaService chatQuotaService;
     private final AgentRuntimeClient runtimeClient;
     private final Executor chatStreamExecutor;
+    private final KbPermissionService kbPermissionService;
+    private final KbSeriesStore kbSeriesStore;
+    private final int maxKbSeries;
 
     public ChatSessionController(
             ChatSessionManager manager,
@@ -71,6 +89,9 @@ public class ChatSessionController {
             AuthService authService,
             ChatQuotaService chatQuotaService,
             AgentRuntimeClient runtimeClient,
+            KbPermissionService kbPermissionService,
+            KbSeriesStore kbSeriesStore,
+            @Value("${payroll.kb.chat.max-series:3}") int maxKbSeries,
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
         this.manager = manager;
         this.feedbackService = feedbackService;
@@ -80,6 +101,9 @@ public class ChatSessionController {
         this.chatQuotaService = chatQuotaService;
         this.runtimeClient = runtimeClient;
         this.chatStreamExecutor = chatStreamExecutor;
+        this.kbPermissionService = kbPermissionService;
+        this.kbSeriesStore = kbSeriesStore;
+        this.maxKbSeries = Math.max(1, maxKbSeries);
     }
 
     @GetMapping
@@ -112,6 +136,83 @@ public class ChatSessionController {
     @GetMapping("/{sessionId}/messages")
     public ApiResponse messages(@PathVariable long sessionId, HttpServletRequest request) {
         return ApiResponse.ok(manager.messages(userId(request), sessionId));
+    }
+
+    /** 会话绑定的知识库：只返回有 READER 权限的库，无权绑定只回数字 ID。 */
+    @GetMapping("/{sessionId}/knowledge")
+    public ApiResponse knowledge(@PathVariable long sessionId, HttpServletRequest request) {
+        AuthUser user = authService.currentUser(request);
+        return ApiResponse.ok(knowledgeView(user, sessionId));
+    }
+
+    @PutMapping("/{sessionId}/knowledge")
+    @RequirePermission({Permissions.CHAT_USE, Permissions.KB_READ})
+    public ApiResponse bindKnowledge(
+            @PathVariable long sessionId,
+            @RequestBody(required = false) KnowledgeBindingRequest body,
+            HttpServletRequest request) {
+        AuthUser user = authService.currentUser(request);
+        List<Long> requested = body == null || body.seriesIds() == null
+                ? List.of()
+                : new ArrayList<>(new LinkedHashSet<>(body.seriesIds()));
+        if (requested.size() > maxKbSeries) {
+            throw new PayrollException("单个会话最多绑定 " + maxKbSeries + " 个知识库");
+        }
+        for (Long seriesId : requested) {
+            if (seriesId == null) {
+                throw new PayrollException("知识库 ID 不能为空");
+            }
+            kbSeriesStore
+                    .findById(seriesId, false)
+                    .orElseThrow(() -> new PayrollException("知识库不存在：" + seriesId));
+            try {
+                kbPermissionService.requireRead(seriesId, user);
+            } catch (PayrollForbiddenException e) {
+                auditService.record(
+                        "chat.kb.bind.denied",
+                        "chat_session",
+                        Long.toString(sessionId),
+                        null,
+                        Map.of("series_id", seriesId, "reason", e.getMessage()));
+                throw e;
+            }
+        }
+        List<Long> previous = manager.kbSeriesIds(user.id(), sessionId);
+        manager.updateKbSeriesIds(user.id(), sessionId, requested);
+        auditService.record(
+                "chat.kb.bind",
+                "chat_session",
+                Long.toString(sessionId),
+                Map.of("series_ids", previous),
+                Map.of("series_ids", requested));
+        return ApiResponse.ok(knowledgeView(user, sessionId));
+    }
+
+    private Map<String, Object> knowledgeView(AuthUser user, long sessionId) {
+        List<Long> bound = manager.kbSeriesIds(user.id(), sessionId);
+        List<Map<String, Object>> series = new ArrayList<>();
+        List<Long> denied = new ArrayList<>();
+        for (Long seriesId : bound) {
+            KbModels.Series found = kbSeriesStore.findById(seriesId, false).orElse(null);
+            KbRole role = kbPermissionService.roleIn(seriesId, user).orElse(null);
+            if (found == null || role == null) {
+                denied.add(seriesId);
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", found.id());
+            item.put("name", found.name());
+            item.put("status", found.status().name());
+            item.put("role", role.name());
+            item.put("searchable", found.status() == SeriesStatus.ACTIVE);
+            series.add(item);
+        }
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("session_id", sessionId);
+        view.put("series", series);
+        view.put("denied", denied);
+        view.put("max_series", maxKbSeries);
+        return view;
     }
 
     /** 单条助手消息的计算依据：工具名、参数、结果、金额与关联员工。 */
@@ -261,7 +362,8 @@ public class ChatSessionController {
                 null,
                 message.routing(),
                 message.proposals(),
-                null);
+                null,
+                message.citations());
     }
 
     @PostMapping("/{sessionId}/reset")
@@ -452,31 +554,98 @@ public class ChatSessionController {
         long now = System.currentTimeMillis();
         long lastEventAt = now;
         long lastPingAt = now;
-        long startedAt = now;
         boolean gapWarned = false;
+        long replayStart = now;
+        long replayed = 0L;
+        boolean replayTimed = false;
         try {
+            // 截止时间在开启轮次时固定，客户端重连不会重置。
+            ChatTurn initial = manager.turn(userId, sessionId, turnId);
+            long deadlineMillis =
+                    initial.deadlineAt() == null
+                            ? now + TURN_HARD_LIMIT_MS
+                            : initial.deadlineAt()
+                                    .atZone(ZoneId.systemDefault())
+                                    .toInstant()
+                                    .toEpochMilli();
+            // 冷恢复优先下发已合并的快照，避免把整段历史逐帧重放。
+            TurnEventBus.TurnSnapshot snapshot =
+                    manager.turnSnapshot(userId, sessionId, turnId);
+            if (snapshot != null && snapshot.seq() > lastSeq) {
+                channel.send(
+                        "snapshot",
+                        ChatSse.payload(
+                                "seq", snapshot.seq(),
+                                "text", snapshot.text(),
+                                "tools",
+                                        snapshot.tools().isEmpty() ? null : snapshot.tools(),
+                                "agents",
+                                        snapshot.agents().isEmpty() ? null : snapshot.agents(),
+                                "phase", snapshot.phase(),
+                                "citations",
+                                        snapshot.citations().isEmpty()
+                                                ? null
+                                                : snapshot.citations()));
+                lastSeq = snapshot.seq();
+                replayed++;
+            }
+            long earliest = manager.earliestTurnSeq(userId, sessionId, turnId);
+            if (earliest > 0 && lastSeq + 1 < earliest) {
+                // 客户端游标早于仍保留的事件：明示缺口，前端停止拼接、以落库消息收尾。
+                sendGap(channel, lastSeq, earliest);
+                lastSeq = earliest - 1;
+                gapWarned = true;
+            }
             while (!channel.closed()) {
+                if (System.currentTimeMillis() >= deadlineMillis) {
+                    manager.expireTurn(turnId, "轮次超过最长执行时间");
+                    channel.send(
+                            "error", ChatSse.payload("message", "回答超时，请重新发起提问"));
+                    break;
+                }
                 List<TurnEventBus.TurnEvent> events =
                         manager.waitTurnEvents(
                                 userId, sessionId, turnId, lastSeq, Duration.ofSeconds(10), 200);
                 boolean done = false;
+                StringBuilder mergedText = null;
+                long mergedSeq = 0L;
                 for (TurnEventBus.TurnEvent event : events) {
                     if (!gapWarned && event.seq() > lastSeq + 1) {
                         // seq 不连续说明事件日志已被裁剪，只能重建部分内容；最终仍以 done/DB 为准。
-                        log.warn(
-                                "[会话] 轮次事件不连续：turnId={}，期望 seq={}，实际 seq={}",
-                                turnId,
-                                lastSeq + 1,
-                                event.seq());
+                        long available = manager.earliestTurnSeq(userId, sessionId, turnId);
+                        sendGap(
+                                channel,
+                                lastSeq,
+                                available > 0 ? Math.max(available, event.seq()) : event.seq());
                         gapWarned = true;
+                    }
+                    if ("text".equals(event.event())) {
+                        // 连续文本合并成一帧，1 万事件轮次的 SSE 帧数可显著下降。
+                        if (mergedText == null) {
+                            mergedText = new StringBuilder();
+                        }
+                        mergedText.append(textOf(event.data()));
+                        mergedSeq = event.seq();
+                        lastSeq = event.seq();
+                        lastEventAt = System.currentTimeMillis();
+                        replayed++;
+                        continue;
+                    }
+                    if (mergedText != null) {
+                        ChatSse.replayText(channel, mergedSeq, mergedText.toString());
+                        mergedText = null;
                     }
                     ChatSse.replay(channel, event);
                     lastSeq = event.seq();
                     lastEventAt = System.currentTimeMillis();
+                    replayed++;
                     if ("done".equals(event.event())) {
                         done = true;
                         break;
                     }
+                }
+                if (mergedText != null) {
+                    ChatSse.replayText(channel, mergedSeq, mergedText.toString());
                 }
                 if (done || channel.closed()) {
                     break;
@@ -485,6 +654,11 @@ public class ChatSessionController {
                 if (!events.isEmpty()) {
                     lastPingAt = now;
                     continue;
+                }
+                if (!replayTimed) {
+                    // 第一次等到空批次即表示存量事件已追平，记录续流追平耗时。
+                    replayTimed = true;
+                    TurnMetrics.resumeReplay(replayStart);
                 }
                 ChatTurn turn = manager.turn(userId, sessionId, turnId);
                 if (ChatTurn.terminal(turn.status())) {
@@ -505,6 +679,7 @@ public class ChatSessionController {
                 }
                 if (now - lastEventAt >= TURN_LEASE_GRACE_MS) {
                     if (!manager.leaseAlive(sessionId)) {
+                        TurnMetrics.leaseLost();
                         manager.expireTurn(turnId, "执行节点租约失效，长时间无事件");
                         channel.send(
                                 "error", ChatSse.payload("message", "回答中断，请重新发起提问"));
@@ -517,20 +692,34 @@ public class ChatSessionController {
                             lastSeq);
                     lastEventAt = now;
                 }
-                if (now - startedAt >= TURN_HARD_LIMIT_MS) {
-                    manager.expireTurn(turnId, "轮次超过最长等待时间");
-                    channel.send(
-                            "error", ChatSse.payload("message", "回答超时，请重新发起提问"));
-                    break;
-                }
             }
         } catch (RuntimeException e) {
             log.warn("[会话] 续流失败：sessionId={}，turnId={}", sessionId, turnId, e);
             channel.send("error", ChatSse.payload("message", "续流失败，请重新发起提问"));
         } finally {
+            if (!replayTimed) {
+                // 未追平即结束（done、终态或异常）：按整段耗时采样，避免续流指标缺失。
+                TurnMetrics.resumeReplay(replayStart);
+            }
+            TurnMetrics.replayedEvents(replayed);
             manager.releaseLocalChat(sessionId);
             channel.complete();
         }
+    }
+
+    /** 断点已过期时下发一次性缺口提示；不带 SSE id，避免污染续传游标。 */
+    private static void sendGap(ChatSse.Channel channel, long afterSeq, long earliestSeq) {
+        TurnMetrics.gap();
+        log.warn(
+                "[会话] 续流断点已过期：lastSeq={}，earliestSeq={}",
+                afterSeq,
+                earliestSeq);
+        channel.send(
+                "gap",
+                ChatSse.payload(
+                        "after_seq", Math.max(0L, afterSeq),
+                        "earliest_seq", Math.max(0L, earliestSeq),
+                        "message", "部分回答过程已过期，完成后将以最终消息展示"));
     }
 
     private static long parseEventId(String value) {
@@ -541,6 +730,21 @@ public class ChatSessionController {
             return Math.max(0L, Long.parseLong(value.trim()));
         } catch (NumberFormatException e) {
             return 0L;
+        }
+    }
+
+    /** 取出文本事件里的增量内容；脏数据直接忽略，避免重放整轮失败。 */
+    private static String textOf(String data) {
+        if (data == null || data.isBlank()) {
+            return "";
+        }
+        try {
+            Map<String, Object> payload =
+                    JsonSupport.fromJson(data, new TypeReference<LinkedHashMap<String, Object>>() {});
+            Object text = payload.get("text");
+            return text == null ? "" : text.toString();
+        } catch (RuntimeException e) {
+            return "";
         }
     }
 
@@ -574,5 +778,9 @@ public class ChatSessionController {
     }
 
     public record ChatFeedbackRequest(String rating, List<String> tags, String comment) {
+    }
+
+    public record KnowledgeBindingRequest(
+            @JsonProperty("series_ids") List<Long> seriesIds) {
     }
 }

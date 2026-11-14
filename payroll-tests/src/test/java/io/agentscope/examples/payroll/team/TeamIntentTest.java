@@ -65,6 +65,55 @@ class TeamIntentTest {
     }
 
     @Test
+    @DisplayName("知识库写配置识别为 KB_CONFIG 且不进入动态组队")
+    void kbWriteIntentIsNotEligible() {
+        TeamIntent intent = TeamIntentExtractor.rules("给研发部建一个知识库，检索 topK 调到 8");
+
+        assertEquals(TeamIntent.TASK_KB_CONFIG, intent.taskType());
+        assertEquals(List.of(TeamIntent.CAP_KB_CONFIG), intent.requiredCapabilities());
+        assertTrue(intent.writeAction());
+        assertFalse(intent.eligible());
+    }
+
+    @Test
+    @DisplayName("知识库只读查询进入 KB_CONFIG 单角色模板")
+    void kbReadIntentUsesKbTemplate() {
+        TeamIntent intent = TeamIntentExtractor.rules("研发部知识库有哪些入库任务？");
+
+        assertEquals(TeamIntent.TASK_KB_CONFIG, intent.taskType());
+        assertFalse(intent.writeAction());
+        assertTrue(intent.eligible());
+        assertEquals(TeamTemplate.KB_CONFIG, TeamTemplate.select(intent));
+    }
+
+    @Test
+    @DisplayName("绑定知识库后制度问答按 KB_CONFIG 处理")
+    void boundPolicyQuestionUsesKbTemplate() {
+        TeamIntent intent = TeamIntentExtractor.rules("研发部年假怎么算？", true);
+
+        assertEquals(TeamIntent.TASK_KB_CONFIG, intent.taskType());
+        assertTrue(intent.eligible());
+        assertEquals(TeamTemplate.KB_CONFIG, TeamTemplate.select(intent));
+    }
+
+    @Test
+    @DisplayName("绑定知识库后工资计算仍走薪酬意图")
+    void boundPayrollQuestionStaysPayroll() {
+        TeamIntent intent = TeamIntentExtractor.rules("核算 EMP001 2026-10 的工资", true);
+
+        assertEquals(TeamIntent.TASK_CALCULATE, intent.taskType());
+        assertTrue(intent.requiredCapabilities().contains(TeamIntent.CAP_PAYROLL_CALC));
+    }
+
+    @Test
+    @DisplayName("未绑定知识库时制度问答不进入 KB_CONFIG")
+    void unboundPolicyQuestionIsNotKb() {
+        TeamIntent intent = TeamIntentExtractor.rules("研发部年假怎么算？", false);
+
+        assertEquals(TeamIntent.TASK_POLICY_EXPLAIN, intent.taskType());
+    }
+
+    @Test
     @DisplayName("模板按任务类型与所需能力选择")
     void templateSelectionFollowsIntent() {
         assertEquals(

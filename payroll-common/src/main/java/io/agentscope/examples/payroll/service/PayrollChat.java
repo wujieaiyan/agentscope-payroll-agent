@@ -3,6 +3,7 @@ package io.agentscope.examples.payroll.service;
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.Citation;
 import io.agentscope.examples.payroll.domain.TraceScope;
 import io.agentscope.examples.payroll.support.ModelEnv;
 import java.util.List;
@@ -45,7 +46,7 @@ public interface PayrollChat extends AutoCloseable {
     /**
      * 一次对话结果；tools 为本次回答调用过的工具名，traces 为逐次调用的依据快照，
      * routing 为本轮路由快照，proposals 为待用户确认的写操作，
-     * cache 非空表示本轮答复来自缓存。
+     * citations 为本轮知识库引用，cache 非空表示本轮答复来自缓存。
      */
     record Reply(
             String reply,
@@ -55,12 +56,26 @@ public interface PayrollChat extends AutoCloseable {
             TeamReply team,
             ChatRouting routing,
             List<ActionProposal> proposals,
-            CacheInfo cache) {
+            CacheInfo cache,
+            List<Citation> citations) {
 
         public Reply {
             tools = tools == null ? List.of() : List.copyOf(tools);
             traces = traces == null ? List.of() : List.copyOf(traces);
             proposals = proposals == null ? List.of() : List.copyOf(proposals);
+            citations = citations == null ? List.of() : List.copyOf(citations);
+        }
+
+        public Reply(
+                String reply,
+                List<String> tools,
+                String model,
+                List<ChatToolTrace> traces,
+                TeamReply team,
+                ChatRouting routing,
+                List<ActionProposal> proposals,
+                CacheInfo cache) {
+            this(reply, tools, model, traces, team, routing, proposals, cache, List.of());
         }
 
         public Reply(String reply, List<String> tools, String model) {

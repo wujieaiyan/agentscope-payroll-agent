@@ -32,7 +32,8 @@ public final class TeamCandidateSelector {
                     TeamRole.VALIDATOR, 80D,
                     TeamRole.ACCOUNTANT, 75D,
                     TeamRole.QUERY, 70D,
-                    TeamRole.KNOWLEDGE, 70D);
+                    TeamRole.KNOWLEDGE, 70D,
+                    TeamRole.KB_CONFIG, 72D);
     private static final double DEFAULT_PRIOR = 65D;
     private static final double DEFAULT_FEEDBACK = 65D;
 

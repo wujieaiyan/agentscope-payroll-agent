@@ -6,7 +6,8 @@ public enum TeamRole {
     VALIDATOR(TeamIntent.CAP_PAYROLL_VALIDATE, "验证智能体"),
     ACCOUNTANT(TeamIntent.CAP_ACCOUNTING, "核算智能体"),
     QUERY(TeamIntent.CAP_PAYROLL_QUERY, "查询智能体"),
-    KNOWLEDGE(TeamIntent.CAP_POLICY_KNOWLEDGE, "知识智能体");
+    KNOWLEDGE(TeamIntent.CAP_POLICY_KNOWLEDGE, "知识智能体"),
+    KB_CONFIG(TeamIntent.CAP_KB_CONFIG, "知识库配置智能体");
 
     private final String capability;
     private final String label;
@@ -42,6 +43,7 @@ public enum TeamRole {
             case ACCOUNTANT -> capabilities.contains(TeamIntent.CAP_PAYROLL_CALC);
             case QUERY -> capabilities.contains(TeamIntent.CAP_PAYROLL_CALC);
             case KNOWLEDGE -> capabilities.contains(TeamIntent.CAP_PAYROLL_QUERY);
+            case KB_CONFIG -> false;
         };
     }
 
