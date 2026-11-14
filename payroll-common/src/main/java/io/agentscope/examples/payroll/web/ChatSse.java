@@ -36,6 +36,19 @@ public final class ChatSse {
         return bridge(new Channel(null), manager, turn, onDone);
     }
 
+    /**
+     * 创建通道并接管 SSE 生命周期。
+     *
+     * <p>容器报错时响应已不可用，只关闭通道、不再 complete；超时才主动结束。
+     */
+    public static Channel attach(SseEmitter emitter) {
+        Channel channel = new Channel(emitter);
+        emitter.onTimeout(channel::complete);
+        emitter.onError(error -> channel.close());
+        emitter.onCompletion(channel::close);
+        return channel;
+    }
+
     public static ChatStreamListener bridge(
             Channel channel,
             ChatSessionManager manager,
@@ -253,10 +266,36 @@ public final class ChatSse {
     public static final class Channel {
 
         private final SseEmitter emitter;
-        private boolean closed;
+        private volatile boolean closed;
 
         Channel(SseEmitter emitter) {
             this.emitter = emitter;
+        }
+
+        void close() {
+            closed = true;
+        }
+
+        /**
+         * 结束 SSE 响应：已断开或已完成时不再 complete。
+         *
+         * <p>容器报错后响应已不可用，此时再 complete 会 flush 失败并抛出
+         * 「Response not usable after response errors」。
+         */
+        public void complete() {
+            if (emitter == null) {
+                closed = true;
+                return;
+            }
+            if (closed) {
+                return;
+            }
+            closed = true;
+            try {
+                emitter.complete();
+            } catch (RuntimeException e) {
+                log.debug("SSE 完成时连接已不可用，忽略：{}", e.getMessage());
+            }
         }
 
         void send(String event, Map<String, Object> data) {

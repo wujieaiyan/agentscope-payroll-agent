@@ -295,16 +295,14 @@ public class PayrollWebController {
     public SseEmitter chatStream(
             @RequestBody(required = false) ChatRequest request, HttpServletRequest http) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        emitter.onTimeout(emitter::complete);
-        emitter.onError(error -> emitter.complete());
+        ChatSse.Channel channel = ChatSse.attach(emitter);
         String message;
         try {
             message = requireChatMessage(request);
         } catch (PayrollException e) {
             // 客户端只接受 text/event-stream，校验错误也必须以 SSE 事件返回。
-            ChatSse.Channel channel = new ChatSse.Channel(emitter);
             channel.send("error", ChatSse.payload("message", e.getMessage()));
-            emitter.complete();
+            channel.complete();
             return emitter;
         }
         long userId = authService.currentUser(http).id();
@@ -312,7 +310,7 @@ public class PayrollWebController {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
         try {
-            chatStreamExecutor.execute(() -> streamChat(message, userId, emitter));
+            chatStreamExecutor.execute(() -> streamChat(message, userId, channel));
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;
@@ -320,14 +318,13 @@ public class PayrollWebController {
         return emitter;
     }
 
-    private void streamChat(String message, long userId, SseEmitter emitter) {
-        ChatSse.Channel channel = new ChatSse.Channel(emitter);
+    private void streamChat(String message, long userId, ChatSse.Channel channel) {
         long startedAt = System.currentTimeMillis();
         log.info("[SSE] 对话开始：{}", abbreviate(message, 120));
         try {
             services.chat()
                     .stream(message, ChatSse.bridge(channel, reply -> null));
-            emitter.complete();
+            channel.complete();
             log.info("[SSE] 对话完成：耗时={}ms", System.currentTimeMillis() - startedAt);
         } catch (PayrollException e) {
             log.warn(
@@ -335,11 +332,11 @@ public class PayrollWebController {
                     System.currentTimeMillis() - startedAt,
                     e.getMessage());
             channel.send("error", ChatSse.payload("message", e.getMessage()));
-            emitter.complete();
+            channel.complete();
         } catch (RuntimeException e) {
             log.error("[SSE] 流式对话异常", e);
             channel.send("error", ChatSse.payload("message", "对话失败，请查看服务端日志"));
-            emitter.complete();
+            channel.complete();
         } finally {
             chatQuotaService.release(userId);
         }

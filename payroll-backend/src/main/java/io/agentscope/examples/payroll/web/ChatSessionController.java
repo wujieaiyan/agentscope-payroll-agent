@@ -212,6 +212,9 @@ public class ChatSessionController {
             return ApiResponse.ok(replyOf(userId, sessionId, finished));
         } finally {
             SemanticCacheContext.clear();
+            if (turn != null) {
+                manager.releaseLocalChat(sessionId);
+            }
             chatQuotaService.release(userId);
         }
     }
@@ -273,16 +276,14 @@ public class ChatSessionController {
             @RequestBody(required = false) ChatMessageRequest body,
             HttpServletRequest request) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        emitter.onTimeout(emitter::complete);
-        emitter.onError(error -> emitter.complete());
-        ChatSse.Channel channel = new ChatSse.Channel(emitter);
+        ChatSse.Channel channel = ChatSse.attach(emitter);
         long userId = userId(request);
         String message;
         try {
             message = requireMessage(body == null ? null : body.message());
         } catch (PayrollException e) {
             channel.send("error", ChatSse.payload("message", e.getMessage()));
-            emitter.complete();
+            channel.complete();
             return emitter;
         }
         if (!chatQuotaService.tryAcquire(userId)) {
@@ -291,7 +292,7 @@ public class ChatSessionController {
         try {
             String cacheScope = cacheScope(request);
             chatStreamExecutor.execute(
-                    () -> stream(userId, sessionId, message, cacheScope, channel, emitter));
+                    () -> stream(userId, sessionId, message, cacheScope, channel));
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;
@@ -314,8 +315,7 @@ public class ChatSessionController {
             long sessionId,
             String message,
             String cacheScope,
-            ChatSse.Channel channel,
-            SseEmitter emitter) {
+            ChatSse.Channel channel) {
         ChatSessionManager.TurnContext turn = null;
         AtomicBoolean finished = new AtomicBoolean(false);
         try {
@@ -333,7 +333,7 @@ public class ChatSessionController {
                 channel.send(
                         "error",
                         ChatSse.payload("message", "智能体运行期未配置，暂时无法回答问题"));
-                emitter.complete();
+                channel.complete();
                 return;
             }
             try {
@@ -343,7 +343,7 @@ public class ChatSessionController {
                         "[运行期] 轮次已提交：sessionId={}，turnId={}",
                         sessionId,
                         turn.turnId());
-                resumeEvents(userId, sessionId, turn.turnId(), 0L, channel, emitter);
+                resumeEvents(userId, sessionId, turn.turnId(), 0L, channel);
                 return;
             } catch (RuntimeException e) {
                 if (!manager.turnEvents(userId, sessionId, turn.turnId(), 0L, 1).isEmpty()) {
@@ -352,7 +352,7 @@ public class ChatSessionController {
                             turn.turnId(),
                             e.getMessage());
                     finished.set(true);
-                    resumeEvents(userId, sessionId, turn.turnId(), 0L, channel, emitter);
+                    resumeEvents(userId, sessionId, turn.turnId(), 0L, channel);
                     return;
                 }
                 log.warn(
@@ -363,21 +363,21 @@ public class ChatSessionController {
                 finished.set(true);
                 channel.send(
                         "error", ChatSse.payload("message", "智能体运行期不可达，请稍后再试"));
-                emitter.complete();
+                channel.complete();
             }
         } catch (PayrollException e) {
             if (turn != null && finished.compareAndSet(false, true)) {
                 manager.failTurn(turn, e.getMessage());
             }
             channel.send("error", ChatSse.payload("message", e.getMessage()));
-            emitter.complete();
+            channel.complete();
         } catch (RuntimeException e) {
             log.error("[会话] 流式对话异常：sessionId={}", sessionId, e);
             if (turn != null && finished.compareAndSet(false, true)) {
                 manager.failTurn(turn, rootMessage(e));
             }
             channel.send("error", ChatSse.payload("message", "对话失败，请查看服务端日志"));
-            emitter.complete();
+            channel.complete();
         } finally {
             SemanticCacheContext.clear();
             if (turn != null && finished.compareAndSet(false, true)) {
@@ -435,12 +435,10 @@ public class ChatSessionController {
         long userId = userId(request);
         manager.turn(userId, sessionId, turnId);
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        emitter.onTimeout(emitter::complete);
-        emitter.onError(error -> emitter.complete());
-        ChatSse.Channel channel = new ChatSse.Channel(emitter);
+        ChatSse.Channel channel = ChatSse.attach(emitter);
         long from = Math.max(Math.max(0, afterSeq), parseEventId(lastEventId));
         chatStreamExecutor.execute(
-                () -> resumeEvents(userId, sessionId, turnId, from, channel, emitter));
+                () -> resumeEvents(userId, sessionId, turnId, from, channel));
         return emitter;
     }
 
@@ -449,8 +447,7 @@ public class ChatSessionController {
             long sessionId,
             String turnId,
             long afterSeq,
-            ChatSse.Channel channel,
-            SseEmitter emitter) {
+            ChatSse.Channel channel) {
         long lastSeq = Math.max(0, afterSeq);
         long now = System.currentTimeMillis();
         long lastEventAt = now;
@@ -532,7 +529,7 @@ public class ChatSessionController {
             channel.send("error", ChatSse.payload("message", "续流失败，请重新发起提问"));
         } finally {
             manager.releaseLocalChat(sessionId);
-            emitter.complete();
+            channel.complete();
         }
     }
 
