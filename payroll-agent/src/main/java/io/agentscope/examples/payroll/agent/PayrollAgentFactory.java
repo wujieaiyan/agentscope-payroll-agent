@@ -405,7 +405,7 @@ public final class PayrollAgentFactory {
                 + skillFingerprint(agent.skillIds());
     }
 
-    /** 技能正文参与缓存签名：Nacos 技能改动后，旧的系统提示词必须失效。 */
+    /** 技能正文与资源参与缓存签名：Nacos 技能或文件包改动后，旧的系统提示词必须失效。 */
     private static String skillFingerprint(List<String> skillIds) {
         if (skillIds == null || skillIds.isEmpty()) {
             return "";
@@ -417,7 +417,11 @@ public final class PayrollAgentFactory {
             String content = skill == null || skill.getSkillContent() == null
                     ? "missing"
                     : Integer.toHexString(skill.getSkillContent().hashCode());
-            fingerprint.append(skillId).append(':').append(content).append(';');
+            String resources = skill == null || skill.getResources().isEmpty()
+                    ? ""
+                    : Integer.toHexString(skill.getResources().hashCode());
+            fingerprint.append(skillId).append(':').append(content).append(':').append(resources)
+                    .append(';');
         }
         return fingerprint.toString();
     }
@@ -508,6 +512,9 @@ public final class PayrollAgentFactory {
         boolean payrollRole = isPayrollRole(agent.skillIds());
         Set<String> allowed = flowTools(agent.skillIds());
         Toolkit toolkit = toolkit(tools, allowed, agent.name(), primary);
+        if (SkillReadTools.hasResources(skills)) {
+            toolkit.registerTool(new SkillReadTools(skills));
+        }
         KbSkillGateway kbGateway = kbSearch ? kbGateway() : null;
         if (kbGateway != null) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
@@ -553,6 +560,9 @@ public final class PayrollAgentFactory {
         AgentSkill primary = boundSkills.get(0);
         Set<String> allowed = allowedTools(activeAgent.skillIds());
         Toolkit toolkit = toolkit(tools, allowed, activeAgent.name(), primary);
+        if (SkillReadTools.hasResources(boundSkills)) {
+            toolkit.registerTool(new SkillReadTools(boundSkills));
+        }
         KbSkillGateway kbGateway = kbGateway();
         KbTools kbTools = kbGateway == null ? null : new KbTools(kbGateway);
         if (kbTools != null) {
@@ -674,6 +684,7 @@ public final class PayrollAgentFactory {
         return GENERAL_RULES
                 + "\n"
                 + skillBlock(skills)
+                + SkillReadTools.guidance(skills)
                 + """
                 ## 基本职责
                 你是「%s」。%s

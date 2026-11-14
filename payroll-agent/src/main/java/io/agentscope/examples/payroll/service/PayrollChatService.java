@@ -19,6 +19,7 @@ import io.agentscope.examples.payroll.agent.KbCitationCollector;
 import io.agentscope.examples.payroll.agent.KbSearchBudget;
 import io.agentscope.examples.payroll.agent.KbSearchScope;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.SkillReadBudget;
 import io.agentscope.examples.payroll.agent.ToolSafety;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
@@ -107,6 +108,7 @@ public final class PayrollChatService implements PayrollChat {
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final KbCitationCollector citationCollector = new KbCitationCollector();
     private final KbSearchBudget kbSearchBudget = new KbSearchBudget();
+    private final SkillReadBudget skillReadBudget = new SkillReadBudget();
     private final List<ChatToolTrace> collectedTraces = new CopyOnWriteArrayList<>();
     private final List<PayrollChat.StageRun> stageRuns = new CopyOnWriteArrayList<>();
     private final RuntimeContext sessionContext;
@@ -375,6 +377,7 @@ public final class PayrollChatService implements PayrollChat {
                         .put(ToolTraceRecorder.class, traceRecorder)
                         .put(KbCitationCollector.class, citationCollector)
                         .put(KbSearchBudget.class, kbSearchBudget)
+                        .put(SkillReadBudget.class, skillReadBudget)
                         .build();
         this.context = loadContext(contextStore, sessionId);
     }
@@ -438,6 +441,7 @@ public final class PayrollChatService implements PayrollChat {
             citationCollector.clear();
             // 团队执行在同一轮内嵌套调用 executeDynamicFlow，这里统一清零，保证整轮共享 3 次额度。
             kbSearchBudget.clear();
+            skillReadBudget.clear();
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             ResolvedFlow resolvedFlow = resolveActiveFlow();
@@ -1205,6 +1209,7 @@ public final class PayrollChatService implements PayrollChat {
                         .put(ToolTraceRecorder.class, recorder)
                         .put(KbCitationCollector.class, citationCollector)
                         .put(KbSearchBudget.class, kbSearchBudget)
+                        .put(SkillReadBudget.class, skillReadBudget)
                         .put(
                                 TraceScope.class,
                                 new TraceScope(

@@ -19,6 +19,8 @@ import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillDetail;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillSummary;
 import io.agentscope.examples.payroll.skill.RoleSkills;
+import io.agentscope.examples.payroll.skill.SkillFilePackage;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -70,7 +72,7 @@ class SkillAdminControllerTest {
     void updateWritesAudit() {
         SkillDetail before =
                 new SkillDetail(
-                        "payroll-auditor", "旧描述", "旧正文", "nacos", false, false, 1L);
+                        "payroll-auditor", "旧描述", "旧正文", "nacos", false, false, 1L, List.of());
         SkillSummary after = summary("payroll-auditor", "新描述", "nacos", false);
         when(registry.detail("payroll-auditor")).thenReturn(before);
         when(registry.update("payroll-auditor", "新描述", "新正文")).thenReturn(after);
@@ -91,7 +93,14 @@ class SkillAdminControllerTest {
         when(registry.detail("payroll-auditor"))
                 .thenReturn(
                         new SkillDetail(
-                                "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L));
+                                "payroll-auditor",
+                                "薪酬审计",
+                                "正文",
+                                "nacos",
+                                false,
+                                false,
+                                1L,
+                                List.of()));
         when(agentRegistry.list()).thenReturn(List.of(agent("个税顾问", "payroll-auditor")));
 
         PayrollException error =
@@ -114,7 +123,8 @@ class SkillAdminControllerTest {
                                 "nacos",
                                 true,
                                 true,
-                                1L));
+                                1L,
+                                List.of()));
         when(agentRegistry.list())
                 .thenReturn(List.of(agent("薪酬计算专家", RoleSkills.CALCULATOR)));
         when(registry.delete(RoleSkills.CALCULATOR)).thenReturn(true);
@@ -129,7 +139,8 @@ class SkillAdminControllerTest {
     @DisplayName("删除未被引用的自定义技能写入审计")
     void deleteWritesAudit() {
         SkillDetail before =
-                new SkillDetail("payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L);
+                new SkillDetail(
+                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of());
         when(registry.detail("payroll-auditor")).thenReturn(before);
         when(registry.delete("payroll-auditor")).thenReturn(true);
 
@@ -148,10 +159,67 @@ class SkillAdminControllerTest {
     @DisplayName("详情直接透传技能注册表")
     void detailReturnsRegistryValue() {
         SkillDetail detail =
-                new SkillDetail("payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L);
+                new SkillDetail(
+                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of());
         when(registry.detail("payroll-auditor")).thenReturn(detail);
 
         assertSame(detail, controller.detail("payroll-auditor").data());
+    }
+
+    @Test
+    @DisplayName("读取单个文件返回路径与正文")
+    void fileReturnsContent() {
+        when(registry.fileContent("payroll-auditor", "references/policy.md")).thenReturn("政策正文");
+
+        Map<?, ?> data =
+                (Map<?, ?>) controller.file("payroll-auditor", "references/policy.md").data();
+
+        assertEquals("payroll-auditor", data.get("id"));
+        assertEquals("references/policy.md", data.get("path"));
+        assertEquals("政策正文", data.get("content"));
+    }
+
+    @Test
+    @DisplayName("全量替换文件包写入前后快照审计")
+    void replaceFilesWritesAudit() {
+        List<SkillFilePackage.Summary> before =
+                List.of(new SkillFilePackage.Summary("references/old.md", 3, "reference"));
+        List<SkillFilePackage.Summary> after =
+                List.of(
+                        new SkillFilePackage.Summary("references/new.md", 5, "reference"),
+                        new SkillFilePackage.Summary("scripts/run.py", 9, "script"));
+        when(registry.files("payroll-auditor")).thenReturn(before);
+        when(registry.replaceFiles(eq("payroll-auditor"), any())).thenReturn(after);
+
+        Map<?, ?> data =
+                (Map<?, ?>)
+                        controller.replaceFiles(
+                                        "payroll-auditor",
+                                        new SkillAdminController.FilesInput(
+                                                List.of(
+                                                        new SkillAdminController.FileInput(
+                                                                "references/new.md", "hello"))))
+                                .data();
+
+        assertEquals(2, data.get("count"));
+        verify(auditService)
+                .record("skill.files.update", "skill", "payroll-auditor", filesMeta(before), filesMeta(after));
+    }
+
+    @Test
+    @DisplayName("删除单个文件写入审计")
+    void deleteFileWritesAudit() {
+        Map<?, ?> data =
+                (Map<?, ?>) controller.deleteFile("payroll-auditor", "references/old.md").data();
+
+        assertEquals("references/old.md", data.get("deleted"));
+        verify(auditService)
+                .record(
+                        "skill.files.delete",
+                        "skill",
+                        "payroll-auditor",
+                        Map.of("path", "references/old.md"),
+                        Map.of("deleted", "references/old.md"));
     }
 
     private static AgentDefinition agent(String name, String skillId) {
@@ -170,23 +238,40 @@ class SkillAdminControllerTest {
     }
 
     private static SkillSummary summary(String id, String description, String source, boolean builtin) {
-        return new SkillSummary(id, description, source, builtin, builtin, 1L, 10);
+        return new SkillSummary(id, description, source, builtin, builtin, 1L, 10, 0);
     }
 
     private static Map<String, Object> meta(SkillSummary skill) {
-        return meta(
-                new SkillDetail(
-                        skill.id(),
-                        skill.description(),
-                        "x".repeat(skill.contentLength()),
-                        skill.source(),
-                        skill.builtin(),
-                        skill.overridden(),
-                        skill.updatedAt()));
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("id", skill.id());
+        meta.put("description", skill.description());
+        meta.put("source", skill.source());
+        meta.put("builtin", skill.builtin());
+        meta.put("contentLength", skill.contentLength());
+        meta.put("fileCount", skill.fileCount());
+        return meta;
+    }
+
+    private static Map<String, Object> filesMeta(List<SkillFilePackage.Summary> files) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("count", files.size());
+        meta.put(
+                "files",
+                files.stream()
+                        .map(
+                                file -> {
+                                    Map<String, Object> item = new LinkedHashMap<>();
+                                    item.put("path", file.path());
+                                    item.put("size", file.size());
+                                    item.put("kind", file.kind());
+                                    return item;
+                                })
+                        .toList());
+        return meta;
     }
 
     private static Map<String, Object> meta(SkillDetail skill) {
-        Map<String, Object> meta = new java.util.LinkedHashMap<>();
+        Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("id", skill.id());
         meta.put("description", skill.description());
         meta.put("source", skill.source());

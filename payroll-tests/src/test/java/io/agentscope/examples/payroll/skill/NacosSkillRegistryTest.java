@@ -11,11 +11,14 @@ import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillSummary;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class NacosSkillRegistryTest {
+
+    private static final String AUDITOR = "payroll-auditor";
 
     private FakeNacosServer nacos;
 
@@ -175,7 +178,160 @@ class NacosSkillRegistryTest {
         registry.list();
         registry.list();
 
+        // Nacos 为空时只需要列出正文；第二次 list() 命中 TTL 缓存。
         assertEquals(1, nacos.reads.get());
+    }
+
+    @Test
+    @DisplayName("文件包写入 Nacos，重启后仍可读取正文与文件")
+    void storesFilePackage() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+
+        List<SkillFilePackage.Summary> saved =
+                registry.replaceFiles(
+                        AUDITOR,
+                        List.of(
+                                file("references/faq.md", "# FAQ\n口径说明"),
+                                file("scripts/check.py", "print('ok')")));
+
+        assertEquals(
+                List.of("references/faq.md", "scripts/check.py"),
+                saved.stream().map(SkillFilePackage.Summary::path).toList());
+        assertEquals(SkillFilePackage.KIND_REFERENCE, saved.get(0).kind());
+        assertEquals(SkillFilePackage.KIND_SCRIPT, saved.get(1).kind());
+        String raw = nacos.configs.get(AUDITOR + ".files.json");
+        assertTrue(raw.contains("\"mdHash\""), raw);
+
+        NacosSkillRegistry restarted = registry(true);
+        assertEquals(2, restarted.detail(AUDITOR).files().size());
+        assertEquals("# FAQ\n口径说明", restarted.fileContent(AUDITOR, "references/faq.md"));
+    }
+
+    @Test
+    @DisplayName("改正文后自动重绑文件包哈希，避免版本错配")
+    void rebindsHashOnUpdate() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
+
+        registry.update(AUDITOR, "更新描述", roleContent("更新后的审计规则。"));
+
+        SkillDetail detail = registry(true).detail(AUDITOR);
+        assertTrue(detail.content().contains("更新后的审计规则"), detail.content());
+        assertEquals(1, detail.files().size(), "保存正文应重绑文件包，读取时不应丢弃");
+        assertTrue(
+                nacos.configs.get(AUDITOR + ".files.json")
+                        .contains(SkillFilePackage.mdHash(detail.content())),
+                "文件包哈希应跟随最新正文");
+    }
+
+    @Test
+    @DisplayName("哈希不一致的文件包被忽略，正文照常可读")
+    void mismatchedPackageIgnored() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        nacos.configs.put(
+                AUDITOR + ".files.json",
+                SkillFilePackage.compose(
+                        SkillFilePackage.mdHash("旧正文"), List.of(file("references/faq.md", "# FAQ"))));
+
+        SkillDetail detail = registry(true).detail(AUDITOR);
+
+        assertTrue(detail.files().isEmpty(), "哈希不一致时不应展示旧文件");
+        assertTrue(detail.content().contains("独立审计工资数据"), detail.content());
+    }
+
+    @Test
+    @DisplayName("校验文件路径、类型、数量与大小")
+    void validatesFilePackage() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("../secret.md", "x"))));
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("/etc/passwd", "x"))));
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("references/../../x.md", "x"))));
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("docs/a.md", "x"))));
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("scripts/run.txt", "x"))));
+        assertThrows(
+                PayrollException.class,
+                () ->
+                        registry.replaceFiles(
+                                AUDITOR,
+                                List.of(
+                                        file("references/a.md", "x"),
+                                        file("references/a.md", "y"))));
+        assertThrows(
+                PayrollException.class,
+                () ->
+                        registry.replaceFiles(
+                                AUDITOR,
+                                List.of(file("references/big.md", "x".repeat(64 * 1024 + 1)))));
+        List<SkillFilePackage.SkillFile> many =
+                IntStream.rangeClosed(1, 21)
+                        .mapToObj(index -> file("references/f" + index + ".md", "x"))
+                        .toList();
+        assertThrows(PayrollException.class, () -> registry.replaceFiles(AUDITOR, many));
+        List<SkillFilePackage.SkillFile> heavy =
+                IntStream.rangeClosed(1, 5)
+                        .mapToObj(index -> file("references/heavy" + index + ".md", "x".repeat(60_000)))
+                        .toList();
+        assertThrows(PayrollException.class, () -> registry.replaceFiles(AUDITOR, heavy));
+
+        assertFalse(nacos.configs.containsKey(AUDITOR + ".files.json"));
+    }
+
+    @Test
+    @DisplayName("删除单个文件与删除技能联动清理文件包")
+    void deletesFileAndPackage() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        registry.replaceFiles(
+                AUDITOR,
+                List.of(file("references/faq.md", "a"), file("references/tpl.md", "b")));
+
+        registry.deleteFile(AUDITOR, "references/faq.md");
+        assertEquals(
+                List.of("references/tpl.md"),
+                registry.files(AUDITOR).stream().map(SkillFilePackage.Summary::path).toList());
+        assertThrows(
+                PayrollException.class, () -> registry.fileContent(AUDITOR, "references/faq.md"));
+
+        assertTrue(registry.delete(AUDITOR));
+        assertFalse(nacos.configs.containsKey(AUDITOR + ".md"));
+        assertFalse(nacos.configs.containsKey(AUDITOR + ".files.json"));
+    }
+
+    @Test
+    @DisplayName("内置技能需先覆盖到 Nacos 才能上传文件")
+    void builtinNeedsOverrideForFiles() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () ->
+                                registry.replaceFiles(
+                                        RoleSkills.CALCULATOR,
+                                        List.of(file("references/faq.md", "x"))));
+
+        assertTrue(error.getMessage().contains("内置技能"), error.getMessage());
     }
 
     @Test
@@ -201,6 +357,10 @@ class NacosSkillRegistryTest {
                         PayrollException.class,
                         () -> registry.create("payroll-auditor", "", "正文"));
         assertTrue(error.getMessage().contains("Nacos 未启用"), error.getMessage());
+    }
+
+    private static SkillFilePackage.SkillFile file(String path, String content) {
+        return new SkillFilePackage.SkillFile(path, content);
     }
 
     private static String roleContent(String marker) {

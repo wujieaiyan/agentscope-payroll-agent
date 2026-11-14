@@ -310,6 +310,44 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 - 只读回退：`PAYROLL_NACOS_ENABLED=false` 时页面只读，仍可查看内置技能内容；
   已启用但 Nacos 连接失败时列表回退内置技能，保存会提示写入失败。
 
+### 参考文件与脚本文件
+
+技能可携带配套文件（参考文档、脚本），存放在同 group 的 `<技能ID>.files.json`：
+
+```json
+{"version":1,"mdHash":"<正文前16位 SHA-256>","files":[{"path":"references/faq.md","content":"..."}]}
+```
+
+- 路径规则：只允许 `references/**` 与 `scripts/**`，使用 `/` 分隔的相对路径；
+  拒绝 `.`/`..` 段、反斜杠、控制字符；脚本仅允许 `.py`/`.sh`/`.js`。
+- 容量上限：单技能最多 20 个文件、单文件 64KB（65536）、总量 256KB（262144）。
+- `mdHash` 绑定：文件包与正文哈希绑定，正文变更后未重发文件包会被忽略并告警，避免读到过期参考。
+  在管理台保存正文时由后端自动重算并重发文件包；直接改 Nacos 控制台的正文需重新上传文件。
+- 管理台“技能管理”编辑弹窗分为“正文 / 参考文件 / 脚本文件”三个页签，支持新增、编辑、
+  删除单个文件；列表会显示“N 个文件”徽标。内置技能无 Nacos 覆盖版本时文件页签只读。
+- 审计：文件包整体替换记录 `skill.files.update`（含前后文件清单快照），
+  删除单个文件记录 `skill.files.delete`；均不保存文件正文。
+
+### `skill_read` 工具
+
+- 仅对绑定了带文件技能的自定义智能体/流程节点注册；无可用文件时不注册，模型不可见。
+- 一次读取一个文件，超过 8KB 按 UTF-8 安全截断并提示；单轮最多 5 次
+  （`PAYROLL_SKILL_READ_MAX_PER_TURN`），跨团队节点共享额度，每轮开始重置。
+- 当多个已绑定技能存在同名路径时需显式传 `skill_id`，否则返回候选列表让模型选择。
+- 文件内容按需读取，不注入系统提示词；返回结果不带引用编号。
+
+知识库与技能文件的分工：制度、政策等长文与需要引用出处的问答走 `kb_search`（带引用）；
+FAQ 片段、模板、字段口径等短参考走 `skill_read`（不带引用）。
+
+### 技能文件配置项
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PAYROLL_SKILL_FILES_ENABLED` | `true` | 是否加载技能文件包；`false` 时忽略 `<id>.files.json` |
+| `PAYROLL_SKILL_FILE_MAX_BYTES` | `65536` | 单文件上限 |
+| `PAYROLL_SKILL_FILES_MAX_BYTES` | `262144` | 单技能文件总量上限 |
+| `PAYROLL_SKILL_READ_MAX_PER_TURN` | `5` | 单轮 `skill_read` 次数上限 |
+
 ## 流式对话（SSE）
 
 管理台“智能问答”使用 `POST /api/chat/sessions/{sessionId}/stream` 消费 SSE；
