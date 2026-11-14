@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
-import { api } from '../../api/http';
+import { api, upload } from '../../api/http';
+import { can } from '../../stores/auth';
 import { toast } from '../../stores/toast';
 
 const rows = ref([]);
@@ -11,6 +12,10 @@ const showForm = ref(false);
 const saving = ref(false);
 const editing = ref(false);
 const form = reactive(blank());
+const fileInput = ref(null);
+const importing = ref(false);
+const report = ref(null);
+const importable = computed(() => can('import:use'));
 
 const filtered = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
@@ -111,6 +116,38 @@ async function deactivate(row) {
   }
 }
 
+function pickFile() {
+  if (fileInput.value) fileInput.value.click();
+}
+
+async function importExcel(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  if (!window.confirm(`确认导入「${file.name}」？已存在的员工会被覆盖更新，失败行会单独列出。`)) {
+    event.target.value = '';
+    return;
+  }
+  importing.value = true;
+  try {
+    report.value = await upload('/api/import/employees', file);
+    const failed = Number(report.value?.failed || 0);
+    toast(
+      `员工导入完成：成功 ${report.value?.success ?? 0}，失败 ${failed}`,
+      failed ? 'error' : 'success'
+    );
+    await load();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    importing.value = false;
+    event.target.value = '';
+  }
+}
+
+function downloadTemplate() {
+  window.open('/api/import/templates/employees', '_blank');
+}
+
 onMounted(load);
 </script>
 
@@ -127,7 +164,40 @@ onMounted(load);
           <input v-model="includeInactive" type="checkbox" style="height: auto" @change="load" />
           含已停用
         </label>
+        <input ref="fileInput" type="file" accept=".xlsx,.xls" hidden @change="importExcel" />
+        <button v-if="importable" class="ghost" :disabled="importing" @click="pickFile">
+          {{ importing ? '导入中…' : '导入 Excel' }}
+        </button>
+        <button v-if="importable" class="ghost" @click="downloadTemplate">下载模板</button>
         <button class="primary" @click="createEmployee">新增员工</button>
+      </div>
+    </div>
+
+    <div v-if="report" class="card">
+      <div class="card-title">
+        <h3>导入结果 · {{ report.type_label || '员工' }}</h3>
+        <button class="subtle sm" @click="report = null">关闭</button>
+      </div>
+      <p class="hint">
+        共 {{ report.total }} 行，成功 {{ report.success }}，失败 {{ report.failed }}。
+      </p>
+      <div v-if="report.errors && report.errors.length" class="table-wrap" style="max-height: 240px">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>行号</th>
+              <th>工号</th>
+              <th>错误</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="err in report.errors" :key="`${err.row}-${err.employee_id}`">
+              <td class="mono">{{ err.row }}</td>
+              <td class="mono">{{ err.employee_id || '—' }}</td>
+              <td class="error-text">{{ err.message }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 

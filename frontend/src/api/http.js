@@ -42,15 +42,25 @@ export async function api(path, options = {}) {
   return payload ? payload.data : null;
 }
 
-export async function upload(path, file, fields = {}) {
-  const form = new FormData();
-  form.append('file', file);
-  Object.entries(fields).forEach(([key, value]) => form.append(key, value));
-  const response = await fetch(path, { method: 'POST', body: form, credentials: 'same-origin' });
+/** 导入接口接收原始文件字节（@RequestBody byte[]），不是 multipart。 */
+export async function upload(path, file) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+    credentials: 'same-origin',
+  });
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      payload = { status: 'ERROR', message: text };
+    }
+  }
   if (!response.ok || (payload && payload.status === 'ERROR')) {
-    throw new ApiError((payload && payload.message) || `上传失败：HTTP ${response.status}`, response.status);
+    throw new ApiError((payload && payload.message) || `导入失败：HTTP ${response.status}`, response.status);
   }
   return payload ? payload.data : null;
 }

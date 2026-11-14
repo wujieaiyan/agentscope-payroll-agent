@@ -504,7 +504,12 @@ public final class PayrollChatService implements PayrollChat {
                                     this, userId, sessionId, question, calculatorInput, events);
                     if (teamAttempt.succeeded()) {
                         String teamReply = composeReply(teamAttempt.reply(), guard);
-                        events.onText(teamReply);
+                        // 末端节点已实时流出正文时只补尾部差量，避免整段重复推送。
+                        String teamRemainder =
+                                answerRemainder(teamReply, teamAttempt.streamedText());
+                        if (!teamRemainder.isEmpty()) {
+                            events.onText(teamRemainder);
+                        }
                         context.append(question, teamReply);
                         log.info(
                                 "[动态团队] ACTIVE 答复：plan={}，template={}，智能体={}，工具={}，trace={}，耗时={}ms",
@@ -670,6 +675,27 @@ public final class PayrollChatService implements PayrollChat {
      * 提案后由服务端收尾：保留提案前已流式输出的正文，模型在卡片之后的续写一律丢弃，
      * 避免出现「已执行完成」这类与实际状态不符的说法。
      */
+    /**
+     * 计算还需补推到回答流的尾部文本。
+     *
+     * <p>末端节点已实时流出前缀时只发差量，完全一致时不重复发送；若历史推流与最终
+     * 答复对不上（例如条件分支改由其他节点作答），退回整段发送，保证内容正确。
+     */
+    private static String answerRemainder(String reply, String streamed) {
+        String full = reply == null ? "" : reply.trim();
+        String shown = streamed == null ? "" : streamed.trim();
+        if (shown.isEmpty()) {
+            return full;
+        }
+        if (full.equals(shown)) {
+            return "";
+        }
+        if (full.startsWith(shown)) {
+            return full.substring(shown.length());
+        }
+        return full;
+    }
+
     private static String composeReply(String modelText, ActionGuard guard) {
         if (guard == null || !guard.hasProposal()) {
             return modelText == null ? "" : modelText;
@@ -1011,13 +1037,14 @@ public final class PayrollChatService implements PayrollChat {
                             resolved.flow(),
                             baseInput,
                             synchronizedEvents,
-                            (node, input, listener) ->
+                            (node, input, listener, answerStream) ->
                                     executeFlowNode(
                                             node,
                                             resolved.agents().get(node.agentId()),
                                             input,
                                             listener,
-                                            tools));
+                                            tools,
+                                            answerStream));
         } catch (RuntimeException e) {
             throw chatFailure(e);
         }
@@ -1037,7 +1064,11 @@ public final class PayrollChatService implements PayrollChat {
                             + (nodes.isBlank() ? "" : "（有输出的节点：" + nodes + "）")
                             + "，请检查智能体节点输出或模型服务");
         }
-        events.onText(reply);
+        // 末端智能体已实时流出正文时只补尾部差量，避免整段重复推送。
+        String remainder = answerRemainder(reply, outcome.streamedText());
+        if (!remainder.isEmpty()) {
+            events.onText(remainder);
+        }
         log.info(
                 "[流程编排] 最终答复：流程={}，有效节点={}，核算对象={}",
                 resolved.flow().id(),
@@ -1052,8 +1083,10 @@ public final class PayrollChatService implements PayrollChat {
             AgentDefinition agent,
             String input,
             ChatStreamListener listener,
-            Set<String> allTools) {
-        return executeFlowNode(node, agent, input, listener, allTools, roleOf(node.id()));
+            Set<String> allTools,
+            boolean answerStream) {
+        return executeFlowNode(
+                node, agent, input, listener, allTools, roleOf(node.id()), answerStream);
     }
 
     private AgentFlowExecutor.NodeResult executeFlowNode(
@@ -1062,7 +1095,8 @@ public final class PayrollChatService implements PayrollChat {
             String input,
             ChatStreamListener listener,
             Set<String> allTools,
-            String role) {
+            String role,
+            boolean answerStream) {
         if (agent == null) {
             throw new PayrollException("流程节点引用的智能体不存在：" + node.agentId());
         }
@@ -1098,7 +1132,7 @@ public final class PayrollChatService implements PayrollChat {
                             runtime.agent(),
                             input,
                             listener,
-                            false,
+                            answerStream,
                             allTools,
                             recorder,
                             nodeContext);
@@ -1233,21 +1267,23 @@ public final class PayrollChatService implements PayrollChat {
                                 flow,
                                 input,
                                 listener == null ? ChatStreamListener.NOOP : listener,
-                                (node, nodeInput, nodeListener) ->
+                                (node, nodeInput, nodeListener, answerStream) ->
                                         executeFlowNode(
                                                 node,
                                                 agents.get(node.agentId()),
                                                 nodeInput,
                                                 nodeListener,
                                                 tools,
-                                                roles.getOrDefault(node.id(), roleOf(node.id()))));
+                                                roles.getOrDefault(node.id(), roleOf(node.id())),
+                                                answerStream));
                 return new DynamicFlowResult(
                         outcome.reply() == null ? "" : outcome.reply().trim(),
                         outcome.targets(),
                         List.copyOf(stageRuns),
                         List.copyOf(collectedTraces),
                         List.copyOf(tools),
-                        outcome.nodeResults());
+                        outcome.nodeResults(),
+                        outcome.streamedText());
             } finally {
                 useRunScope(previous);
             }
@@ -1983,7 +2019,8 @@ public final class PayrollChatService implements PayrollChat {
             List<PayrollChat.StageRun> stages,
             List<ChatToolTrace> traces,
             List<String> tools,
-            Map<String, AgentFlowExecutor.NodeResult> nodeResults) {
+            Map<String, AgentFlowExecutor.NodeResult> nodeResults,
+            String streamedText) {
 
         public DynamicFlowResult {
             targets = targets == null ? List.of() : List.copyOf(targets);
@@ -1991,6 +2028,17 @@ public final class PayrollChatService implements PayrollChat {
             traces = traces == null ? List.of() : List.copyOf(traces);
             tools = tools == null ? List.of() : List.copyOf(tools);
             nodeResults = nodeResults == null ? Map.of() : Map.copyOf(nodeResults);
+            streamedText = streamedText == null ? "" : streamedText;
+        }
+
+        public DynamicFlowResult(
+                String reply,
+                List<CalcTarget> targets,
+                List<PayrollChat.StageRun> stages,
+                List<ChatToolTrace> traces,
+                List<String> tools,
+                Map<String, AgentFlowExecutor.NodeResult> nodeResults) {
+            this(reply, targets, stages, traces, tools, nodeResults, "");
         }
     }
 

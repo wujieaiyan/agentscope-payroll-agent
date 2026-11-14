@@ -664,6 +664,20 @@ public final class ChatSessionManager implements AutoCloseable {
         return true;
     }
 
+    /** 会话当前进行中的轮次；页面刷新后据此找回 turnId。 */
+    public ChatTurn runningTurn(long userId, long sessionId) {
+        store.requireOwned(sessionId, userId);
+        if (turnStore == null) {
+            return null;
+        }
+        return turnStore.findRunning(sessionId).orElse(null);
+    }
+
+    /** 轮次执行端是否仍持有租约，用于续流时区分「模型慢」与「节点已失效」。 */
+    public boolean leaseAlive(long sessionId) {
+        return leases.alive(sessionId);
+    }
+
     /** 读取轮次：用于续流前确认归属与状态。 */
     public ChatTurn turn(long userId, long sessionId, String turnId) {
         store.requireOwned(sessionId, userId);

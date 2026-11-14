@@ -153,6 +153,19 @@ public final class TurnLeaseService implements AutoCloseable {
                 && existing.expiresAt() > System.currentTimeMillis();
     }
 
+    /** 执行端是否仍在续约；用于判断运行中的轮次是「慢」还是「节点已失效」。 */
+    public boolean alive(long sessionId) {
+        if (redis != null) {
+            try {
+                return Boolean.TRUE.equals(redis.hasKey(KEY_PREFIX + sessionId));
+            } catch (RuntimeException e) {
+                log.debug("[轮次] 查询租约存活失败：sessionId={}，原因={}", sessionId, e.getMessage());
+            }
+        }
+        LocalLease existing = local.get(sessionId);
+        return existing != null && existing.expiresAt() > System.currentTimeMillis();
+    }
+
     public void release(long sessionId, String token) {
         if (token == null) {
             return;

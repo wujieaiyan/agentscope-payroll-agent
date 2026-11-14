@@ -1,15 +1,20 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { api } from '../../api/http';
+import { can } from '../../stores/auth';
 import { toast } from '../../stores/toast';
 
+const route = useRoute();
 const runs = ref([]);
 const loading = ref(false);
 const detail = ref(null);
 const detailLoading = ref(false);
 const showCreate = ref(false);
 const creating = ref(false);
+const repreviewing = ref(false);
 const form = reactive({ period: currentPeriod(), scope: '全部' });
+const adjust = reactive({});
 
 const STATUS_LABEL = {
   DRAFT: '草稿',
@@ -51,6 +56,33 @@ const run = computed(() => detail.value && detail.value.run);
 const items = computed(() => (detail.value && detail.value.items) || []);
 const failures = computed(() => (detail.value && detail.value.failures) || []);
 const approvals = computed(() => (detail.value && detail.value.approvals) || []);
+const editable = computed(() => Boolean(run.value && run.value.status === 'DRAFT' && can('payroll:write')));
+
+const adjustmentCount = computed(() => {
+  let count = 0;
+  items.value.forEach((item) => {
+    const draft = adjust[item.employee_id];
+    if (!draft) return;
+    const bonus = Number(draft.performance_bonus);
+    const allowance = Number(draft.other_allowance);
+    const baseBonus = Number(item.payroll?.performance_bonus ?? 0);
+    const baseAllowance = Number(item.payroll?.other_allowance ?? 0);
+    if (Math.abs(bonus - baseBonus) >= 0.005 || Math.abs(allowance - baseAllowance) >= 0.005) {
+      count += 1;
+    }
+  });
+  return count;
+});
+
+function syncAdjustments() {
+  Object.keys(adjust).forEach((key) => delete adjust[key]);
+  items.value.forEach((item) => {
+    adjust[item.employee_id] = {
+      performance_bonus: String(item.payroll?.performance_bonus ?? ''),
+      other_allowance: String(item.payroll?.other_allowance ?? ''),
+    };
+  });
+}
 
 async function load() {
   loading.value = true;
@@ -67,10 +99,45 @@ async function openRun(id) {
   detailLoading.value = true;
   try {
     detail.value = await api(`/api/runs/${id}`);
+    syncAdjustments();
   } catch (error) {
     toast(error.message, 'error');
   } finally {
     detailLoading.value = false;
+  }
+}
+
+async function repreview() {
+  if (!run.value || !adjustmentCount.value || repreviewing.value) return;
+  const adjustments = [];
+  items.value.forEach((item) => {
+    const draft = adjust[item.employee_id];
+    if (!draft) return;
+    const entry = { employee_id: item.employee_id };
+    const bonus = Number(draft.performance_bonus);
+    const allowance = Number(draft.other_allowance);
+    if (Math.abs(bonus - Number(item.payroll?.performance_bonus ?? 0)) >= 0.005) {
+      entry.performance_bonus = bonus;
+    }
+    if (Math.abs(allowance - Number(item.payroll?.other_allowance ?? 0)) >= 0.005) {
+      entry.other_allowance = allowance;
+    }
+    if (Object.keys(entry).length > 1) adjustments.push(entry);
+  });
+  repreviewing.value = true;
+  try {
+    const created = await api('/api/runs/preview', {
+      method: 'POST',
+      body: { period: run.value.period, scope: run.value.scope, adjustments },
+    });
+    toast(`已按微调重新核算，生成草稿 #${created.run.run_id}`, 'success');
+    await load();
+    detail.value = created;
+    syncAdjustments();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    repreviewing.value = false;
   }
 }
 
@@ -135,7 +202,10 @@ function downloadExcel() {
   window.open(`/api/runs/${run.value.run_id}/excel`, '_blank');
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  if (route.query.run) await openRun(route.query.run);
+});
 </script>
 
 <template>
@@ -266,7 +336,23 @@ onMounted(load);
             </div>
 
             <div class="card">
-              <div class="card-title"><h3>核算明细</h3><small>{{ items.length }} 人</small></div>
+              <div class="card-title">
+                <h3>核算明细</h3>
+                <div class="toolbar">
+                  <small>{{ items.length }} 人</small>
+                  <button
+                    v-if="editable"
+                    class="primary sm"
+                    :disabled="!adjustmentCount || repreviewing"
+                    @click="repreview"
+                  >
+                    {{ repreviewing ? '核算中…' : `按微调重新核算${adjustmentCount ? `（${adjustmentCount}）` : ''}` }}
+                  </button>
+                </div>
+              </div>
+              <p v-if="editable" class="hint" style="margin-top: 0">
+                绩效奖金与其他津贴可直接修改；重新核算会按微调金额生成新的草稿批次。
+              </p>
               <div class="table-wrap" style="max-height: 360px">
                 <table class="table">
                   <thead>
@@ -274,6 +360,8 @@ onMounted(load);
                       <th>工号</th>
                       <th>姓名</th>
                       <th>部门</th>
+                      <th>绩效奖金</th>
+                      <th>其他津贴</th>
                       <th>应发</th>
                       <th>个税</th>
                       <th>实发</th>
@@ -285,6 +373,30 @@ onMounted(load);
                       <td class="mono">{{ item.employee_id }}</td>
                       <td>{{ item.employee_name }}</td>
                       <td>{{ item.department }}</td>
+                      <td class="mono">
+                        <input
+                          v-if="editable && adjust[item.employee_id]"
+                          v-model="adjust[item.employee_id].performance_bonus"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          style="width: 104px"
+                          :aria-label="`${item.employee_name} 绩效奖金`"
+                        />
+                        <span v-else>{{ money(item.payroll?.performance_bonus) }}</span>
+                      </td>
+                      <td class="mono">
+                        <input
+                          v-if="editable && adjust[item.employee_id]"
+                          v-model="adjust[item.employee_id].other_allowance"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          style="width: 104px"
+                          :aria-label="`${item.employee_name} 其他津贴`"
+                        />
+                        <span v-else>{{ money(item.payroll?.other_allowance) }}</span>
+                      </td>
                       <td class="mono">{{ money(item.payroll?.gross_pay) }}</td>
                       <td class="mono">{{ money(item.payroll?.tax?.tax_this_month) }}</td>
                       <td class="mono">{{ money(item.payroll?.net_pay) }}</td>

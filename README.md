@@ -321,11 +321,18 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 | `text` | `{"text":"增量"}` | 追加回答正文（仅核算智能体） |
 | `done` | `{"reply","tools","model","message_id","trace_count"}` | 收尾：移除光标、显示工具汇总、加载“计算依据”面板 |
 | `error` | `{"message":"..."}` | 在当前回答位置显示错误 |
+| `turn` | `{"turn_id","user_message_id","owner_node"}` | 记录轮次号；断线或刷新后据此续流 |
+| `ping` | `{"after_seq":N,"ts":...}` | 空闲心跳（10 秒），不带 `id`，前端忽略 |
 
 思考面板默认展开、结束后自动折叠并显示耗时，可手动重新展开；工具调用以步骤形式混排在同一时间线中。
 前端按 `agent_start/agent_end` 将阶段提示、思考与工具调用归入对应智能体区块，最终答复只取 `text` 事件。
 流式接口的校验错误（空消息、超长）同样以 `event:error` 返回，避免 `Accept: text/event-stream`
 下无法序列化 JSON 错误体。
+
+除 `turn`/`ping` 外的事件都带序号：SSE `id:` 行与 data 内的 `seq` 字段一致。断线后前端用
+`GET /api/chat/sessions/{id}/turns/{turnId}/events?after_seq=N` 从断点重放，指数退避 6 次；
+页面刷新后先查 `/turns/active`，有 RUNNING 轮次则重建气泡从 0 重放。协议、租约守护与配置见
+[docs/chat-resume.md](docs/chat-resume.md)。
 
 ### 计算依据（工具调用级追溯）
 
@@ -678,7 +685,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 另有 MySQL、Redis、Ollama 容器，入口 `http://127.0.0.1:18088`。
 Web/runtime 共享 `kb-data` 与 `output-data` 卷，避免多实例各写本地文件。
 轮次状态、续流、取消、语义缓存与容器化 Ollama 的细节见
-[docs/multi-node-deploy.md](docs/multi-node-deploy.md)。
+[docs/multi-node-deploy.md](docs/multi-node-deploy.md)。断线续传的协议、前端退避策略、租约判定
+与配置项见 [docs/chat-resume.md](docs/chat-resume.md)。
 
 ## 管理台 API
 
@@ -733,6 +741,10 @@ Web/runtime 共享 `kb-data` 与 `output-data` 卷，避免多实例各写本地
 | POST | `/api/chat/sessions/{id}/messages` | 非流式对话，body `{"message":"..."}` |
 | POST | `/api/chat/sessions/{id}/reset` | 清空会话消息并重置智能体上下文 |
 | POST | `/api/chat/sessions/{id}/stream` | 会话 SSE 流式对话（事件协议见上一节） |
+| GET | `/api/chat/sessions/{id}/turns/active` | 当前进行中的轮次（刷新后据此续流） |
+| GET | `/api/chat/sessions/{id}/turns/{turnId}` | 轮次状态与游标 |
+| GET | `/api/chat/sessions/{id}/turns/{turnId}/events?after_seq=N` | 续流：重放并尾随事件直到 `done`，支持 `Last-Event-ID` |
+| POST | `/api/chat/sessions/{id}/turns/{turnId}/cancel` | 取消进行中的轮次 |
 | GET | `/api/admin/permissions` | 权限码与中文名称（需 `role:read`） |
 | GET/POST | `/api/admin/users` | 用户列表 / 新建用户（需 `user:manage`） |
 | PUT | `/api/admin/users/{id}` | 更新姓名、角色、部门与启用状态 |

@@ -20,6 +20,8 @@ x-app-env: &app-env
   PAYROLL_DB_PASSWORD: ${PAYROLL_DB_PASSWORD:-payroll}
   PAYROLL_REDIS_HOST: redis
   PAYROLL_REDIS_PORT: "6379"
+  # 容器内 127.0.0.1 指向自身，宿主机上的 Nacos 需经 host-gateway 访问。
+  PAYROLL_NACOS_SERVER: ${PAYROLL_NACOS_SERVER:-http://host.docker.internal:8848}
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   PAYROLL_MODEL: ${PAYROLL_MODEL:-ollama:qwen2.5:3b-instruct}
   PAYROLL_ADMIN_PASSWORD: ${PAYROLL_ADMIN_PASSWORD:-admin123}

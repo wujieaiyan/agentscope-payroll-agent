@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.domain.ActionProposal;
+import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.FlowEdge;
 import io.agentscope.examples.payroll.domain.FlowNode;
@@ -47,16 +49,37 @@ public final class AgentFlowExecutor {
         }
     }
 
+    /**
+     * 流程执行结果。
+     *
+     * @param streamedText 已经实时推送到回答流的文本（未推流时为空），调用方据此只补发尾部差量
+     */
     public record Outcome(
-            String reply, List<CalcTarget> targets, Map<String, NodeResult> nodeResults) {
+            String reply,
+            List<CalcTarget> targets,
+            Map<String, NodeResult> nodeResults,
+            String streamedText) {
         public Outcome {
             nodeResults = nodeResults == null ? Map.of() : Map.copyOf(nodeResults);
+            streamedText = streamedText == null ? "" : streamedText;
+        }
+
+        public Outcome(
+                String reply, List<CalcTarget> targets, Map<String, NodeResult> nodeResults) {
+            this(reply, targets, nodeResults, "");
         }
     }
 
     @FunctionalInterface
     public interface NodeRunner {
-        NodeResult run(FlowNode node, String input, ChatStreamListener listener);
+        /**
+         * 执行单个节点。
+         *
+         * @param answerStream true 表示该节点输出应实时推送到回答流（text 事件），
+         *     而不是只进入节点记录；由执行器挑选的末端答复节点获得该标记
+         */
+        NodeResult run(
+                FlowNode node, String input, ChatStreamListener listener, boolean answerStream);
     }
 
     private enum Status {
@@ -108,6 +131,12 @@ public final class AgentFlowExecutor {
         Map<String, Boolean> edgeTaken = new HashMap<>();
         Map<String, Integer> ranks = ranks(nodes, outgoing, start);
         Map<String, Set<String>> ancestors = ancestors(nodes.keySet(), incoming);
+        // 只有唯一的末端智能体才实时推流，避免并行分支同时写入同一条回答流。
+        String answerNodeId = electAnswerNode(nodes, outgoing);
+        StringBuilder streamedAnswer = new StringBuilder();
+        if (answerNodeId != null) {
+            log.info("[流程编排] 实时推流节点：{}", answerNodeId);
+        }
 
         status.put(start.id(), Status.DONE);
         for (FlowEdge edge : outgoing.get(start.id())) {
@@ -155,9 +184,12 @@ public final class AgentFlowExecutor {
 
                 List<Future<NodeRun>> futures = new ArrayList<>();
                 for (FlowNode node : ready) {
+                    boolean answerStream = node.id().equals(answerNodeId);
+                    ChatStreamListener nodeEvents =
+                            answerStream ? new AnswerStreamEvents(events, streamedAnswer) : events;
                     futures.add(pool.submit(() -> runNode(
-                            node, baseInput, events, runner, incoming, edgeTaken, results,
-                            ancestors, nodes, ranks)));
+                            node, baseInput, nodeEvents, runner, incoming, edgeTaken, results,
+                            ancestors, nodes, ranks, answerStream)));
                 }
                 for (int i = 0; i < ready.size(); i++) {
                     FlowNode node = ready.get(i);
@@ -218,7 +250,7 @@ public final class AgentFlowExecutor {
                 status.values().stream().filter(value -> value == Status.SKIPPED).count(),
                 reply.length(),
                 System.currentTimeMillis() - startedAt);
-        return new Outcome(reply, List.copyOf(targets), results);
+        return new Outcome(reply, List.copyOf(targets), results, streamedAnswer.toString());
     }
 
     private static Map<String, FlowNode> indexNodes(FlowDefinition flow) {
@@ -254,7 +286,8 @@ public final class AgentFlowExecutor {
             Map<String, NodeResult> results,
             Map<String, Set<String>> ancestors,
             Map<String, FlowNode> nodes,
-            Map<String, Integer> ranks) {
+            Map<String, Integer> ranks,
+            boolean answerStream) {
         String type = FlowValidator.upper(node.type());
         if (FlowNode.TYPE_CONDITION.equals(type)) {
             boolean value = evaluate(
@@ -266,7 +299,7 @@ public final class AgentFlowExecutor {
         String input = buildInput(
                 node, baseInput, incoming, edgeTaken, results, nodes, ranks);
         long startedAt = System.currentTimeMillis();
-        NodeResult result = runner.run(node, input, events);
+        NodeResult result = runner.run(node, input, events, answerStream);
         log.info(
                 "[流程编排] 节点完成：{}（{}），耗时={}ms，输出={}字，核算对象={}",
                 node.id(),
@@ -275,6 +308,137 @@ public final class AgentFlowExecutor {
                 result.text().length(),
                 result.targets().size());
         return new NodeRun(node, result, null);
+    }
+
+    /**
+     * 选出唯一的“末端智能体”作为实时推流节点：它的出边经过条件/结束节点后
+     * 不再到达任何智能体节点，因此其输出就是本次流程的最终答复。
+     *
+     * <p>存在多个末端智能体（并行分支或条件两条腿各自收尾）时返回 null，
+     * 保持“流程结束后一次性给出答复”，避免多条分支交织进同一个回答流。
+     */
+    private static String electAnswerNode(
+            Map<String, FlowNode> nodes, Map<String, List<FlowEdge>> outgoing) {
+        List<String> terminals = new ArrayList<>();
+        for (FlowNode node : nodes.values()) {
+            if (!FlowNode.TYPE_AGENT.equals(FlowValidator.upper(node.type()))) {
+                continue;
+            }
+            if (!reachesAgent(node.id(), outgoing, nodes)) {
+                terminals.add(node.id());
+            }
+        }
+        return terminals.size() == 1 ? terminals.get(0) : null;
+    }
+
+    private static boolean reachesAgent(
+            String startId, Map<String, List<FlowEdge>> outgoing, Map<String, FlowNode> nodes) {
+        Set<String> visited = new HashSet<>();
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push(startId);
+        while (!stack.isEmpty()) {
+            String current = stack.pop();
+            for (FlowEdge edge : outgoing.getOrDefault(current, List.of())) {
+                String target = edge.target();
+                if (!visited.add(target)) {
+                    continue;
+                }
+                FlowNode next = nodes.get(target);
+                if (next != null && FlowNode.TYPE_AGENT.equals(FlowValidator.upper(next.type()))) {
+                    return true;
+                }
+                stack.push(target);
+            }
+        }
+        return false;
+    }
+
+    /** 转发全部事件，并记录真正推送到回答流（text 事件）的文本，供收尾时补齐差量。 */
+    private static final class AnswerStreamEvents implements ChatStreamListener {
+
+        private final ChatStreamListener delegate;
+        private final StringBuilder recorded;
+
+        AnswerStreamEvents(ChatStreamListener delegate, StringBuilder recorded) {
+            this.delegate = delegate == null ? ChatStreamListener.NOOP : delegate;
+            this.recorded = recorded;
+        }
+
+        @Override
+        public void onStart(String model) {
+            delegate.onStart(model);
+        }
+
+        @Override
+        public void onAgentStart(String agent, String label) {
+            delegate.onAgentStart(agent, label);
+        }
+
+        @Override
+        public void onAgentOutput(String agent, String delta) {
+            delegate.onAgentOutput(agent, delta);
+        }
+
+        @Override
+        public void onAgentEnd(String agent) {
+            delegate.onAgentEnd(agent);
+        }
+
+        @Override
+        public void onThinking(String delta) {
+            delegate.onThinking(delta);
+        }
+
+        @Override
+        public void onPhase(String label) {
+            delegate.onPhase(label);
+        }
+
+        @Override
+        public void onContextCompressed(int compressed, int kept, int summarizedTotal) {
+            delegate.onContextCompressed(compressed, kept, summarizedTotal);
+        }
+
+        @Override
+        public void onToolStart(String toolCallId, String toolName) {
+            delegate.onToolStart(toolCallId, toolName);
+        }
+
+        @Override
+        public void onToolArgs(String toolCallId, String delta) {
+            delegate.onToolArgs(toolCallId, delta);
+        }
+
+        @Override
+        public void onToolResult(String toolCallId, String toolName, String state) {
+            delegate.onToolResult(toolCallId, toolName, state);
+        }
+
+        @Override
+        public void onToolResult(
+                String toolCallId, String toolName, String state, ChatToolTrace trace) {
+            delegate.onToolResult(toolCallId, toolName, state, trace);
+        }
+
+        @Override
+        public void onText(String delta) {
+            if (delta != null && !delta.isEmpty()) {
+                synchronized (recorded) {
+                    recorded.append(delta);
+                }
+            }
+            delegate.onText(delta);
+        }
+
+        @Override
+        public void onActionProposal(ActionProposal proposal) {
+            delegate.onActionProposal(proposal);
+        }
+
+        @Override
+        public void onDone(PayrollChat.Reply reply) {
+            delegate.onDone(reply);
+        }
     }
 
     private static NodeRun await(Future<NodeRun> future, FlowNode node) {

@@ -730,7 +730,263 @@ table.table tbody tr:hover { background: var(--primary-tint); }
 }
 @media (max-width: 860px) {
   .shell { grid-template-columns: 72px minmax(0, 1fr); }
-  .shell .brand-text, .shell .nav-title, .shell .nav-item span:not(.nav-icon), .shell .collapse-btn { display: none; }
+  .shell .brand-text, .shell .nav-title, .shell .nav-group-title, .shell .nav-item span:not(.nav-icon), .shell .collapse-btn { display: none; }
+  .shell .nav-group.collapsed .nav-children { display: block; }
   .chat-view { grid-template-columns: minmax(0, 1fr); }
   .session-panel { display: none; }
+}
+
+/* ---------------------------------------------------------------- 可折叠分组菜单 */
+
+.nav-group-title {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px 6px;
+  border: 0;
+  background: transparent;
+  color: rgba(201, 209, 217, 0.55);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.16s ease;
+}
+.nav-group-title:hover { color: rgba(255, 255, 255, 0.78); }
+.nav-caret {
+  width: 0;
+  height: 0;
+  flex: none;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transform: rotate(90deg);
+  transition: transform 0.16s ease;
+}
+.nav-group.collapsed .nav-caret { transform: rotate(0deg); }
+.nav-group.collapsed .nav-children { display: none; }
+.shell.collapsed .nav-group-title { display: none; }
+.shell.collapsed .nav-group.collapsed .nav-children { display: block; }
+.shell.collapsed .nav-group { margin-bottom: 6px; }
+.shell.collapsed .nav-group + .nav-group { padding-top: 6px; border-top: 1px solid var(--sidebar-line); }
+
+/* ---------------------------------------------------------------- 智能体卡片 */
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.agent-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-card-head { display: flex; align-items: center; gap: 10px; }
+.agent-avatar {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 22px;
+  line-height: 1;
+}
+.agent-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.agent-title strong {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-tags .tag {
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+.agent-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  flex: 1;
+}
+.agent-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.agent-card-foot .spacer { flex: 1; }
+
+/* ---------------------------------------------------------------- 流程编排画布 */
+
+.flows-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 268px);
+  grid-template-areas:
+    "main list"
+    "main props";
+  gap: 16px;
+  align-items: start;
+}
+.flow-list {
+  grid-area: list;
+  margin-bottom: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-list .card-title { margin-bottom: 0; }
+.flow-list > button.primary { width: 100%; }
+.flow-item {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+.flow-item:hover { background: var(--surface-3); }
+.flow-item.active { border-color: var(--primary); background: var(--primary-soft); }
+.flow-item p { margin: 3px 0 0; }
+.flow-item-head { display: flex; align-items: center; gap: 8px; }
+.flow-item-head strong { font-size: 13px; }
+.flow-item-head .badge { margin-left: auto; }
+.flow-storage { margin: 6px 0 0; word-break: break-all; line-height: 1.5; }
+.flow-main {
+  grid-area: main;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.flow-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.flow-name { flex: 1 1 180px; min-width: 120px; }
+.flow-canvas-wrap {
+  display: flex;
+  height: 540px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.flow-palette {
+  width: 118px;
+  flex: none;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-palette p { margin: 2px 0 0; line-height: 1.45; }
+.flow-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: grab;
+  user-select: none;
+  font-size: 13px;
+}
+.flow-palette-item:hover { border-color: var(--primary); color: var(--primary); }
+.flow-palette-icon { font-size: 15px; line-height: 1; }
+.flow-canvas { flex: 1; min-width: 0; height: 100%; }
+.flow-canvas .vue-flow__node {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  width: 190px;
+  font-size: 12px;
+  box-shadow: none;
+}
+.flow-canvas .vue-flow__node-start,
+.flow-canvas .vue-flow__node-end { width: 106px; }
+.flow-canvas .vue-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--primary);
+  border: 2px solid #fff;
+}
+.flow-canvas .vue-flow__edge-path { stroke: var(--muted); stroke-width: 1.6; }
+.flow-canvas .vue-flow__edge.selected .vue-flow__edge-path { stroke: var(--primary); }
+.flow-canvas .vue-flow__edge-textbg { fill: var(--surface-2); }
+.flow-canvas .vue-flow__edge-text { font-size: 11px; fill: var(--text-soft); }
+.flow-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+}
+.flow-start { justify-content: center; background: var(--success-soft); border-color: #b7ebd0; color: #0e9f57; font-weight: 600; }
+.flow-end { justify-content: center; background: var(--accent-soft); border-color: #ffd591; color: #c26a00; font-weight: 600; }
+.flow-agent { border-left: 3px solid var(--primary); }
+.flow-avatar { font-size: 20px; line-height: 1; flex: none; display: inline-grid; place-items: center; }
+.flow-node-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.flow-node-text small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-condition {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: var(--accent-soft);
+  border-color: #ffd591;
+}
+.flow-condition small { color: #c26a00; font-size: 11px; }
+.flow-branch { position: absolute; right: -24px; font-size: 11px; color: var(--muted); }
+.flow-branch-true { top: 22%; }
+.flow-branch-false { top: 58%; }
+.flow-desc { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.flow-desc textarea { width: 100%; font: inherit; }
+.flow-props { grid-area: props; margin-bottom: 0; display: flex; flex-direction: column; gap: 10px; }
+.flow-props h3 { margin: 0 0 2px; font-size: 14.5px; }
+.flow-props label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.flow-props hr { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+.flow-errors {
+  border: 1px solid #f8cdc5;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.flow-errors p { margin: 2px 0; }
+
+@media (max-width: 1100px) {
+  .flows-page {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "main"
+      "list"
+      "props";
+  }
+  .flow-canvas-wrap { height: 460px; }
 }

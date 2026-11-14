@@ -37,7 +37,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> {
+                        (node, input, listener, answerStream) -> {
                             inputs.add(node.id() + "|" + input);
                             return new AgentFlowExecutor.NodeResult(
                                     node.id().toUpperCase(), List.of(), false);
@@ -63,7 +63,7 @@ class AgentFlowExecutorTest {
                 flow,
                 QUESTION,
                 ChatStreamListener.NOOP,
-                (node, input, listener) -> {
+                (node, input, listener, answerStream) -> {
                     inputs.add(node.id() + "|" + input);
                     return new AgentFlowExecutor.NodeResult(
                             node.id().toUpperCase(), List.of(), false);
@@ -89,7 +89,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> {
+                        (node, input, listener, answerStream) -> {
                             executed.add(node.id());
                             boolean calc = "calc".equals(node.id());
                             return new AgentFlowExecutor.NodeResult(
@@ -116,7 +116,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> {
+                        (node, input, listener, answerStream) -> {
                             executed.add(node.id());
                             return new AgentFlowExecutor.NodeResult(
                                     node.id().toUpperCase(), List.of(), false);
@@ -137,7 +137,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> new AgentFlowExecutor.NodeResult(
+                        (node, input, listener, answerStream) -> new AgentFlowExecutor.NodeResult(
                                 node.id().toUpperCase(),
                                 List.of(),
                                 "calc".equals(node.id())));
@@ -155,7 +155,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> new AgentFlowExecutor.NodeResult(
+                        (node, input, listener, answerStream) -> new AgentFlowExecutor.NodeResult(
                                 "calc".equals(node.id())
                                         ? "本月工资 10000 元"
                                         : node.id().toUpperCase(),
@@ -180,7 +180,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> {
+                        (node, input, listener, answerStream) -> {
                             executed.add(node.id());
                             try {
                                 barrier.await(3, TimeUnit.SECONDS);
@@ -215,7 +215,7 @@ class AgentFlowExecutorTest {
                 flow,
                 QUESTION,
                 ChatStreamListener.NOOP,
-                (node, input, listener) -> {
+                (node, input, listener, answerStream) -> {
                     if ("join".equals(node.id())) {
                         joinInputs.add(input);
                     }
@@ -245,7 +245,7 @@ class AgentFlowExecutorTest {
                 flow,
                 QUESTION,
                 ChatStreamListener.NOOP,
-                (node, input, listener) -> {
+                (node, input, listener, answerStream) -> {
                     if ("validator".equals(node.id())) {
                         inputs.add(input);
                     }
@@ -293,7 +293,7 @@ class AgentFlowExecutorTest {
                         flow,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) -> {
+                        (node, input, listener, answerStream) -> {
                             executed.add(node.id());
                             return new AgentFlowExecutor.NodeResult(
                                     node.id().toUpperCase(), List.of(), false);
@@ -319,7 +319,7 @@ class AgentFlowExecutorTest {
                                 flow,
                                 QUESTION,
                                 ChatStreamListener.NOOP,
-                                (node, input, listener) -> {
+                                (node, input, listener, answerStream) -> {
                                     throw new PayrollException("模型不可用");
                                 }));
         assertTrue(error.getMessage().contains("模型不可用"), error.getMessage());
@@ -338,7 +338,7 @@ class AgentFlowExecutorTest {
                                 noEnd,
                                 QUESTION,
                                 ChatStreamListener.NOOP,
-                                (node, input, listener) ->
+                                (node, input, listener, answerStream) ->
                                         new AgentFlowExecutor.NodeResult(
                                                 "A", List.of(), false)));
         assertTrue(missingEnd.getMessage().contains("缺少开始或结束节点"), missingEnd.getMessage());
@@ -352,7 +352,7 @@ class AgentFlowExecutorTest {
                                 noAnswer,
                                 QUESTION,
                                 ChatStreamListener.NOOP,
-                                (node, input, listener) ->
+                                (node, input, listener, answerStream) ->
                                         new AgentFlowExecutor.NodeResult(
                                                 "", List.of(), false)));
         assertTrue(empty.getMessage().contains("没有产生答复内容"), empty.getMessage());
@@ -370,7 +370,7 @@ class AgentFlowExecutorTest {
                         brokenEdge,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) ->
+                        (node, input, listener, answerStream) ->
                                 new AgentFlowExecutor.NodeResult("A", List.of(), false)));
 
         FlowDefinition duplicate =
@@ -382,8 +382,79 @@ class AgentFlowExecutorTest {
                         duplicate,
                         QUESTION,
                         ChatStreamListener.NOOP,
-                        (node, input, listener) ->
+                        (node, input, listener, answerStream) ->
                                 new AgentFlowExecutor.NodeResult("A", List.of(), false)));
+    }
+
+    @Test
+    @DisplayName("唯一末端智能体的输出实时推流，并记录已流出的文本")
+    void streamsTerminalAgentAnswer() {
+        List<String> deltas = Collections.synchronizedList(new ArrayList<>());
+        ChatStreamListener listener =
+                new ChatStreamListener() {
+                    @Override
+                    public void onText(String delta) {
+                        deltas.add(delta);
+                    }
+                };
+        FlowDefinition flow =
+                flow(List.of(start(), agent("a", "A"), agent("b", "B"), end()),
+                        List.of(edge("e1", "start", "a"), edge("e2", "a", "b"),
+                                edge("e3", "b", "end")));
+
+        AgentFlowExecutor.Outcome outcome =
+                AgentFlowExecutor.execute(
+                        flow,
+                        QUESTION,
+                        listener,
+                        (node, input, nodeListener, answerStream) -> {
+                            String text = node.id().toUpperCase();
+                            if (answerStream) {
+                                nodeListener.onText(text.substring(0, 1));
+                                if (text.length() > 1) {
+                                    nodeListener.onText(text.substring(1));
+                                }
+                            }
+                            return new AgentFlowExecutor.NodeResult(text, List.of(), false);
+                        });
+
+        assertEquals(List.of("B"), deltas);
+        assertEquals("B", outcome.streamedText());
+        assertEquals("B", outcome.reply());
+    }
+
+    @Test
+    @DisplayName("存在多个末端智能体时不推流，保持结束后整段答复")
+    void skipsStreamingWithMultipleTerminalAgents() {
+        List<String> deltas = Collections.synchronizedList(new ArrayList<>());
+        ChatStreamListener listener =
+                new ChatStreamListener() {
+                    @Override
+                    public void onText(String delta) {
+                        deltas.add(delta);
+                    }
+                };
+        FlowDefinition flow =
+                flow(List.of(start(), agent("a", "A"), agent("b", "B"), end()),
+                        List.of(edge("e1", "start", "a"), edge("e2", "start", "b"),
+                                edge("e3", "a", "end"), edge("e4", "b", "end")));
+
+        AgentFlowExecutor.Outcome outcome =
+                AgentFlowExecutor.execute(
+                        flow,
+                        QUESTION,
+                        listener,
+                        (node, input, nodeListener, answerStream) -> {
+                            if (answerStream) {
+                                nodeListener.onText(node.id());
+                            }
+                            return new AgentFlowExecutor.NodeResult(
+                                    node.id().toUpperCase(), List.of(), false);
+                        });
+
+        assertTrue(deltas.isEmpty(), deltas.toString());
+        assertEquals("", outcome.streamedText());
+        assertEquals("A\n\nB", outcome.reply());
     }
 
     /** start → calc → check；TRUE → yes → end，FALSE → no → end。 */

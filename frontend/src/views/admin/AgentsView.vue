@@ -7,8 +7,10 @@ const rows = ref([]);
 const meta = ref({ writable: false, location: '-' });
 const skillOptions = ref([]);
 const active = ref({ agentId: '', name: '', configured: '', available: true });
+const stats = ref({ window_days: 0, record_count: 0, feedback_count: 0, agents: [] });
 const keyword = ref('');
 const statusFilter = ref('');
+const visibilityFilter = ref('');
 const loading = ref(false);
 const showForm = ref(false);
 const editing = ref(false);
@@ -19,6 +21,7 @@ const filtered = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
   return rows.value.filter((row) => {
     if (statusFilter.value && row.status !== statusFilter.value) return false;
+    if (visibilityFilter.value && row.visibility !== visibilityFilter.value) return false;
     if (!needle) return true;
     return [row.id, row.name, row.description, ...(row.tags || [])]
       .filter(Boolean)
@@ -42,16 +45,18 @@ function blank() {
 async function load() {
   loading.value = true;
   try {
-    const [agents, metaValue, skills, activeValue] = await Promise.all([
+    const [agents, metaValue, skills, activeValue, statsValue] = await Promise.all([
       api('/api/admin/agents'),
       api('/api/admin/agents/meta'),
       api('/api/admin/agents/skills'),
       api('/api/admin/agents/active'),
+      api('/api/admin/agent-stats'),
     ]);
     rows.value = agents || [];
     meta.value = metaValue || meta.value;
     skillOptions.value = skills || [];
     active.value = activeValue || active.value;
+    stats.value = statsValue || stats.value;
   } catch (error) {
     toast(error.message, 'error');
   } finally {
@@ -146,6 +151,28 @@ async function clearActive() {
   }
 }
 
+function skillCount(row) {
+  return (row.skill_ids || row.skillIds || []).length;
+}
+
+function visibilityLabel(value) {
+  return { PUBLIC: '公开', PRIVATE: '私有' }[value] || value;
+}
+
+function statRows() {
+  return stats.value.agents || [];
+}
+
+function numberText(value, digits) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(digits) : '—';
+}
+
+function percentText(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : '—';
+}
+
 onMounted(load);
 </script>
 
@@ -168,6 +195,11 @@ onMounted(load);
           <option value="ONLINE">在线</option>
           <option value="OFFLINE">离线</option>
         </select>
+        <select v-model="visibilityFilter" style="width: 120px">
+          <option value="">全部可见性</option>
+          <option value="PUBLIC">公开</option>
+          <option value="PRIVATE">私有</option>
+        </select>
         <button class="primary" :disabled="!meta.writable" @click="createAgent">新增智能体</button>
       </div>
     </div>
@@ -182,62 +214,92 @@ onMounted(load);
           {{ active.agentId || 'pipeline' }}
         </span>
         <span class="hint">配置值：{{ active.configured || '未配置' }}</span>
-        <span v-if="!active.available" class="error-text">配置的智能体不可用，已回退到流水线</span>
+        <span v-if="!active.available" class="error-text">配置的智能体不可用，已阻断回退流水线</span>
         <span class="spacer"></span>
         <button class="ghost sm" :disabled="!active.configured" @click="clearActive">取消全局智能体</button>
       </div>
     </div>
 
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>名称</th>
-            <th>描述</th>
-            <th>标签</th>
-            <th>技能</th>
-            <th>可见性</th>
-            <th>状态</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in filtered" :key="row.id">
-            <td class="mono">{{ row.id }}</td>
-            <td>
-              <span style="margin-right: 6px">{{ row.avatar || '🤖' }}</span>{{ row.name }}
-            </td>
-            <td class="muted" style="max-width: 320px">{{ row.description }}</td>
-            <td>
-              <span v-for="tag in row.tags || []" :key="tag" class="badge">{{ tag }}</span>
-            </td>
-            <td class="muted">{{ (row.skill_ids || row.skillIds || []).join('、') || '—' }}</td>
-            <td>{{ row.visibility }}</td>
-            <td>
-              <span class="badge" :class="row.status === 'ONLINE' ? 'green' : 'red'">
-                {{ row.status === 'ONLINE' ? '在线' : '离线' }}
-              </span>
-            </td>
-            <td>
-              <div class="cell-actions">
-                <button class="subtle sm" :disabled="!meta.writable" @click="editAgent(row)">编辑</button>
-                <button
-                  class="subtle sm"
-                  :disabled="!meta.writable || row.status !== 'ONLINE' || active.agentId === row.id"
-                  @click="activate(row)"
-                >
-                  设为全局
-                </button>
-                <button class="subtle sm" :disabled="!meta.writable" @click="remove(row)">删除</button>
-              </div>
-            </td>
-          </tr>
-          <tr v-if="!filtered.length">
-            <td colspan="8" class="empty">{{ loading ? '加载中…' : '没有符合条件的智能体' }}</td>
-          </tr>
-        </tbody>
-      </table>
+    <p v-if="loading && !rows.length" class="hint">加载中…</p>
+    <p v-else-if="!filtered.length" class="empty">没有符合条件的智能体</p>
+    <div v-else class="agent-grid">
+      <article v-for="row in filtered" :key="row.id" class="agent-card">
+        <div class="agent-card-head">
+          <span class="agent-avatar">{{ row.avatar || '🤖' }}</span>
+          <div class="agent-title">
+            <strong>{{ row.name }}</strong>
+            <span class="hint mono">{{ row.id }}</span>
+          </div>
+          <span v-if="active.agentId === row.id" class="badge blue">当前核算</span>
+        </div>
+        <div class="agent-tags">
+          <span v-for="tag in row.tags || []" :key="tag" class="tag">{{ tag }}</span>
+          <span class="tag">技能 {{ skillCount(row) }}</span>
+        </div>
+        <p class="agent-desc">{{ row.description || '（无描述）' }}</p>
+        <div class="agent-card-foot">
+          <span class="badge" :class="row.status === 'ONLINE' ? 'green' : 'red'">
+            {{ row.status === 'ONLINE' ? '在线' : '离线' }}
+          </span>
+          <span class="badge">{{ visibilityLabel(row.visibility) }}</span>
+          <span class="spacer"></span>
+          <div class="cell-actions">
+            <button
+              class="subtle sm"
+              :disabled="!meta.writable || row.status !== 'ONLINE' || active.agentId === row.id"
+              @click="activate(row)"
+            >
+              设为全局
+            </button>
+            <button class="subtle sm" :disabled="!meta.writable" @click="editAgent(row)">编辑</button>
+            <button class="subtle sm" :disabled="!meta.writable" @click="remove(row)">删除</button>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <h3>运行评分榜</h3>
+        <small>
+          近 {{ stats.window_days || 0 }} 天 · 轨迹 {{ stats.record_count || 0 }} · 反馈
+          {{ stats.feedback_count || 0 }}
+        </small>
+      </div>
+      <p class="hint">
+        综合分 = 客观轨迹 60% + 用户反馈 40%，再按样本量向角色先验收缩；样本少于 5 条标记冷启动。
+      </p>
+      <div v-if="!statRows().length" class="empty">还没有运行样本</div>
+      <div v-else class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>智能体</th>
+              <th>样本</th>
+              <th>综合分</th>
+              <th>客观分 O</th>
+              <th>反馈分 F</th>
+              <th>成功率</th>
+              <th>P50 时延</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in statRows()" :key="row.agent_id">
+              <td>
+                {{ row.name }}
+                <span v-if="row.cold_start" class="badge orange">冷启动</span>
+                <span v-if="row.name !== row.agent_id" class="hint mono">{{ row.agent_id }}</span>
+              </td>
+              <td>{{ row.samples }}</td>
+              <td>{{ numberText(row.final_score, 3) }}</td>
+              <td>{{ numberText(row.objective_score, 3) }}</td>
+              <td>{{ numberText(row.feedback_score, 3) }}</td>
+              <td>{{ row.samples ? percentText(row.success_rate) : '—' }}</td>
+              <td>{{ row.p50_latency_ms ? `${row.p50_latency_ms} ms` : '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <div v-if="showForm" class="modal-mask" @click.self="showForm = false">

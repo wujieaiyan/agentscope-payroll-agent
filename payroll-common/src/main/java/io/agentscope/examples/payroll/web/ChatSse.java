@@ -210,7 +210,7 @@ public final class ChatSse {
         }
         Map<String, Object> payload = new LinkedHashMap<>(data);
         payload.put("seq", seq);
-        channel.send(event, payload);
+        channel.send(event, payload, seq);
     }
 
     /** 续流时重放事件：补齐序号，前端据此去重并记录断点。 */
@@ -226,7 +226,16 @@ public final class ChatSse {
             data = new LinkedHashMap<>();
         }
         data.put("seq", event.seq());
-        channel.send(event.event(), data);
+        channel.send(event.event(), data, event.seq());
+    }
+
+    /** 空闲心跳：不带 SSE id，避免污染 Last-Event-ID 游标。 */
+    public static void heartbeat(Channel channel, long afterSeq) {
+        channel.send(
+                "ping",
+                payload(
+                        "after_seq", Math.max(0, afterSeq),
+                        "ts", System.currentTimeMillis()));
     }
 
 
@@ -251,11 +260,19 @@ public final class ChatSse {
         }
 
         void send(String event, Map<String, Object> data) {
+            send(event, data, 0L);
+        }
+
+        void send(String event, Map<String, Object> data, long id) {
             if (closed || emitter == null) {
                 return;
             }
             try {
-                emitter.send(SseEmitter.event().name(event).data(JsonSupport.toJson(data)));
+                SseEmitter.SseEventBuilder builder = SseEmitter.event().name(event);
+                if (id > 0) {
+                    builder.id(Long.toString(id));
+                }
+                emitter.send(builder.data(JsonSupport.toJson(data)));
             } catch (IOException | IllegalStateException e) {
                 closed = true;
                 log.debug("SSE 连接已关闭，停止推送 {} 事件", event);

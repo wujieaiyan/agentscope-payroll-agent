@@ -17,6 +17,7 @@ import io.agentscope.examples.payroll.service.TurnEventBus;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -31,6 +32,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -45,6 +47,12 @@ public class ChatSessionController {
     private static final Logger log = LoggerFactory.getLogger(ChatSessionController.class);
     private static final long SSE_TIMEOUT_MS = 600_000L;
     private static final long SYNC_TIMEOUT_MS = 180_000L;
+    /** 续流空闲心跳间隔：让前端与反向代理知道连接仍然有效。 */
+    private static final long TURN_HEARTBEAT_MS = 10_000L;
+    /** 无事件超过该时长后校验租约；租约有效说明模型/工具仍在执行。 */
+    private static final long TURN_LEASE_GRACE_MS = 45_000L;
+    /** 单轮续流最长等待，防止异常轮次长期占用线程。 */
+    private static final long TURN_HARD_LIMIT_MS = 30 * 60_000L;
 
     private final ChatSessionManager manager;
     private final ChatFeedbackService feedbackService;
@@ -379,6 +387,23 @@ public class ChatSessionController {
         }
     }
 
+    /** 会话当前进行中的轮次：页面刷新后先查这里，再决定是否续流。 */
+    @GetMapping("/{sessionId}/turns/active")
+    public ApiResponse activeTurn(@PathVariable long sessionId, HttpServletRequest request) {
+        ChatTurn turn = manager.runningTurn(userId(request), sessionId);
+        if (turn == null) {
+            return ApiResponse.ok(null);
+        }
+        // 字段允许为空，不能用 Map.of
+        Map<String, Object> view = new java.util.LinkedHashMap<>();
+        view.put("turn_id", turn.turnId());
+        view.put("status", turn.status());
+        view.put("last_seq", turn.lastSeq());
+        view.put("owner_node", turn.ownerNode());
+        view.put("started_at", turn.startedAt());
+        return ApiResponse.ok(view);
+    }
+
     /** 轮次状态：前端断线后先查状态，再决定续流还是直接展示失败。 */
     @GetMapping("/{sessionId}/turns/{turnId}")
     public ApiResponse turnStatus(
@@ -405,6 +430,7 @@ public class ChatSessionController {
             @PathVariable long sessionId,
             @PathVariable String turnId,
             @RequestParam(name = "after_seq", defaultValue = "0") long afterSeq,
+            @RequestHeader(name = "Last-Event-ID", required = false) String lastEventId,
             HttpServletRequest request) {
         long userId = userId(request);
         manager.turn(userId, sessionId, turnId);
@@ -412,8 +438,9 @@ public class ChatSessionController {
         emitter.onTimeout(emitter::complete);
         emitter.onError(error -> emitter.complete());
         ChatSse.Channel channel = new ChatSse.Channel(emitter);
+        long from = Math.max(Math.max(0, afterSeq), parseEventId(lastEventId));
         chatStreamExecutor.execute(
-                () -> resumeEvents(userId, sessionId, turnId, afterSeq, channel, emitter));
+                () -> resumeEvents(userId, sessionId, turnId, from, channel, emitter));
         return emitter;
     }
 
@@ -425,7 +452,11 @@ public class ChatSessionController {
             ChatSse.Channel channel,
             SseEmitter emitter) {
         long lastSeq = Math.max(0, afterSeq);
-        long lastActivity = System.currentTimeMillis();
+        long now = System.currentTimeMillis();
+        long lastEventAt = now;
+        long lastPingAt = now;
+        long startedAt = now;
+        boolean gapWarned = false;
         try {
             while (!channel.closed()) {
                 List<TurnEventBus.TurnEvent> events =
@@ -433,9 +464,18 @@ public class ChatSessionController {
                                 userId, sessionId, turnId, lastSeq, Duration.ofSeconds(10), 200);
                 boolean done = false;
                 for (TurnEventBus.TurnEvent event : events) {
+                    if (!gapWarned && event.seq() > lastSeq + 1) {
+                        // seq 不连续说明事件日志已被裁剪，只能重建部分内容；最终仍以 done/DB 为准。
+                        log.warn(
+                                "[会话] 轮次事件不连续：turnId={}，期望 seq={}，实际 seq={}",
+                                turnId,
+                                lastSeq + 1,
+                                event.seq());
+                        gapWarned = true;
+                    }
                     ChatSse.replay(channel, event);
                     lastSeq = event.seq();
-                    lastActivity = System.currentTimeMillis();
+                    lastEventAt = System.currentTimeMillis();
                     if ("done".equals(event.event())) {
                         done = true;
                         break;
@@ -444,7 +484,9 @@ public class ChatSessionController {
                 if (done || channel.closed()) {
                     break;
                 }
+                now = System.currentTimeMillis();
                 if (!events.isEmpty()) {
+                    lastPingAt = now;
                     continue;
                 }
                 ChatTurn turn = manager.turn(userId, sessionId, turnId);
@@ -460,10 +502,28 @@ public class ChatSessionController {
                     }
                     break;
                 }
-                if (System.currentTimeMillis() - lastActivity > 60_000) {
-                    manager.expireTurn(turnId, "节点长时间无事件，判定执行节点失效");
+                if (now - lastPingAt >= TURN_HEARTBEAT_MS) {
+                    ChatSse.heartbeat(channel, lastSeq);
+                    lastPingAt = now;
+                }
+                if (now - lastEventAt >= TURN_LEASE_GRACE_MS) {
+                    if (!manager.leaseAlive(sessionId)) {
+                        manager.expireTurn(turnId, "执行节点租约失效，长时间无事件");
+                        channel.send(
+                                "error", ChatSse.payload("message", "回答中断，请重新发起提问"));
+                        break;
+                    }
+                    // 租约仍有效：模型或工具只是慢，继续尾随而不是误判为节点失效。
+                    log.info(
+                            "[会话] 轮次长时间无事件但租约有效，继续等待：turnId={}，lastSeq={}",
+                            turnId,
+                            lastSeq);
+                    lastEventAt = now;
+                }
+                if (now - startedAt >= TURN_HARD_LIMIT_MS) {
+                    manager.expireTurn(turnId, "轮次超过最长等待时间");
                     channel.send(
-                            "error", ChatSse.payload("message", "回答中断，请重新发起提问"));
+                            "error", ChatSse.payload("message", "回答超时，请重新发起提问"));
                     break;
                 }
             }
@@ -473,6 +533,17 @@ public class ChatSessionController {
         } finally {
             manager.releaseLocalChat(sessionId);
             emitter.complete();
+        }
+    }
+
+    private static long parseEventId(String value) {
+        if (value == null || value.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Math.max(0L, Long.parseLong(value.trim()));
+        } catch (NumberFormatException e) {
+            return 0L;
         }
     }
 

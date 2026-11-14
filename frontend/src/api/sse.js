@@ -42,17 +42,25 @@ async function consume(response, onEvent) {
   let buffer = '';
   const dispatch = (raw) => {
     let event = 'message';
+    let eventId = 0;
     const dataLines = [];
     for (const line of raw.split('\n')) {
       if (line.startsWith('event:')) {
         event = line.slice(6).trim();
+      } else if (line.startsWith('id:')) {
+        eventId = Math.max(0, Number(line.slice(3).trim()) || 0);
       } else if (line.startsWith('data:')) {
         dataLines.push(line.slice(5).trimStart());
       }
     }
     if (!dataLines.length) return;
     try {
-      onEvent(event, JSON.parse(dataLines.join('\n')));
+      const data = JSON.parse(dataLines.join('\n'));
+      // SSE id 是续传游标的兜底来源：负载里没有 seq 时补上
+      if (eventId > 0 && data && typeof data === 'object' && !Number.isFinite(data.seq)) {
+        data.seq = eventId;
+      }
+      onEvent(event, data);
     } catch (error) {
       if (error instanceof SyntaxError) return;
       throw error;

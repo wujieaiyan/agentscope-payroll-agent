@@ -197,7 +197,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                     reply,
                     result.tools(),
                     result.traces(),
-                    List.copyOf(plan.agents().keySet()));
+                    List.copyOf(plan.agents().keySet()),
+                    result.streamedText());
         } catch (RuntimeException e) {
             log.warn(
                     "[动态团队] ACTIVE 执行失败，回退静态：runId={}，plan={}，原因={}",
@@ -313,7 +314,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                     "",
                     List.of(),
                     List.of(),
-                    List.of());
+                    List.of(),
+                    "");
         } catch (RuntimeException e) {
             log.warn("[动态团队] 保存 ACTIVE 回退失败：{}", rootMessage(e));
             return Attempt.skipped();
@@ -343,7 +345,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
                 "",
                 List.of(),
                 List.of(),
-                List.of());
+                List.of(),
+                "");
     }
 
     private void finishRun(long runId, String status, String reason, long elapsed) {
@@ -411,7 +414,8 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             String reply,
             List<String> tools,
             List<ChatToolTrace> traces,
-            List<String> agentIds) {
+            List<String> agentIds,
+            String streamedText) {
 
         public Attempt {
             planId = planId == null ? "" : planId;
@@ -421,11 +425,12 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             tools = tools == null ? List.of() : List.copyOf(tools);
             traces = traces == null ? List.of() : List.copyOf(traces);
             agentIds = agentIds == null ? List.of() : List.copyOf(agentIds);
+            streamedText = streamedText == null ? "" : streamedText;
         }
 
         public static Attempt skipped() {
             return new Attempt(
-                    0L, "", "SKIPPED", null, "", "", List.of(), List.of(), List.of());
+                    0L, "", "SKIPPED", null, "", "", List.of(), List.of(), List.of(), "");
         }
 
         public boolean recorded() {
