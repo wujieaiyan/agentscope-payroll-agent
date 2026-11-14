@@ -71,9 +71,11 @@ mvn clean package
 cd frontend && npm ci && npm run build && cd ..
 
 # 1) 智能体运行期（模型执行与动态团队，只暴露 /internal，默认 8100）
-java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-runtime.jar
+SPRING_PROFILES_ACTIVE=dept java -Dfile.encoding=UTF-8 \
+  -jar payroll-agent/target/payroll-agent-runtime.jar
 
 # 2) Web 后端（鉴权、会话、管理台 API，默认 8080）
+SPRING_PROFILES_ACTIVE=dept \
 PAYROLL_AGENT_RUNTIME_URLS=http://127.0.0.1:8100 \
 PAYROLL_AGENT_RUNTIME_TOKEN=local-demo-token-change-me \
 java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
@@ -95,9 +97,11 @@ java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --dep
 运行期为 `payroll-agent/target/payroll-agent-runtime.jar`，CLI 为 `payroll-agent/target/payroll-agent-cli.jar`；
 模块普通 jar（`payroll-backend.jar`、`payroll-agent.jar`）留给模块间依赖，不要直接运行。
 
-Web 与运行期在同一台机器上请从仓库根目录启动。两个应用默认启用 `mysql` profile，
-连接 `127.0.0.1:3306/payroll`（默认账号 `payroll/payroll`，可用 `PAYROLL_DB_*` 覆盖），
-本地启动前需先准备好 MySQL；测试使用 H2 内存库，不依赖外部服务。
+Web 与运行期在同一台机器上请从仓库根目录启动，并统一使用 `SPRING_PROFILES_ACTIVE=dept`
+（等价于 `mysql,redis`）：连接 `127.0.0.1:3306/payroll`（默认账号 `payroll/payroll`，可用
+`PAYROLL_DB_*` 覆盖）与 `127.0.0.1:6379`。拆分后的轮次租约与 SSE 事件总线在 Redis 中共享，
+只开 `mysql` 时 runtime 与本机 Web 各自持有进程内租约，提交会被判为「已被其它节点接管」；
+测试使用 H2 内存库，不依赖外部服务。
 Windows 下 8001–8100 属于系统保留区间，运行期改用 `PAYROLL_AGENT_PORT=18100`、Web 改用
 `PAYROLL_WEB_PORT=28080` 即可；两个进程必须使用相同的 `PAYROLL_AGENT_RUNTIME_TOKEN`。
 
@@ -595,7 +599,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SPRING_PROFILES_ACTIVE` | `mysql` | Spring profile；本地默认 MySQL，部门部署可用 `dept`（`mysql,redis`），置空回退 H2 |
+| `SPRING_PROFILES_ACTIVE` | `mysql` | Spring profile；本地默认 MySQL，Web/runtime 拆分部署必须用 `dept`（`mysql,redis`），置空回退 H2 |
 | `PAYROLL_DB_URL` | `jdbc:mysql://127.0.0.1:3306/payroll?...` | 数据库地址，默认 MySQL |
 | `PAYROLL_DB_USER` | `payroll` | 数据库用户 |
 | `PAYROLL_DB_PASSWORD` | `payroll` | 数据库密码 |
@@ -647,7 +651,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 ### MySQL 与 Redis（部门部署）
 
-本地默认已启用 `mysql` profile；多人共用或需要会话共享时用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`）切换：
+本地默认已启用 `mysql` profile；Web 与 agent-runtime 拆分部署时必须用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`），轮次租约与事件流依赖 Redis 跨进程共享：
 
 - MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
   目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。

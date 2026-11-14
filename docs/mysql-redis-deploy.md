@@ -4,7 +4,8 @@
 
 - **MySQL**：业务数据持久化，Flyway 版本化建表，HikariCP 连接池。
 - **Redis**：Spring Session 会话共享（重启/多实例不掉登录）、登录失败锁定、单用户对话并发配额、
-  同一会话跨实例互斥锁。
+  同一会话跨实例互斥锁，以及跨进程共享的轮次租约与 SSE 事件流。**Web 与 agent-runtime 拆分部署时
+  Redis 必需**：缺少 Redis 时两端各自持有进程内租约，runtime 接管轮次会返回「已被其它节点接管」。
 
 H2 保留给测试（内存库）和显式回退（`SPRING_PROFILES_ACTIVE=` 置空），两种库共用同一套仓储代码。
 
@@ -50,7 +51,7 @@ java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
 
 Windows CMD/PowerShell 用 `set` / `$env:` 设置同名环境变量；也可在 IDE 的 Run Configuration 中配置。
 
-只切 MySQL、不要 Redis：
+只切 MySQL、不要 Redis（仅适用于 Web 与 runtime 同进程的单体启动，拆分部署会导致对话不可用）：
 
 ```bash
 SPRING_PROFILES_ACTIVE=mysql ...
