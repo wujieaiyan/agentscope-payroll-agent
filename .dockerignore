@@ -1,0 +1,13 @@
+.git
+.idea
+*.log
+derby.log
+data
+output
+logs
+work
+frontend/node_modules
+frontend/dist
+frontend/reference
+payroll-common/target
+payroll-tests/target

@@ -1,12 +1,12 @@
 # MySQL 与 Redis 部署（部门级）
 
-项目默认使用 H2 文件库，适合本地演示与单机使用；部门多人共用时切换为 MySQL + Redis：
+本地启动默认启用 `mysql` profile（未设置 `SPRING_PROFILES_ACTIVE` 时连接本机 MySQL）；部门多人共用时再加 Redis：
 
 - **MySQL**：业务数据持久化，Flyway 版本化建表，HikariCP 连接池。
 - **Redis**：Spring Session 会话共享（重启/多实例不掉登录）、登录失败锁定、单用户对话并发配额、
   同一会话跨实例互斥锁。
 
-H2 保留为默认配置，全部测试仍跑在 H2 上，两种库共用同一套仓储代码。
+H2 保留给测试（内存库）和显式回退（`SPRING_PROFILES_ACTIVE=` 置空），两种库共用同一套仓储代码。
 
 ## 1. 准备中间件
 
@@ -45,7 +45,7 @@ PAYROLL_DB_PASSWORD='<数据库密码>' \
 PAYROLL_REDIS_HOST=127.0.0.1 \
 PAYROLL_REDIS_PORT=6379 \
 PAYROLL_WEB_PORT=8099 \
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --web
+java -Dfile.encoding=UTF-8 -jar payroll-backend/target/payroll-backend-exec.jar
 ```
 
 Windows CMD/PowerShell 用 `set` / `$env:` 设置同名环境变量；也可在 IDE 的 Run Configuration 中配置。
@@ -103,10 +103,10 @@ Redis 不可用时，登录限流、并发配额与会话锁自动退化为单�
 cp data/payroll.mv.db data/payroll.mv.db.bak
 
 # 目标库为空时可直接迁移
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --migrate-to-mysql
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --migrate-to-mysql
 
 # 目标库已有数据时需显式覆盖
-java -Dfile.encoding=UTF-8 -jar target/payroll-agent.jar --migrate-to-mysql --force
+java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --migrate-to-mysql --force
 ```
 
 可选环境变量：
@@ -160,4 +160,4 @@ docker exec redis redis-cli SET payroll:chat:lock:<sessionId> other EX 60
 
 ## 5. 回退
 
-去掉 `SPRING_PROFILES_ACTIVE`（或改回默认）并用原 H2 文件启动即可回退；迁移工具不会修改源 H2 文件。生产环境切换前请保留 H2 备份与 MySQL 逻辑备份（`mysqldump`）。
+将 `SPRING_PROFILES_ACTIVE` 置空（如 `SPRING_PROFILES_ACTIVE=`）并用原 H2 文件启动即可回退；迁移工具不会修改源 H2 文件。生产环境切换前请保留 H2 备份与 MySQL 逻辑备份（`mysqldump`）。

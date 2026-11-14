@@ -1,0 +1,163 @@
+server:
+  # 默认只监听本机；部门部署通过 PAYROLL_SERVER_ADDRESS=0.0.0.0 放开。
+  address: "${PAYROLL_SERVER_ADDRESS:127.0.0.1}"
+  shutdown: graceful
+
+spring:
+  profiles:
+    # 部门级部署：--spring.profiles.active=dept 同时启用 MySQL 与 Redis。
+    group:
+      dept: mysql,redis
+  # 向量库客户端由 PayrollConfiguration 手动创建，禁用 Boot 的 ES 自动装配。
+  # Redis 相关自动装配默认关闭，仅在 redis profile 中放开，避免本地/测试强依赖 Redis。
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.session.SessionAutoConfiguration
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  web:
+    resources:
+      cache:
+        period: 0
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 200MB
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+payroll:
+  # legacy=手写三阶段状态机；graph=langgraph4j 图编排（POC，仅切换路由层）
+  orchestrator: "${PAYROLL_ORCHESTRATOR:legacy}"
+  # all=单进程（默认）；web=只做鉴权/转发/SSE；runtime=只执行内部轮次。
+  node-role: "${PAYROLL_NODE_ROLE:all}"
+  node-id: "${PAYROLL_NODE_ID:local}"
+  runtime:
+    # Web 调用的 runtime 地址，逗号分隔；为空时 Web 节点无法执行模型，对话接口返回明确错误。
+    urls: "${PAYROLL_AGENT_RUNTIME_URLS:}"
+  internal:
+    # runtime 内部接口 HMAC 密钥；null/空时内部提交不可用。
+    token: "${PAYROLL_AGENT_RUNTIME_TOKEN:}"
+    max-skew-seconds: "${PAYROLL_INTERNAL_MAX_SKEW_SECONDS:120}"
+  db:
+    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
+    user: "${PAYROLL_DB_USER:sa}"
+    password: "${PAYROLL_DB_PASSWORD:}"
+  output-dir: "${PAYROLL_OUTPUT_DIR:output}"
+  auth:
+    enabled: "${PAYROLL_AUTH_ENABLED:true}"
+    admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+  security:
+    # 同一账号连续失败达到阈值后锁定，Redis 不可用时回退进程内计数。
+    login-max-failures: "${PAYROLL_LOGIN_MAX_FAILURES:5}"
+    login-lock-minutes: "${PAYROLL_LOGIN_LOCK_MINUTES:5}"
+  chat:
+    # 单个用户同时进行的流式生成数，超出返回 429。
+    max-concurrent-per-user: "${PAYROLL_CHAT_MAX_CONCURRENT:2}"
+    # 同一会话跨实例互斥锁的过期时间；需大于单轮回答的最长耗时（SSE 超时 10 分钟）。
+    session-lock-minutes: "${PAYROLL_CHAT_SESSION_LOCK_MINUTES:15}"
+    # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
+    cache-max-sessions: "${PAYROLL_CHAT_CACHE_MAX_SESSIONS:200}"
+    cache-idle-minutes: "${PAYROLL_CHAT_CACHE_IDLE_MINUTES:60}"
+    # 轮次租约：TTL 30 秒、10 秒心跳；节点崩溃后最多 30 秒可被接管。
+    turn-lease-seconds: "${PAYROLL_TURN_LEASE_TTL_SECONDS:30}"
+    turn-heartbeat-seconds: "${PAYROLL_TURN_HEARTBEAT_SECONDS:10}"
+    # 事件流保留与单轮上限；续流窗口由 TTL 决定。
+    turn-event-ttl-hours: "${PAYROLL_TURN_EVENT_TTL_HOURS:24}"
+    turn-event-max: "${PAYROLL_TURN_EVENT_MAXLEN:10000}"
+    turn-retention-days: "${PAYROLL_TURN_RETENTION_DAYS:90}"
+    # 写操作确认：关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度核对。
+    action-confirm:
+      enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
+      ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
+  # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
+  routing:
+    enabled: "${PAYROLL_ROUTING_ENABLED:true}"
+  # 智能体路由：纯轻量模型决策单智能体/团队/流水线；失败或低置信度回退既有链路。
+  router:
+    enabled: "${PAYROLL_ROUTER_ENABLED:true}"
+    timeout-ms: "${PAYROLL_ROUTER_TIMEOUT_MS:10000}"
+    min-confidence: "${PAYROLL_ROUTER_MIN_CONFIDENCE:0.55}"
+  mcp:
+    # 是否采纳外部服务的 readOnlyHint；false 时所有 MCP 工具一律视为写，逐个确认。
+    trust-read-only-hints: "${PAYROLL_MCP_TRUST_READ_ONLY_HINTS:true}"
+  tools:
+    # 单工具分类覆盖，优先级最高；键为工具名，值为 READ_ONLY 或 MUTATING。
+    safety-overrides: {}
+  # 审计日志保留天数，启动时清理更早的记录。
+  audit:
+    retention-days: "${PAYROLL_AUDIT_RETENTION_DAYS:180}"
+  # 动态团队：OFF=保持旧链路；STATIC=只记录静态运行；SHADOW/ACTIVE 由后续阶段启用。
+  team:
+    mode: "${PAYROLL_TEAM_MODE:ACTIVE}"
+    retention-days: "${PAYROLL_TEAM_RETENTION_DAYS:180}"
+    stats-window-days: "${PAYROLL_TEAM_STATS_WINDOW_DAYS:30}"
+    shadow-sample-rate: "${PAYROLL_TEAM_SHADOW_SAMPLE_RATE:1.0}"
+    # ACTIVE 灰度白名单：逗号分隔的 ID；留空表示该维度不限（两个都空=全量）。
+    active-user-ids: "${PAYROLL_TEAM_ACTIVE_USER_IDS:}"
+    active-session-ids: "${PAYROLL_TEAM_ACTIVE_SESSION_IDS:}"
+  # 向量记忆：只索引用户问题与压缩摘要；默认只在当前会话内召回，避免不同角色串线。
+  memory:
+    enabled: "${PAYROLL_MEMORY_ENABLED:true}"
+    es-url: "${PAYROLL_MEMORY_ES_URL:http://localhost:9200}"
+    es-username: "${PAYROLL_MEMORY_ES_USERNAME:}"
+    es-password: "${PAYROLL_MEMORY_ES_PASSWORD:}"
+    index: "${PAYROLL_MEMORY_INDEX:payroll-chat-memory}"
+    embedding-base-url: "${OLLAMA_BASE_URL:http://localhost:11434}"
+    embedding-model: "${PAYROLL_MEMORY_EMBEDDING_MODEL:nomic-embed-text}"
+    embedding-dim: "${PAYROLL_MEMORY_EMBEDDING_DIM:768}"
+    embed-timeout: "${PAYROLL_MEMORY_EMBED_TIMEOUT:3s}"
+    top-k: "${PAYROLL_MEMORY_TOP_K:5}"
+    min-score: "${PAYROLL_MEMORY_MIN_SCORE:0.55}"
+    max-inject-chars: "${PAYROLL_MEMORY_MAX_INJECT_CHARS:1200}"
+    async-index: "${PAYROLL_MEMORY_ASYNC_INDEX:true}"
+    # false=只召回当前会话（默认）；true=允许跨会话召回同一用户的历史问题。
+    cross-session: "${PAYROLL_MEMORY_CROSS_SESSION:false}"
+  # 语义缓存：默认关闭；只缓存 AGENT 路径无工具调用的稳定问答。
+  semantic-cache:
+    enabled: "${PAYROLL_SEMANTIC_CACHE_ENABLED:false}"
+    index: "${PAYROLL_SEMANTIC_CACHE_INDEX:payroll-semantic-cache-v1}"
+    threshold: "${PAYROLL_SEMANTIC_CACHE_THRESHOLD:0.95}"
+    ttl-minutes: "${PAYROLL_SEMANTIC_CACHE_TTL_MINUTES:30}"
+    max-entries: "${PAYROLL_SEMANTIC_CACHE_MAX_ENTRIES:10000}"
+  # 知识库：文件落盘、解析分块、ES 索引与 Ollama 回答生成。
+  kb:
+    storage-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
+    max-file-size: "${PAYROLL_KB_MAX_FILE_SIZE:104857600}"
+    max-batch-size: "${PAYROLL_KB_MAX_BATCH:50}"
+    max-directory-depth: "${PAYROLL_KB_MAX_DIR_DEPTH:5}"
+    es-enabled: "${PAYROLL_KB_ES_ENABLED:true}"
+    es-url: "${PAYROLL_KB_ES_URL:${payroll.memory.es-url}}"
+    es-username: "${PAYROLL_KB_ES_USERNAME:${payroll.memory.es-username}}"
+    es-password: "${PAYROLL_KB_ES_PASSWORD:${payroll.memory.es-password}}"
+    es-index: "${PAYROLL_KB_ES_INDEX:payroll-kb-chunks}"
+    embedding-base-url: "${OLLAMA_BASE_URL:http://localhost:11434}"
+    embedding-model: "${PAYROLL_KB_EMBEDDING_MODEL:nomic-embed-text}"
+    embedding-dim: "${PAYROLL_KB_EMBEDDING_DIM:768}"
+    answer-enabled: "${PAYROLL_KB_ANSWER_ENABLED:true}"
+    answer-model: "${PAYROLL_KB_ANSWER_MODEL:qwen2.5:3b-instruct}"
+    answer-timeout: "${PAYROLL_KB_ANSWER_TIMEOUT:120s}"
+    task-threads: "${PAYROLL_KB_TASK_THREADS:2}"
+
+# logback.xml 默认 WARN（CLI 保持安静），管理台启动日志需要 INFO。
+logging:
+  level:
+    root: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: payroll-agent

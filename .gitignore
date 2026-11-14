@@ -4,3 +4,7 @@ target/
 *.log
 data/
 output/
+work/
+frontend/node_modules/
+frontend/dist/
+frontend/reference/

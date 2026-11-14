@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: payroll-backend
+  profiles:
+    # 本地默认走 MySQL；容器与部门部署仍通过 SPRING_PROFILES_ACTIVE 覆盖。
+    active: "${SPRING_PROFILES_ACTIVE:mysql}"
+  config:
+    import: classpath:application-common.yml
+  web:
+    resources:
+      # 前端由 Nginx 托管，后端不再提供静态页面。
+      add-mappings: false
+
+payroll:
+  node-role: "${PAYROLL_NODE_ROLE:web}"
+server:
+  port: "${PAYROLL_WEB_PORT:8080}"
