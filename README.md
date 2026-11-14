@@ -31,7 +31,7 @@ PayrollEngine（BigDecimal 全链路）
                      │
       ┌──────────────┴───────────────┐
       ▼                              ▼
-H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
+关系库（默认 MySQL，测试用 H2；主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 ```
 
 ## 功能
@@ -57,7 +57,7 @@ H2 文件库（主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
 | 工资批次 | 预览 → 人工微调 → 提交审批 → 审批通过 → 出账（服务端重算）→ 确认发送 |
 | 审批工作流 | 全局/部门审批工作流可配置优先级与金额区间；节点按顺序多级审批，审批人可按角色或指定用户；「我的待办」只显示当前节点由自己处理、且不是自己提交的批次；提交人不能自批；金额指纹固定审批快照，审批后数据变化必须重新提交 |
 | Excel 导出 | 工资明细、核算失败、出账说明三个工作表 |
-| 明细入库 | 批次、逐人明细、微调快照、失败原因、邮件投递审计全部落 H2 |
+| 明细入库 | 批次、逐人明细、微调快照、失败原因、邮件投递审计全部落关系库 |
 | 邮件发送 | 仅 dry-run：逐人返回成功/失败状态与失败原因，不真实投递 |
 | 政策问答 | 税率表、社保比例、基数上下限、指定城市政策、考勤就绪月份 |
 | 结构化意图抽取 | 将自然语言解析为 `action / employeeId / period / department`（建议 DashScope 模型） |
@@ -95,12 +95,14 @@ java -Dfile.encoding=UTF-8 -jar payroll-agent/target/payroll-agent-cli.jar --dep
 运行期为 `payroll-agent/target/payroll-agent-runtime.jar`，CLI 为 `payroll-agent/target/payroll-agent-cli.jar`；
 模块普通 jar（`payroll-backend.jar`、`payroll-agent.jar`）留给模块间依赖，不要直接运行。
 
-Web 与运行期在同一台机器上请从仓库根目录启动，H2 默认落在 `./data/payroll`。
+Web 与运行期在同一台机器上请从仓库根目录启动。两个应用默认启用 `mysql` profile，
+连接 `127.0.0.1:3306/payroll`（默认账号 `payroll/payroll`，可用 `PAYROLL_DB_*` 覆盖），
+本地启动前需先准备好 MySQL；测试使用 H2 内存库，不依赖外部服务。
 Windows 下 8001–8100 属于系统保留区间，运行期改用 `PAYROLL_AGENT_PORT=18100`、Web 改用
 `PAYROLL_WEB_PORT=28080` 即可；两个进程必须使用相同的 `PAYROLL_AGENT_RUNTIME_TOKEN`。
 
-首次启动 Web 后端会创建 `data/payroll.mv.db` 并从 classpath 导入演示数据；
-之后所有修改都写入 H2，不再被演示数据覆盖（切换 MySQL 见下文）。
+首次启动 Web 后端由 Flyway 建表并从 classpath 导入演示数据；
+之后所有修改都写入数据库，不再被演示数据覆盖（切回 H2 见下文）。
 
 首次建库会创建默认管理员 `admin / admin123`（仅当 `app_users` 为空时执行），
 请登录后立即使用右上角“修改密码”。生产环境应通过 `PAYROLL_ADMIN_PASSWORD` 指定初始密码；
@@ -593,9 +595,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PAYROLL_DB_URL` | `jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE` | H2 文件库 |
-| `PAYROLL_DB_USER` | `sa` | 数据库用户 |
-| `PAYROLL_DB_PASSWORD` | 空 | 数据库密码 |
+| `SPRING_PROFILES_ACTIVE` | `mysql` | Spring profile；本地默认 MySQL，部门部署可用 `dept`（`mysql,redis`），置空回退 H2 |
+| `PAYROLL_DB_URL` | `jdbc:mysql://127.0.0.1:3306/payroll?...` | 数据库地址，默认 MySQL |
+| `PAYROLL_DB_USER` | `payroll` | 数据库用户 |
+| `PAYROLL_DB_PASSWORD` | `payroll` | 数据库密码 |
 | `PAYROLL_OUTPUT_DIR` | `output` | Excel 输出目录 |
 | `PAYROLL_WEB_PORT` | `8080` | 后端（Web 节点）监听端口 |
 | `PAYROLL_MODEL` | `ollama:qwen2.5:3b-instruct` | 模型标识；Ollama 用 `ollama:<模型名>`，DashScope 用 `dashscope:<模型名>` |
@@ -644,7 +647,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 ### MySQL 与 Redis（部门部署）
 
-默认仍是 H2 文件库；多人共用时用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`）切换：
+本地默认已启用 `mysql` profile；多人共用或需要会话共享时用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`）切换：
 
 - MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
   目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。

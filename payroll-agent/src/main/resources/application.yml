@@ -1,6 +1,9 @@
 spring:
   application:
     name: payroll-agent-runtime
+  profiles:
+    # 本地默认走 MySQL；容器与部门部署仍通过 SPRING_PROFILES_ACTIVE 覆盖。
+    active: "${SPRING_PROFILES_ACTIVE:mysql}"
   config:
     import: classpath:application-common.yml
   main:
