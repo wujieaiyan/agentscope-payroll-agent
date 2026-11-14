@@ -13,6 +13,14 @@ const editing = ref(false);
 const saving = ref(false);
 const form = reactive({ id: '', description: '', content: '' });
 
+const tab = ref('body');
+const files = ref([]);
+const fileLoading = ref(false);
+const showFileForm = ref(false);
+const fileEditing = ref(false);
+const fileSaving = ref(false);
+const fileForm = reactive({ path: '', originalPath: '', content: '' });
+
 const skills = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
   const list = data.value.skills || [];
@@ -24,10 +32,30 @@ const skills = computed(() => {
   );
 });
 
+const canEditFiles = computed(
+  () => data.value.writable && detail.value && detail.value.source === 'nacos'
+);
+const referenceFiles = computed(() => files.value.filter((file) => file.kind !== 'script'));
+const scriptFiles = computed(() => files.value.filter((file) => file.kind === 'script'));
+const activeFiles = computed(() =>
+  tab.value === 'files-scripts' ? scriptFiles.value : referenceFiles.value
+);
+const activeKind = computed(() => (tab.value === 'files-scripts' ? 'script' : 'reference'));
+
 function formatTimestamp(value) {
   if (!value) return '—';
   if (typeof value === 'number') return new Date(value).toLocaleString('zh-CN');
   return String(value).replace('T', ' ').slice(0, 16);
+}
+
+function formatSize(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function fileUrl(id, path) {
+  const encoded = String(path).split('/').map(encodeURIComponent).join('/');
+  return `/api/admin/skills/${encodeURIComponent(id)}/files/${encoded}`;
 }
 
 async function load() {
@@ -43,10 +71,13 @@ async function load() {
 
 async function openSkill(skill) {
   detailLoading.value = true;
+  tab.value = 'body';
+  files.value = [];
   detail.value = { ...skill, content: '', loaded: false };
   try {
     detail.value = await api(`/api/admin/skills/${encodeURIComponent(skill.id)}`);
     detail.value.loaded = true;
+    files.value = detail.value.files || [];
   } catch (error) {
     detail.value = null;
     toast(error.message, 'error');
@@ -109,6 +140,83 @@ async function remove(skill) {
   }
 }
 
+function startAddFile() {
+  fileEditing.value = false;
+  Object.assign(fileForm, {
+    path: activeKind.value === 'script' ? 'scripts/' : 'references/',
+    originalPath: '',
+    content: '',
+  });
+  showFileForm.value = true;
+}
+
+async function startEditFile(file) {
+  if (fileLoading.value) return;
+  fileLoading.value = true;
+  try {
+    const payload = await api(fileUrl(detail.value.id, file.path));
+    fileEditing.value = true;
+    Object.assign(fileForm, {
+      path: payload.path || file.path,
+      originalPath: file.path,
+      content: payload.content || '',
+    });
+    showFileForm.value = true;
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    fileLoading.value = false;
+  }
+}
+
+async function saveFile() {
+  if (fileSaving.value) return;
+  const id = detail.value.id;
+  const path = fileForm.path.trim();
+  if (!path) {
+    toast('文件路径必填', 'error');
+    return;
+  }
+  fileSaving.value = true;
+  try {
+    // 文件接口是整包替换，先把未改动的文件正文读回来。
+    const all = [];
+    for (const file of files.value) {
+      if (file.path === path) continue;
+      if (fileEditing.value && file.path === fileForm.originalPath) continue;
+      const payload = await api(fileUrl(id, file.path));
+      all.push({ path: file.path, content: payload.content || '' });
+    }
+    all.push({ path, content: fileForm.content });
+    const result = await api(`/api/admin/skills/${encodeURIComponent(id)}/files`, {
+      method: 'PUT',
+      body: { files: all },
+    });
+    files.value = result.files || [];
+    detail.value.files = files.value;
+    showFileForm.value = false;
+    toast('文件已保存', 'success');
+    await load();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    fileSaving.value = false;
+  }
+}
+
+async function removeFile(file) {
+  if (!window.confirm(`删除文件「${file.path}」？`)) return;
+  try {
+    await api(fileUrl(detail.value.id, file.path), { method: 'DELETE' });
+    files.value = files.value.filter((item) => item.path !== file.path);
+    detail.value.files = files.value;
+    toast('文件已删除', 'success');
+    await load();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 onMounted(load);
 </script>
 
@@ -151,9 +259,10 @@ onMounted(load);
                 {{ skill.builtin ? '内置' : '自定义' }}
               </span>
               <span v-if="skill.overridden" class="badge orange">已覆盖</span>
+              <span v-if="skill.fileCount" class="badge blue">{{ skill.fileCount }} 个文件</span>
             </td>
-            <td>{{ skill.content_length ?? skill.contentLength ?? '—' }}</td>
-            <td>{{ formatTimestamp(skill.updated_at ?? skill.updatedAt) }}</td>
+            <td>{{ skill.contentLength ?? skill.content_length ?? '—' }}</td>
+            <td>{{ formatTimestamp(skill.updatedAt ?? skill.updated_at) }}</td>
             <td>
               <div class="cell-actions">
                 <button class="subtle sm" @click="openSkill(skill)">查看</button>
@@ -180,21 +289,61 @@ onMounted(load);
         <div class="drawer-body">
           <div v-if="detailLoading" class="empty">加载中…</div>
           <template v-else>
-            <div class="panel-row"><span class="k">说明</span><span class="v">{{ detail.description || '—' }}</span></div>
-            <div class="panel-row"><span class="k">来源</span><span class="v">{{ detail.source || '—' }}</span></div>
-            <div class="panel-row">
-              <span class="k">类型</span>
-              <span class="v">
-                {{ detail.builtin ? '内置' : '自定义' }}
-                <span v-if="detail.overridden">· 已覆盖</span>
-              </span>
+            <div class="tabs">
+              <button :class="{ active: tab === 'body' }" @click="tab = 'body'">正文</button>
+              <button
+                :class="{ active: tab === 'files-references' }"
+                @click="tab = 'files-references'"
+              >
+                参考文件 <span class="badge blue">{{ referenceFiles.length }}</span>
+              </button>
+              <button :class="{ active: tab === 'files-scripts' }" @click="tab = 'files-scripts'">
+                脚本文件 <span class="badge blue">{{ scriptFiles.length }}</span>
+              </button>
             </div>
-            <pre class="trace-pre" style="max-height: none">{{ detail.content || '（空）' }}</pre>
+
+            <template v-if="tab === 'body'">
+              <div class="panel-row"><span class="k">说明</span><span class="v">{{ detail.description || '—' }}</span></div>
+              <div class="panel-row"><span class="k">来源</span><span class="v">{{ detail.source || '—' }}</span></div>
+              <div class="panel-row">
+                <span class="k">类型</span>
+                <span class="v">
+                  {{ detail.builtin ? '内置' : '自定义' }}
+                  <span v-if="detail.overridden">· 已覆盖</span>
+                </span>
+              </div>
+              <pre class="trace-pre" style="max-height: none">{{ detail.content || '（空）' }}</pre>
+            </template>
+
+            <template v-else>
+              <p class="file-hint">
+                参考文件放 <code>references/</code>，脚本放 <code>scripts/</code>（仅 .py / .sh / .js）；
+                单文件 ≤ 64KB、合计 ≤ 256KB、最多 20 个。对话中通过 <code>skill_read</code> 读取。
+              </p>
+              <div class="file-head">
+                <span class="muted">{{ activeFiles.length }} 个文件</span>
+                <button class="subtle sm" :disabled="!canEditFiles" @click="startAddFile">
+                  新增文件
+                </button>
+              </div>
+              <div v-for="file in activeFiles" :key="file.path" class="file-row">
+                <span class="mono file-path">{{ file.path }}</span>
+                <span class="muted file-size">{{ formatSize(file.size) }}</span>
+                <div class="cell-actions">
+                  <button class="subtle sm" @click="startEditFile(file)">编辑</button>
+                  <button class="subtle sm" :disabled="!canEditFiles" @click="removeFile(file)">删除</button>
+                </div>
+              </div>
+              <div v-if="!activeFiles.length" class="empty">暂无文件</div>
+              <p v-if="detail.source !== 'nacos'" class="file-hint warn">
+                内置技能尚未覆盖到 Nacos，请先在「正文」页签编辑并保存，再上传参考文件或脚本。
+              </p>
+            </template>
           </template>
         </div>
         <div class="drawer-foot">
           <button class="ghost" @click="detail = null">关闭</button>
-          <button class="primary" :disabled="!data.writable" @click="editSkill(detail)">编辑</button>
+          <button class="primary" :disabled="!data.writable" @click="editSkill(detail)">编辑正文</button>
         </div>
       </aside>
     </div>
@@ -229,5 +378,109 @@ onMounted(load);
         </div>
       </div>
     </div>
+
+    <div v-if="showFileForm" class="modal-mask" @click.self="showFileForm = false">
+      <div class="modal" style="width: min(860px, 96vw)">
+        <div class="modal-head">
+          <h3>{{ fileEditing ? `编辑文件 ${fileForm.originalPath}` : '新增文件' }}</h3>
+          <button class="subtle sm" @click="showFileForm = false">关闭</button>
+        </div>
+        <div class="modal-body">
+          <label class="field">
+            文件路径
+            <input v-model="fileForm.path" class="mono" placeholder="references/policy.md" />
+          </label>
+          <label class="field">
+            文件正文
+            <textarea v-model="fileForm.content" rows="18" class="mono"></textarea>
+          </label>
+          <p class="file-hint">
+            路径只能包含字母、数字、点、下划线、短横线和斜杠，只允许 <code>references/</code> 与
+            <code>scripts/</code> 目录；脚本后缀仅支持 <code>.py</code> / <code>.sh</code> /
+            <code>.js</code>。
+          </p>
+        </div>
+        <div class="modal-foot">
+          <button class="ghost" @click="showFileForm = false">取消</button>
+          <button class="primary" :disabled="fileSaving" @click="saveFile">
+            {{ fileSaving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
+
+<style scoped>
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 12px;
+  color: var(--muted);
+}
+
+.tabs button.active {
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.tabs .badge {
+  margin-left: 4px;
+}
+
+.file-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.file-hint.warn {
+  color: #d97b00;
+}
+
+.file-hint code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.file-row + .file-row {
+  margin-top: 8px;
+}
+
+.file-path {
+  flex: 1;
+  word-break: break-all;
+}
+
+.file-size {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+</style>

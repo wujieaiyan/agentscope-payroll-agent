@@ -31,6 +31,8 @@ class NacosSkillRepositoryTest {
             按 Nacos 规范执行计算。
             """;
 
+    private static final String CALCULATOR_BODY = "## 角色\n按 Nacos 规范执行计算。";
+
     private static final String AUDITOR_MD =
             """
             ---
@@ -82,7 +84,8 @@ class NacosSkillRepositoryTest {
         repository.getAllSkills();
         repository.getSkill(RoleSkills.CALCULATOR);
 
-        assertEquals(RoleSkills.ids().size(), calls.get());
+        // 每个技能一次正文 + 一次文件包探测；第二次调用全部命中缓存。
+        assertEquals(RoleSkills.ids().size() * 2, calls.get());
     }
 
     @Test
@@ -100,7 +103,7 @@ class NacosSkillRepositoryTest {
         now.addAndGet(61_000);
 
         assertEquals("更新后的计算角色", repository.getSkill(RoleSkills.CALCULATOR).getDescription());
-        assertEquals(2, calls.get());
+        assertEquals(4, calls.get());
     }
 
     @Test
@@ -115,7 +118,7 @@ class NacosSkillRepositoryTest {
                 List.of(RoleSkills.CALCULATOR, RoleSkills.ACCOUNTANT), repository.getAllSkillNames());
         assertNull(repository.getSkill(RoleSkills.VALIDATOR));
         assertNull(repository.getSkill("not-a-role"));
-        assertEquals(3, calls.get(), "未知技能不应触发 Nacos 请求");
+        assertEquals(5, calls.get(), "不存在的正文不探测文件包，未知技能不应触发 Nacos 请求");
     }
 
     @Test
@@ -232,6 +235,73 @@ class NacosSkillRepositoryTest {
         AgentSkill second = repository.getSkill(RoleSkills.CALCULATOR);
         assertNotNull(second, "读取异常不应让已加载技能消失");
         assertEquals(first.getSkillContent(), second.getSkillContent());
+    }
+
+    @Test
+    @DisplayName("文件包与正文哈希一致时挂载为技能资源")
+    void loadsResourcesWhenHashMatches() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put(
+                "payroll-calculator.files.json",
+                SkillFilePackage.compose(
+                        SkillFilePackage.mdHash(CALCULATOR_BODY),
+                        List.of(
+                                new SkillFilePackage.SkillFile("references/faq.md", "# FAQ\n字段说明"),
+                                new SkillFilePackage.SkillFile("scripts/check.py", "print('ok')"))));
+        NacosSkillRepository repository = repository(configs, clock());
+
+        AgentSkill skill = repository.getSkill(RoleSkills.CALCULATOR);
+
+        assertNotNull(skill);
+        assertEquals("# FAQ\n字段说明", skill.getResource("references/faq.md"));
+        assertEquals("print('ok')", skill.getResource("scripts/check.py"));
+        assertEquals(2, skill.getResourcePaths().size());
+    }
+
+    @Test
+    @DisplayName("正文哈希不匹配时忽略文件包，仍加载正文")
+    void ignoresResourcesWhenHashMismatch() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put(
+                "payroll-calculator.files.json",
+                SkillFilePackage.compose(
+                        SkillFilePackage.mdHash("旧版本正文"),
+                        List.of(new SkillFilePackage.SkillFile("references/faq.md", "# FAQ"))));
+        NacosSkillRepository repository = repository(configs, clock());
+
+        AgentSkill skill = repository.getSkill(RoleSkills.CALCULATOR);
+
+        assertNotNull(skill);
+        assertTrue(skill.getSkillContent().contains("按 Nacos 规范执行计算"));
+        assertTrue(skill.getResourcePaths().isEmpty(), "哈希不一致时不应挂载旧文件");
+    }
+
+    @Test
+    @DisplayName("关闭文件包时不请求伴生配置")
+    void skipsFilesWhenDisabled() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put(
+                "payroll-calculator.files.json",
+                SkillFilePackage.compose(
+                        SkillFilePackage.mdHash(CALCULATOR_BODY),
+                        List.of(new SkillFilePackage.SkillFile("references/faq.md", "# FAQ"))));
+        AtomicInteger calls = new AtomicInteger();
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings(ttl()),
+                        dataId -> {
+                            calls.incrementAndGet();
+                            return Optional.ofNullable(configs.get(dataId));
+                        },
+                        null,
+                        clock()::get,
+                        new SkillFileSettings(false, 1024, 2048));
+
+        AgentSkill skill = repository.getSkill(RoleSkills.CALCULATOR);
+
+        assertNotNull(skill);
+        assertTrue(skill.getResourcePaths().isEmpty());
+        assertEquals(1, calls.get(), "关闭后只读取正文");
     }
 
     @Test

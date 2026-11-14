@@ -17,7 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 从 Nacos 配置中心读取角色技能，dataId 约定为 {@code <skill-id>.md}。
+ * 从 Nacos 配置中心读取角色技能，dataId 约定为 {@code <skill-id>.md}，
+ * 伴生 {@code <skill-id>.files.json} 解析为 {@link AgentSkill#getResources()}。
  *
  * <p>远程内容按 TTL 缓存，读取失败时对应技能返回 null，由
  * {@link CompositeSkillRepository} 回退到代码内置版本。仓库只读。
@@ -42,6 +43,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     }
 
     private final NacosSkillSettings settings;
+    private final SkillFileSettings fileSettings;
     private final ConfigFetcher fetcher;
     private final ConfigLister lister;
     private final LongSupplier clock;
@@ -54,7 +56,12 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     private volatile long idsFetchedAt;
 
     public NacosSkillRepository(NacosSkillSettings settings) {
-        this(settings, nacosFetcher(settings), nacosLister(settings), System::currentTimeMillis);
+        this(
+                settings,
+                nacosFetcher(settings),
+                nacosLister(settings),
+                System::currentTimeMillis,
+                SkillFileSettings.fromEnvironment());
     }
 
     private static ConfigFetcher nacosFetcher(NacosSkillSettings settings) {
@@ -69,7 +76,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
 
     NacosSkillRepository(
             NacosSkillSettings settings, ConfigFetcher fetcher, LongSupplier clock) {
-        this(settings, fetcher, null, clock);
+        this(settings, fetcher, null, clock, SkillFileSettings.defaults());
     }
 
     NacosSkillRepository(
@@ -77,7 +84,17 @@ public final class NacosSkillRepository implements AgentSkillRepository {
             ConfigFetcher fetcher,
             ConfigLister lister,
             LongSupplier clock) {
+        this(settings, fetcher, lister, clock, SkillFileSettings.defaults());
+    }
+
+    NacosSkillRepository(
+            NacosSkillSettings settings,
+            ConfigFetcher fetcher,
+            ConfigLister lister,
+            LongSupplier clock,
+            SkillFileSettings fileSettings) {
         this.settings = settings;
+        this.fileSettings = fileSettings == null ? SkillFileSettings.defaults() : fileSettings;
         this.fetcher = fetcher;
         this.lister = lister;
         this.clock = clock;
@@ -194,6 +211,9 @@ public final class NacosSkillRepository implements AgentSkillRepository {
             body = Optional.empty();
         }
         AgentSkill skill = body.map(markdown -> parse(id, markdown)).orElse(null);
+        if (skill != null) {
+            skill = withResources(skill);
+        }
         cache.put(id, new Entry(now, skill));
         if (skill == null) {
             if (missingWarned.add(id)) {
@@ -248,6 +268,53 @@ public final class NacosSkillRepository implements AgentSkillRepository {
             extra.forEach(builder::putMetadata);
         }
         return builder.build();
+    }
+
+    /**
+     * 只有文件包哈希与正文一致时才挂载资源：正文改过但文件包没重发，说明两者版本错配，
+     * 此时宁可不提供文件，也不能让模型读到旧参考。
+     */
+    private AgentSkill withResources(AgentSkill skill) {
+        if (!fileSettings.enabled()) {
+            return skill;
+        }
+        List<SkillFilePackage.SkillFile> files =
+                loadFiles(skill.getName(), skill.getSkillContent());
+        if (files.isEmpty()) {
+            return skill;
+        }
+        AgentSkill.Builder builder = skill.toBuilder();
+        files.forEach(file -> builder.addResource(file.path(), file.content()));
+        return builder.build();
+    }
+
+    private List<SkillFilePackage.SkillFile> loadFiles(String id, String content) {
+        String dataId = SkillFilePackage.dataId(id);
+        Optional<String> raw;
+        try {
+            raw = fetcher.fetch(dataId);
+        } catch (RuntimeException e) {
+            log.warn("[Skill] 读取技能 {} 的文件包异常，按无文件处理：{}", id, e.getMessage());
+            return List.of();
+        }
+        if (raw.isEmpty()) {
+            return List.of();
+        }
+        Optional<SkillFilePackage.Parsed> parsed = SkillFilePackage.parse(raw.get());
+        if (parsed.isEmpty()) {
+            log.warn("[Skill] 技能 {} 的文件包 JSON 无效或版本不支持，已忽略", id);
+            return List.of();
+        }
+        if (!parsed.get().mdHash().equals(SkillFilePackage.mdHash(content))) {
+            log.warn("[Skill] 技能 {} 的文件包与正文哈希不一致，已忽略文件（请保存正文后重新发布文件）", id);
+            return List.of();
+        }
+        try {
+            return SkillFilePackage.normalizeAll(parsed.get().files(), fileSettings);
+        } catch (RuntimeException e) {
+            log.warn("[Skill] 技能 {} 的文件包校验失败，已忽略文件：{}", id, e.getMessage());
+            return List.of();
+        }
     }
 
     @Override
