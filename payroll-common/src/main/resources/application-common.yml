@@ -2,6 +2,9 @@ server:
   # 默认只监听本机；部门部署通过 PAYROLL_SERVER_ADDRESS=0.0.0.0 放开。
   address: "${PAYROLL_SERVER_ADDRESS:127.0.0.1}"
   shutdown: graceful
+  tomcat:
+    # 请求超过 multipart 上限时仍读完剩余请求体，保证客户端收到 413 而不是连接被重置。
+    max-swallow-size: "${PAYROLL_UPLOAD_MAX_SWALLOW_SIZE:-1}"
 
 spring:
   profiles:
@@ -27,8 +30,9 @@ spring:
         period: 0
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 200MB
+      # 知识库上传等场景；单文件上限需与 payroll.kb.max-file-size 保持一致。
+      max-file-size: "${PAYROLL_UPLOAD_MAX_FILE_SIZE:600MB}"
+      max-request-size: "${PAYROLL_UPLOAD_MAX_REQUEST_SIZE:1GB}"
   lifecycle:
     timeout-per-shutdown-phase: 10s
 
@@ -137,7 +141,7 @@ payroll:
   # 知识库：文件落盘、解析分块、ES 索引与 Ollama 回答生成。
   kb:
     storage-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
-    max-file-size: "${PAYROLL_KB_MAX_FILE_SIZE:104857600}"
+    max-file-size: "${PAYROLL_KB_MAX_FILE_SIZE:629145600}"
     max-batch-size: "${PAYROLL_KB_MAX_BATCH:50}"
     max-directory-depth: "${PAYROLL_KB_MAX_DIR_DEPTH:5}"
     es-enabled: "${PAYROLL_KB_ES_ENABLED:true}"

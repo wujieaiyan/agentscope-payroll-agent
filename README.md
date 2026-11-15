@@ -720,6 +720,10 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_ACTION_PROPOSAL_TTL_MINUTES` | `15` | 提案有效期（分钟）；过期后卡片失效，确认返回 410 |
 | `PAYROLL_KB_CHAT_MAX_SERIES` | `3` | 单会话最多绑定的知识库数 |
 | `PAYROLL_KB_CHAT_TEAM_ENABLED` | `true` | 是否允许团队 `KB_CONFIG` 节点注册只读检索工具 |
+| `PAYROLL_UPLOAD_MAX_FILE_SIZE` | `600MB` | multipart 单文件上限；需与 `PAYROLL_KB_MAX_FILE_SIZE` 同步 |
+| `PAYROLL_UPLOAD_MAX_REQUEST_SIZE` | `1GB` | multipart 单次请求上限（多文件合计） |
+| `PAYROLL_UPLOAD_MAX_SWALLOW_SIZE` | `-1` | 超限时仍读完剩余请求体以返回 413；显式设小可减少无效带宽 |
+| `PAYROLL_KB_MAX_FILE_SIZE` | `629145600` | 知识库单文件业务上限（字节，默认 600MB） |
 | `PAYROLL_KB_RETRIEVAL_FUSION` | `true` | 多路召回+RRF 融合；`false` 回退旧的向量+BM25 加权求和 |
 | `PAYROLL_KB_RETRIEVAL_ROUTES` | `VECTOR,BM25,TITLE_PATH` | 启用的召回路径（逗号分隔）；VECTOR 索引策略下仅保留向量路 |
 | `PAYROLL_KB_RETRIEVAL_RRF_K` | `60` | RRF 平滑常数 |
