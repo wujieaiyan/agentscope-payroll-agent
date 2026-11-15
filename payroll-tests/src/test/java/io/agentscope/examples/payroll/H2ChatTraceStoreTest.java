@@ -157,7 +157,13 @@ class H2ChatTraceStoreTest {
                         "第三章 > 休假",
                         0.82,
                         List.of("keyword", "vector"),
-                        "员工年假按工龄计算。");
+                        "员工年假按工龄计算。",
+                        "年假怎么算",
+                        "2026-11-15T08:00:00Z",
+                        12,
+                        3L,
+                        "员工年假按工龄计算。调休需提前申请。",
+                        false);
 
         ChatMessage saved =
                 store.appendAssistant(
@@ -188,6 +194,12 @@ class H2ChatTraceStoreTest {
         assertEquals(0.82, restored.score(), 0.0001);
         assertEquals(List.of("keyword", "vector"), restored.routes());
         assertEquals("员工年假按工龄计算。", restored.snippet());
+        assertEquals("年假怎么算", restored.query());
+        assertEquals("2026-11-15T08:00:00Z", restored.retrievedAt());
+        assertEquals(12, restored.chunkSeq());
+        assertEquals(3L, restored.documentVersion());
+        assertEquals("员工年假按工龄计算。调休需提前申请。", restored.contentSnapshot());
+        assertEquals(false, restored.lowConfidence());
     }
 
     @Test

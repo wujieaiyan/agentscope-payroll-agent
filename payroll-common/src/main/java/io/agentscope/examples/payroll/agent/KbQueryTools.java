@@ -292,7 +292,8 @@ public final class KbQueryTools {
             return;
         }
         try {
-            active.record(outcome.result());
+            Object query = outcome.arguments().get("query");
+            active.record(outcome.result(), query == null ? "" : query.toString());
         } catch (RuntimeException e) {
             log.warn("[知识库检索] 采集引用失败：{}", e.getMessage());
         }

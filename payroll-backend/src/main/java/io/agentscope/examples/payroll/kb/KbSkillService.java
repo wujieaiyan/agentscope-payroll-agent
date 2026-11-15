@@ -308,8 +308,10 @@ public class KbSkillService {
             budget -= content == null ? 0 : content.length();
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("chunk_id", hit.chunkId());
+            payload.put("chunk_seq", hit.chunkSeq());
             payload.put("document_id", hit.documentId());
             payload.put("document_name", hit.documentName());
+            payload.put("document_version", hit.documentVersion());
             payload.put("page_no", hit.pageNo());
             payload.put("title_path", hit.titlePath());
             payload.put("score", hit.score());

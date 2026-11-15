@@ -289,7 +289,9 @@ public final class KbDtos {
             String pointId,
             List<String> routes,
             Map<String, Integer> routeRanks,
-            int mergedChunks) {
+            int mergedChunks,
+            Integer chunkSeq,
+            Long documentVersion) {
 
         public RetrievalHit {
             routes = routes == null ? List.of() : List.copyOf(routes);
@@ -322,7 +324,9 @@ public final class KbDtos {
                     null,
                     List.of(),
                     Map.of(),
-                    1);
+                    1,
+                    null,
+                    null);
         }
     }
 

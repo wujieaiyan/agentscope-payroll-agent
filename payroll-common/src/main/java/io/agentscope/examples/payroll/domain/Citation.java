@@ -17,7 +17,13 @@ public record Citation(
         String titlePath,
         double score,
         List<String> routes,
-        String snippet) {
+        String snippet,
+        String query,
+        String retrievedAt,
+        Integer chunkSeq,
+        Long documentVersion,
+        String contentSnapshot,
+        boolean lowConfidence) {
 
     public Citation {
         pointId = pointId == null ? "" : pointId;
@@ -26,5 +32,43 @@ public record Citation(
         titlePath = titlePath == null ? "" : titlePath;
         routes = routes == null ? List.of() : List.copyOf(routes);
         snippet = snippet == null ? "" : snippet;
+        query = query == null ? "" : query;
+        retrievedAt = retrievedAt == null ? "" : retrievedAt;
+        contentSnapshot = contentSnapshot == null ? "" : contentSnapshot;
+    }
+
+    /** 兼容旧构造：历史代码与旧消息没有溯源快照字段。 */
+    public Citation(
+            int index,
+            String pointId,
+            long seriesId,
+            String seriesName,
+            long documentId,
+            String documentName,
+            long chunkId,
+            Integer pageNo,
+            String titlePath,
+            double score,
+            List<String> routes,
+            String snippet) {
+        this(
+                index,
+                pointId,
+                seriesId,
+                seriesName,
+                documentId,
+                documentName,
+                chunkId,
+                pageNo,
+                titlePath,
+                score,
+                routes,
+                snippet,
+                "",
+                "",
+                null,
+                null,
+                "",
+                false);
     }
 }

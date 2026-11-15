@@ -770,7 +770,9 @@ public class KbRetrievalService {
                             "K" + (++index),
                             hit.routes(),
                             hit.routeRanks(),
-                            hit.mergedChunks()));
+                            hit.mergedChunks(),
+                            chunk.seq(),
+                            document == null ? null : document.configVersionId()));
         }
         return citations;
     }

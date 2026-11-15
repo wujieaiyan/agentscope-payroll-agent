@@ -146,4 +146,127 @@ class KbCitationCollectorTest {
         assertTrue(citation.snippet().endsWith("…"));
         assertTrue(citation.snippet().length() <= 241);
     }
+
+    @Test
+    @DisplayName("采集查询词、检索时间与文档版本快照")
+    void capturesProvenance() {
+        KbCitationCollector collector = new KbCitationCollector();
+        String content = "员工年假按工龄计算。" + "补充说明".repeat(400);
+        Map<String, Object> hit = new LinkedHashMap<>();
+        hit.put("chunk_id", 31);
+        hit.put("chunk_seq", 4);
+        hit.put("document_id", 9);
+        hit.put("document_name", "员工手册.pdf");
+        hit.put("document_version", 17L);
+        hit.put("page_no", 5);
+        hit.put("title_path", "第三章 > 休假");
+        hit.put("score", 0.9);
+        hit.put("routes", List.of("vector"));
+        hit.put("content", content);
+        collector.record(
+                JsonSupport.toJson(
+                        Map.of(
+                                "status",
+                                "OK",
+                                "data",
+                                Map.of(
+                                        "results",
+                                        List.of(
+                                                Map.of(
+                                                        "series_id",
+                                                        3,
+                                                        "series_name",
+                                                        "人事制度",
+                                                        "hits",
+                                                        List.of(hit)))))),
+                "  年假  怎么算  ");
+
+        Citation citation = collector.citations().get(0);
+        assertEquals("年假 怎么算", citation.query());
+        assertTrue(!citation.retrievedAt().isBlank());
+        assertEquals(4, citation.chunkSeq());
+        assertEquals(17L, citation.documentVersion());
+        assertTrue(citation.contentSnapshot().length() > citation.snippet().length());
+        assertTrue(citation.contentSnapshot().length() <= 2001);
+        assertEquals(false, citation.lowConfidence());
+    }
+
+    @Test
+    @DisplayName("问题与来源毫无字面重叠时标记低置信")
+    void flagsUnrelatedQuery() {
+        KbCitationCollector collector = new KbCitationCollector();
+        collector.record(
+                """
+                {"status":"OK","data":{"results":[{"series_id":1,"series_name":"人事制度","hits":[
+                  {"chunk_id":7,"document_id":1,"document_name":"员工手册.pdf",
+                   "page_no":3,"title_path":"第三章 > 休假",
+                   "score":0.31,"content":"员工年假按工龄计算。"}]}]}}
+                """,
+                "Kafka 消息丢失怎么排查");
+
+        Citation citation = collector.citations().get(0);
+        assertTrue(citation.lowConfidence());
+        assertEquals("Kafka 消息丢失怎么排查", citation.query());
+    }
+
+    @Test
+    @DisplayName("关闭护栏后不再标记低置信")
+    void guardCanBeDisabled() {
+        KbCitationCollector collector = new KbCitationCollector();
+        collector.record(
+                """
+                {"status":"OK","data":{"results":[{"series_id":1,"series_name":"人事制度","hits":[
+                  {"chunk_id":7,"document_id":1,"document_name":"员工手册.pdf",
+                   "content":"员工年假按工龄计算。"}]}]}}
+                """,
+                "Kafka 消息丢失怎么排查");
+        try {
+            KbCitationCollector.setLowConfidenceGuard(false);
+            assertEquals(false, collector.citations().get(0).lowConfidence());
+        } finally {
+            KbCitationCollector.setLowConfidenceGuard(true);
+        }
+    }
+
+    @Test
+    @DisplayName("同一分块号出现在不同知识库时分别保留")
+    void keepsChunksFromDifferentLibraries() {
+        KbCitationCollector collector = new KbCitationCollector();
+        collector.record(
+                """
+                {"status":"OK","data":{"results":[
+                  {"series_id":1,"series_name":"制度A","hits":[
+                    {"chunk_id":5,"document_id":1,"document_name":"a.pdf","content":"甲"}]},
+                  {"series_id":2,"series_name":"制度B","hits":[
+                    {"chunk_id":5,"document_id":2,"document_name":"b.pdf","content":"乙"}]}
+                ]}}
+                """);
+
+        List<Citation> citations = collector.citations();
+        assertEquals(2, citations.size());
+        assertEquals(1L, citations.get(0).seriesId());
+        assertEquals(2L, citations.get(1).seriesId());
+    }
+
+    @Test
+    @DisplayName("旧消息 JSON 缺少溯源字段时使用默认值")
+    void readsLegacyJson() {
+        Citation citation =
+                JsonSupport.fromJson(
+                        """
+                        {"index":1,"point_id":"K1","series_id":1,"series_name":"制度",
+                         "document_id":2,"document_name":"a.pdf","chunk_id":3,"page_no":4,
+                         "title_path":"第一章","score":0.5,"routes":["keyword"],
+                         "snippet":"历史片段"}
+                        """,
+                        Citation.class);
+
+        assertEquals("历史片段", citation.snippet());
+        assertEquals("", citation.query());
+        assertEquals("", citation.retrievedAt());
+        assertEquals(null, citation.chunkSeq());
+        assertEquals(null, citation.documentVersion());
+        assertEquals("", citation.contentSnapshot());
+        assertEquals(false, citation.lowConfidence());
+    }
 }

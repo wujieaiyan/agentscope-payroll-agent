@@ -21,6 +21,16 @@ const editingId = ref(null);
 const editingTitle = ref('');
 const messageBox = ref(null);
 const gapNotice = ref('');
+const kbBound = ref([]);
+const kbMode = ref('ALL');
+const kbMax = ref(3);
+const kbPanel = ref(false);
+const kbLoading = ref(false);
+const kbSaving = ref(false);
+const kbOptions = ref([]);
+const kbSelection = ref([]);
+const sourceListModal = ref(null);
+const citationModal = ref(null);
 
 let controller = null;
 let turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
@@ -117,6 +127,171 @@ function fullTime(value) {
     + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+/** 把正文里的 [n] 拆成可点击角标；只认 citations 中存在的序号，其余保持原文。 */
+function contentParts(content, citations) {
+  const text = content || '';
+  const list = citations || [];
+  if (!text || !list.length) return [{ text }];
+  const byIndex = new Map(list.map((cite) => [Number(cite.index), cite]));
+  const parts = [];
+  const pattern = /\[(\d{1,2})\]/g;
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const index = Number(match[1]);
+    if (!byIndex.has(index)) continue;
+    if (match.index > last) parts.push({ text: text.slice(last, match.index) });
+    parts.push({ index, cite: byIndex.get(index) });
+    last = match.index + match[0].length;
+  }
+  if (!parts.length) return [{ text }];
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
+function hasInlineCitations(content, citations) {
+  return contentParts(content, citations).some((part) => part.index);
+}
+
+function citationGroups(citations) {
+  const groups = [];
+  const bySeries = new Map();
+  for (const cite of citations || []) {
+    const key = String(cite.series_id ?? cite.series_name ?? '');
+    let group = bySeries.get(key);
+    if (!group) {
+      group = {
+        series_id: cite.series_id ?? key,
+        series_name: cite.series_name || '未知知识库',
+        items: [],
+      };
+      bySeries.set(key, group);
+      groups.push(group);
+    }
+    group.items.push(cite);
+  }
+  return groups;
+}
+
+function citationMeta(cite) {
+  const parts = [];
+  if (cite.page_no) parts.push(`第 ${cite.page_no} 页`);
+  if (cite.title_path) parts.push(cite.title_path);
+  if (cite.chunk_seq) parts.push(`分块 #${cite.chunk_seq}`);
+  return parts.join(' · ') || '位置未标注';
+}
+
+function citationHeadline(cite) {
+  const parts = [cite.series_name || '未知知识库', cite.document_name || '未知文档'];
+  if (cite.page_no) parts.push(`第 ${cite.page_no} 页`);
+  if (cite.title_path) parts.push(cite.title_path);
+  if (cite.chunk_seq) parts.push(`分块 #${cite.chunk_seq}`);
+  return parts.join(' › ');
+}
+
+function citationText(cite) {
+  const headline = citationHeadline(cite);
+  const snapshot = cite.content_snapshot || cite.snippet || '';
+  return snapshot ? `${headline}\n${snapshot}` : headline;
+}
+
+function isLowConfidence(citations) {
+  return Boolean(citations?.length) && citations.every((cite) => cite.low_confidence);
+}
+
+/** 点击正文角标直接打开对应来源详情，不再滚动定位。 */
+function focusCitation(citations, messageId, index) {
+  const cite = (citations || []).find((item) => Number(item.index) === Number(index));
+  if (cite) openCitation(cite, messageId ?? null);
+}
+
+/** 来源区默认折叠为一个入口，点击后在弹窗中按库分组展示。 */
+function openSourceList(citations, messageId, content) {
+  if (!citations?.length) return;
+  sourceListModal.value = {
+    messageId: messageId ?? null,
+    citations,
+    low: isLowConfidence(citations),
+    hint: !hasInlineCitations(content || '', citations),
+  };
+}
+
+function openCitationFromList(cite) {
+  const messageId = sourceListModal.value?.messageId ?? null;
+  sourceListModal.value = null;
+  openCitation(cite, messageId);
+}
+
+async function copyAllCitations() {
+  const list = sourceListModal.value?.citations || [];
+  if (!list.length) return;
+  try {
+    await navigator.clipboard.writeText(list.map((cite) => citationText(cite)).join('\n\n'));
+    toast('来源已复制');
+  } catch (error) {
+    toast('复制失败，请手动选择文本', 'error');
+  }
+}
+
+/** 打开来源详情时校验当前文档状态；校验失败只降级提示，不影响快照展示。 */
+async function openCitation(cite, messageId) {
+  if (!cite) return;
+  const base = { cite, messageId, loading: true, state: '', statusText: '' };
+  citationModal.value = base;
+  if (!cite.series_id || !cite.document_id) {
+    citationModal.value = {
+      ...base,
+      loading: false,
+      state: 'unknown',
+      statusText: '缺少来源定位信息，只能查看回答时的片段快照。',
+    };
+    return;
+  }
+  try {
+    const document = await api(`/api/kb/series/${cite.series_id}/documents/${cite.document_id}`);
+    if (citationModal.value?.cite !== cite) return;
+    // 文档接口按 lowerCamel 输出，历史引用按 snake_case 落库，两种命名都兼容。
+    const updatedAt = document?.updated_at || document?.updatedAt;
+    const updated = updatedAt && cite.retrieved_at
+      && new Date(updatedAt).getTime() > new Date(cite.retrieved_at).getTime() + 1000;
+    citationModal.value = {
+      ...base,
+      loading: false,
+      state: updated ? 'updated' : 'ok',
+      statusText: updated
+        ? `来源文档已更新（${fullTime(updatedAt)}），以下为回答时的快照。`
+        : `来源文档状态：${document?.status || '未知'}，以下为回答时快照。`,
+    };
+  } catch (error) {
+    if (citationModal.value?.cite !== cite) return;
+    const state = error.status === 401 || error.status === 403
+      ? 'forbidden'
+      : error.status === 404
+        ? 'missing'
+        : 'unknown';
+    citationModal.value = {
+      ...base,
+      loading: false,
+      state,
+      statusText: state === 'forbidden'
+        ? '当前账号无权打开该来源原文，以下是回答时的片段快照。'
+        : state === 'missing'
+          ? '来源文档已删除或已不可见，以下是回答时的片段快照。'
+          : '暂时无法校验来源状态，以下是回答时的片段快照。',
+    };
+  }
+}
+
+async function copyCitation(cite) {
+  if (!cite) return;
+  try {
+    await navigator.clipboard.writeText(citationText(cite));
+    toast('引用已复制');
+  } catch (error) {
+    toast('复制失败，请手动选择文本', 'error');
+  }
+}
+
 function excerpt(text, limit = 80) {
   const value = String(text || '').replace(/\s+/g, ' ').trim();
   if (!value) return '未命名问题';
@@ -175,6 +350,18 @@ function exportMarkdown() {
     }
     if (message.tools?.length) lines.push('', `> 工具调用 ${message.tools.length} 次`);
     lines.push('', message.content || '（空）', '');
+    if (message.role === 'ASSISTANT' && message.citations?.length) {
+      lines.push('### 参考来源');
+      message.citations.forEach((cite) => {
+        lines.push(`${cite.index}. ${citationHeadline(cite)}`);
+        const recall = [];
+        if (cite.routes?.length) recall.push(cite.routes.join(' / '));
+        if (Number.isFinite(Number(cite.score))) recall.push(Number(cite.score).toFixed(3));
+        if (recall.length) lines.push(`   - 召回 ${recall.join(' · ')}`);
+        if (cite.snippet) lines.push(`   > ${cite.snippet}`);
+      });
+      lines.push('');
+    }
   });
 
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
@@ -238,6 +425,91 @@ async function loadMessages(silent = false) {
   }
 }
 
+async function loadKnowledge(sessionId) {
+  if (!sessionId) {
+    kbBound.value = [];
+    kbMode.value = 'ALL';
+    return;
+  }
+  try {
+    const view = await api(`/api/chat/sessions/${sessionId}/knowledge`);
+    kbBound.value = Array.isArray(view?.series) ? view.series : [];
+    kbMode.value = view?.mode === 'SELECTED' ? 'SELECTED' : 'ALL';
+    if (view?.max_series) kbMax.value = view.max_series;
+  } catch (error) {
+    kbBound.value = [];
+    kbMode.value = 'ALL';
+  }
+}
+
+async function openKbPanel() {
+  if (!activeId.value) {
+    toast('请先新建会话', 'warning');
+    return;
+  }
+  kbPanel.value = true;
+  kbLoading.value = true;
+  kbSelection.value = kbBound.value.map((item) => item.id);
+  try {
+    const page = await api('/api/kb/series?size=100');
+    kbOptions.value = (page?.items || []).map((item) => ({
+      id: item.id,
+      name: item.name,
+      role: item.role,
+      docCount: item.docCount || 0,
+      searchable: item.status === 'ACTIVE',
+    }));
+  } catch (error) {
+    kbOptions.value = [];
+    toast(error.message, 'error');
+  } finally {
+    kbLoading.value = false;
+  }
+}
+
+function toggleKbOption(item) {
+  if (!item.searchable) return;
+  const current = kbSelection.value;
+  if (current.includes(item.id)) {
+    kbSelection.value = current.filter((id) => id !== item.id);
+    return;
+  }
+  if (current.length >= kbMax.value) {
+    toast(`单个会话最多绑定 ${kbMax.value} 个知识库`, 'warning');
+    return;
+  }
+  kbSelection.value = [...current, item.id];
+}
+
+async function saveKbBinding() {
+  if (!activeId.value || kbSaving.value) return;
+  kbSaving.value = true;
+  try {
+    const view = await api(`/api/chat/sessions/${activeId.value}/knowledge`, {
+      method: 'PUT',
+      body: { series_ids: kbSelection.value },
+    });
+    kbBound.value = Array.isArray(view?.series) ? view.series : [];
+    kbMode.value = view?.mode === 'SELECTED' ? 'SELECTED' : 'ALL';
+    if (view?.max_series) kbMax.value = view.max_series;
+    kbPanel.value = false;
+    toast(
+      kbMode.value === 'ALL'
+        ? '已切换为全部可读，从下一轮生效'
+        : '检索范围已收窄，从下一轮生效',
+      'success'
+    );
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    kbSaving.value = false;
+  }
+}
+
+function kbRoleLabel(role) {
+  return { READER: '只读', EDITOR: '编辑', ADMIN: '管理', OWNER: '拥有者' }[role] || role || '';
+}
+
 async function loadFeedback(list) {
   const sessionId = activeId.value;
   const assistants = list.filter((item) => item.role === 'ASSISTANT' && item.id).slice(-30);
@@ -267,6 +539,7 @@ async function selectSession(id) {
   stopTyping();
   streaming.value = null;
   gapNotice.value = '';
+  await loadKnowledge(id);
   await loadMessages();
   // 刷新或切回会话时接上仍在执行的轮次
   await resumeActiveTurn(id, { rebuild: true });
@@ -282,6 +555,8 @@ async function createSession() {
     detail.value = null;
     draft.value = '';
     gapNotice.value = '';
+    kbBound.value = [];
+    kbMode.value = 'ALL';
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -321,6 +596,8 @@ async function deleteSession(session) {
       const next = sessions.value.length ? sessions.value[0].id : null;
       activeId.value = null;
       messages.value = [];
+      kbBound.value = [];
+      kbMode.value = 'ALL';
       if (next) await selectSession(next);
     }
   } catch (error) {
@@ -1393,8 +1670,37 @@ onBeforeUnmount(() => {
                 <span>{{ formatTime(message.created_at) }}</span>
               </div>
               <div class="bubble" :class="{ error: message.role === 'ERROR' }">
-                {{ message.content }}
+                <template
+                  v-for="(part, partIndex) in contentParts(message.content, message.citations)"
+                  :key="partIndex"
+                >
+                  <span v-if="part.text">{{ part.text }}</span>
+                  <button
+                    v-else
+                    type="button"
+                    class="cite-ref"
+                    :title="`查看来源 ${part.index}`"
+                    @click="focusCitation(message.citations, message.id, part.index)"
+                  >[{{ part.index }}]</button>
+                </template>
               </div>
+
+              <button
+                v-if="message.role === 'ASSISTANT' && message.citations?.length"
+                type="button"
+                class="citation-summary"
+                :class="{ low: isLowConfidence(message.citations) }"
+                @click="openSourceList(message.citations, message.id, message.content)"
+              >
+                <span class="citation-summary-label">参考来源（{{ message.citations.length }}）</span>
+                <span class="citation-summary-libs">
+                  {{ citationGroups(message.citations).map((group) => group.series_name).join(' · ') }}
+                </span>
+                <span v-if="isLowConfidence(message.citations)" class="citation-summary-warn">
+                  相关性低
+                </span>
+                <span class="citation-summary-chev">›</span>
+              </button>
 
               <div v-if="message.role === 'ASSISTANT'" class="msg-tools">
                 <button
@@ -1531,24 +1837,41 @@ onBeforeUnmount(() => {
                     >
                       <div class="trace-head">
                         <span class="badge">{{ cite.index }}</span>
-                        <strong>{{ cite.series_name || '知识库' }}</strong>
-                        <span class="muted">{{ cite.document_name }}</span>
+                        <strong>{{ cite.series_name || '未知知识库' }}</strong>
+                        <span class="muted">{{ cite.document_name || '未知文档' }}</span>
                       </div>
                       <div class="panel-row">
                         <span class="k">位置</span>
                         <span class="v">
                           {{ cite.title_path || '—' }}
                           <template v-if="cite.page_no"> · 第 {{ cite.page_no }} 页</template>
+                          <template v-if="cite.chunk_seq"> · 分块 #{{ cite.chunk_seq }}</template>
                         </span>
+                      </div>
+                      <div v-if="cite.query" class="panel-row">
+                        <span class="k">查询词</span>
+                        <span class="v">{{ cite.query }}</span>
                       </div>
                       <div class="panel-row">
                         <span class="k">召回</span>
                         <span class="v mono">
                           {{ (cite.routes || []).join(' / ') || 'keyword' }} ·
                           {{ Number(cite.score || 0).toFixed(3) }}
+                          <template v-if="cite.retrieved_at"> · {{ fullTime(cite.retrieved_at) }}</template>
                         </span>
                       </div>
+                      <div v-if="cite.low_confidence" class="citation-warn">
+                        未找到与问题直接相关的字面依据，请谨慎参考。
+                      </div>
                       <div class="muted" style="white-space: pre-wrap">{{ cite.snippet }}</div>
+                      <details v-if="cite.content_snapshot && cite.content_snapshot !== cite.snippet">
+                        <summary class="muted" style="cursor: pointer; font-size: 12px">完整快照</summary>
+                        <div class="snapshot-text">{{ cite.content_snapshot }}</div>
+                      </details>
+                      <div class="trace-actions">
+                        <button class="ghost sm" @click="openCitation(cite, detail.messageId)">来源详情</button>
+                        <button class="ghost sm" @click="copyCitation(cite)">复制引用</button>
+                      </div>
                     </div>
                   </template>
 
@@ -1674,12 +1997,43 @@ onBeforeUnmount(() => {
               <span v-else-if="streaming.resumable">连接已中断</span>
             </div>
             <div class="bubble" :class="{ error: streaming.error }">
-              <template v-if="streaming.text">{{ streaming.text }}</template>
+              <template v-if="streaming.text">
+                <template
+                  v-for="(part, partIndex) in contentParts(streaming.text, streaming.citations)"
+                  :key="partIndex"
+                >
+                  <span v-if="part.text">{{ part.text }}</span>
+                  <button
+                    v-else
+                    type="button"
+                    class="cite-ref"
+                    :title="`查看来源 ${part.index}`"
+                    @click="focusCitation(streaming.citations, null, part.index)"
+                  >[{{ part.index }}]</button>
+                </template>
+              </template>
               <span v-else-if="!streaming.error && !streaming.gap" class="typing"><i></i><i></i><i></i></span>
               <template v-if="streaming.error">{{ streaming.error }}</template>
               <template v-else-if="streaming.cancelled">（本轮回答已取消）</template>
               <template v-else-if="streaming.gap">{{ streaming.gapMessage }}</template>
             </div>
+
+            <button
+              v-if="streaming.citations.length"
+              type="button"
+              class="citation-summary"
+              :class="{ low: isLowConfidence(streaming.citations) }"
+              @click="openSourceList(streaming.citations, null, streaming.text)"
+            >
+              <span class="citation-summary-label">参考来源（{{ streaming.citations.length }}）</span>
+              <span class="citation-summary-libs">
+                {{ citationGroups(streaming.citations).map((group) => group.series_name).join(' · ') }}
+              </span>
+              <span v-if="isLowConfidence(streaming.citations)" class="citation-summary-warn">
+                相关性低
+              </span>
+              <span class="citation-summary-chev">›</span>
+            </button>
 
             <div v-if="streaming.resumable && !busy" class="msg-tools">
               <button class="primary sm" @click="retryResume">重试续传</button>
@@ -1718,40 +2072,6 @@ onBeforeUnmount(() => {
                 <div v-for="agent in streaming.agents.filter((item) => item.text)" :key="agent.id">
                   <strong>{{ agent.label }}</strong>
                   <div style="white-space: pre-wrap; margin-top: 4px">{{ agent.text }}</div>
-                </div>
-              </div>
-            </details>
-
-            <details v-if="streaming.citations.length" class="panel">
-              <summary class="panel-head" style="cursor: pointer">
-                知识库引用（{{ streaming.citations.length }}）
-              </summary>
-              <div class="panel-body">
-                <div
-                  v-for="cite in streaming.citations"
-                  :key="`${cite.series_id}-${cite.chunk_id}`"
-                  class="trace-item"
-                >
-                  <div class="trace-head">
-                    <span class="badge">{{ cite.index }}</span>
-                    <strong>{{ cite.series_name || '知识库' }}</strong>
-                    <span class="muted">{{ cite.document_name }}</span>
-                  </div>
-                  <div class="panel-row">
-                    <span class="k">位置</span>
-                    <span class="v">
-                      {{ cite.title_path || '—' }}
-                      <template v-if="cite.page_no"> · 第 {{ cite.page_no }} 页</template>
-                    </span>
-                  </div>
-                  <div class="panel-row">
-                    <span class="k">召回</span>
-                    <span class="v mono">
-                      {{ (cite.routes || []).join(' / ') || 'keyword' }} ·
-                      {{ Number(cite.score || 0).toFixed(3) }}
-                    </span>
-                  </div>
-                  <div class="muted" style="white-space: pre-wrap">{{ cite.snippet }}</div>
                 </div>
               </div>
             </details>
@@ -1805,6 +2125,20 @@ onBeforeUnmount(() => {
       </nav>
 
       <footer class="composer">
+        <div class="kb-bar">
+          <button class="chip" :disabled="!activeId" @click="openKbPanel">
+            知识库{{ kbMode === 'SELECTED' ? ` ${kbBound.length}/${kbMax}` : '：全部可读' }}
+          </button>
+          <span v-for="item in kbBound" :key="item.id" class="chip plain">
+            {{ item.name }}<template v-if="!item.searchable">（未启用）</template>
+          </span>
+          <span v-if="kbMode !== 'SELECTED'" class="muted" style="font-size: 11.5px">
+            默认检索你有权限的全部已启用知识库，回答中给出引用
+          </span>
+          <span v-else class="muted" style="font-size: 11.5px">
+            已收窄检索范围
+          </span>
+        </div>
         <div class="composer-box">
           <textarea
             v-model="draft"
@@ -1822,6 +2156,188 @@ onBeforeUnmount(() => {
           <span>{{ draft.length }} / 2000</span>
         </div>
       </footer>
+
+      <div v-if="kbPanel" class="modal-mask" @click.self="kbPanel = false">
+        <div class="modal" style="width: min(520px, 96vw)">
+          <div class="modal-head">
+            <h3>会话知识库范围</h3>
+            <button class="subtle sm" @click="kbPanel = false">关闭</button>
+          </div>
+          <div class="modal-body">
+            <div class="muted" style="font-size: 12px">
+              不勾选时默认检索你有只读权限的全部已启用知识库；勾选后仅检索所选库（最多
+              {{ kbMax }} 个）。范围从下一轮生效。
+            </div>
+            <div v-if="kbLoading" class="muted">加载中…</div>
+            <template v-else>
+              <div v-if="!kbOptions.length" class="muted">没有可绑定的知识库。</div>
+              <div v-else class="kb-options">
+                <label
+                  v-for="item in kbOptions"
+                  :key="item.id"
+                  class="kb-option"
+                  :class="{ disabled: !item.searchable }"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="kbSelection.includes(item.id)"
+                    :disabled="!item.searchable"
+                    @change="toggleKbOption(item)"
+                  />
+                  <span class="name">{{ item.name }}</span>
+                  <span v-if="!item.searchable" class="muted">未启用</span>
+                  <span v-else class="muted">{{ item.docCount }} 篇</span>
+                  <span v-if="item.role" class="badge">{{ kbRoleLabel(item.role) }}</span>
+                </label>
+              </div>
+            </template>
+          </div>
+          <div class="modal-foot">
+            <span class="muted" style="margin-right: auto; font-size: 12px">
+              {{
+                kbSelection.length
+                  ? `已选 ${kbSelection.length}/${kbMax}`
+                  : '未选择，使用全部可读'
+              }}
+            </span>
+            <button
+              v-if="kbSelection.length"
+              class="ghost"
+              @click="kbSelection = []"
+            >
+              恢复全部可读
+            </button>
+            <button class="ghost" @click="kbPanel = false">取消</button>
+            <button class="primary" :disabled="kbSaving || kbLoading" @click="saveKbBinding">
+              {{ kbSaving ? '保存中…' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="sourceListModal" class="modal-mask" @click.self="sourceListModal = null">
+        <div class="modal citation-modal source-list-modal">
+          <div class="modal-head">
+            <h3>参考来源（{{ sourceListModal.citations.length }}）</h3>
+            <button class="subtle sm" @click="sourceListModal = null">关闭</button>
+          </div>
+          <div class="modal-body">
+            <div v-if="sourceListModal.low" class="citation-warn">
+              未找到与问题直接相关的依据，请谨慎参考。
+            </div>
+            <div v-else-if="sourceListModal.hint" class="citation-hint">
+              以下为本次回答检索到的依据
+            </div>
+            <div
+              v-for="group in citationGroups(sourceListModal.citations)"
+              :key="group.series_id"
+              class="citation-group"
+            >
+              <div class="citation-group-head">
+                <span class="citation-lib">{{ group.series_name }}</span>
+                <span class="muted">{{ group.items.length }} 条</span>
+              </div>
+              <button
+                v-for="cite in group.items"
+                :key="`${cite.series_id}-${cite.chunk_id}`"
+                type="button"
+                class="citation-card"
+                @click="openCitationFromList(cite)"
+              >
+                <span class="citation-index">{{ cite.index }}</span>
+                <span class="citation-main">
+                  <span class="citation-title">{{ cite.document_name || '未知文档' }}</span>
+                  <span class="citation-meta">{{ citationMeta(cite) }}</span>
+                  <span class="citation-snippet">{{ cite.snippet }}</span>
+                </span>
+                <span class="citation-open">详情 ›</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="ghost" @click="copyAllCitations">复制全部</button>
+            <button class="primary" @click="sourceListModal = null">关闭</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="citationModal" class="modal-mask" @click.self="citationModal = null">
+        <div class="modal citation-modal">
+          <div class="modal-head">
+            <h3>来源详情</h3>
+            <button class="subtle sm" @click="citationModal = null">关闭</button>
+          </div>
+          <div class="modal-body">
+            <div v-if="citationModal.loading" class="muted">正在校验来源状态…</div>
+            <div
+              v-else-if="citationModal.statusText"
+              class="citation-status"
+              :class="citationModal.state"
+            >
+              {{ citationModal.statusText }}
+            </div>
+            <div class="panel-row">
+              <span class="k">知识库</span>
+              <span class="v">
+                <strong>{{ citationModal.cite.series_name || '未知知识库' }}</strong>
+                <span class="muted mono"> #{{ citationModal.cite.series_id ?? '—' }}</span>
+              </span>
+            </div>
+            <div class="panel-row">
+              <span class="k">文档</span>
+              <span class="v">
+                {{ citationModal.cite.document_name || '未知文档' }}
+                <span class="muted mono"> #{{ citationModal.cite.document_id ?? '—' }}</span>
+              </span>
+            </div>
+            <div class="panel-row">
+              <span class="k">位置</span>
+              <span class="v">
+                {{ citationModal.cite.title_path || '—' }}
+                <template v-if="citationModal.cite.page_no">
+                  · 第 {{ citationModal.cite.page_no }} 页
+                </template>
+                <template v-if="citationModal.cite.chunk_seq">
+                  · 分块 #{{ citationModal.cite.chunk_seq }}
+                </template>
+                <span class="muted mono">（chunk {{ citationModal.cite.chunk_id }}）</span>
+              </span>
+            </div>
+            <div v-if="citationModal.cite.query" class="panel-row">
+              <span class="k">查询词</span>
+              <span class="v">{{ citationModal.cite.query }}</span>
+            </div>
+            <div class="panel-row">
+              <span class="k">召回</span>
+              <span class="v mono">
+                {{ (citationModal.cite.routes || []).join(' / ') || 'keyword' }} ·
+                {{ Number(citationModal.cite.score || 0).toFixed(3) }}
+              </span>
+            </div>
+            <div v-if="citationModal.cite.retrieved_at" class="panel-row">
+              <span class="k">检索时间</span>
+              <span class="v">{{ fullTime(citationModal.cite.retrieved_at) }}</span>
+            </div>
+            <div v-if="citationModal.cite.document_version" class="panel-row">
+              <span class="k">文档版本</span>
+              <span class="v mono">{{ citationModal.cite.document_version }}</span>
+            </div>
+            <div v-if="isLowConfidence([citationModal.cite])" class="citation-warn">
+              未找到与问题直接相关的字面依据，请谨慎参考。
+            </div>
+            <div class="snapshot-block">
+              <div class="muted" style="margin-bottom: 4px">回答时的内容快照</div>
+              <div class="snapshot-text">
+                {{ citationModal.cite.content_snapshot || citationModal.cite.snippet || '（无片段）' }}
+              </div>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="ghost" @click="copyCitation(citationModal.cite)">复制引用</button>
+            <button class="primary" @click="citationModal = null">关闭</button>
+          </div>
+        </div>
+      </div>
 
       <div v-if="routePanel" class="route-preview">
         <h4>
