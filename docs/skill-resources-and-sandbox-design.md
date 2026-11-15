@@ -98,6 +98,7 @@ skill_read(path)  # 只能读本智能体已绑定技能中的 references/** 与
 | 额度 | 单轮 ≤ 5 次读取（与 `KbSearchBudget` 同样的轮内清零模式） |
 | 错误 | 路径不存在 / 越界 / 额度用尽分别返回中文错误，不泄露其他技能文件 |
 | 只读 | `readOnly = true`，不触发写确认；不采集 citation（引用只属于 KB） |
+| 追溯 | 读取结果写入 `ToolTraceRecorder`（8KB 截断）；会话页"引用文件"面板展示技能 ID、路径、大小与原文，便于客户核对数据来源 |
 | 提示词 | 技能含 resources 时追加一段固定指引：参考文件用 `skill_read`，制度原文用 `kb_search` |
 
 内置薪酬角色的 `load_skill_through_path` 行为不变；resources 存在时模型可按路径加载，属顺带收益。

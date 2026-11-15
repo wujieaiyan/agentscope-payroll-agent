@@ -44,6 +44,12 @@ let typeTimer = null;
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value) || null);
 const canSend = computed(() => !busy.value && draft.value.trim().length > 0);
 
+/** 流式阶段只统计已完成的 skill_read 次数，用于提示本轮读了多少个技能文件。 */
+const streamingFileCount = computed(() => {
+  const tools = streaming.value?.tools || [];
+  return tools.filter((tool) => tool.name === 'skill_read' && tool.state !== 'RUNNING').length;
+});
+
 const questionRail = computed(() =>
   messages.value
     .filter((item) => item.role === 'USER' && item.id)
@@ -81,6 +87,13 @@ function formatTime(value) {
   if (!value) return '';
   const text = String(value).replace('T', ' ').slice(0, 16);
   return text.length > 10 ? text.slice(5) : text;
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) return '';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function roleLabel(role) {
@@ -1103,8 +1116,39 @@ function lastUserQuestion() {
   return '';
 }
 
+function hasSkillFiles(message) {
+  return Boolean(message && Array.isArray(message.tools) && message.tools.includes('skill_read'));
+}
+
+/** skill_read 的追溯结果即模型读到的原文，这里只提取展示所需字段。 */
+function parseSkillFile(trace) {
+  if (!trace || trace.result_state === 'ERROR') return null;
+  let args = {};
+  let result = null;
+  try {
+    args = JSON.parse(trace.args_json || '{}');
+  } catch {
+    args = {};
+  }
+  try {
+    result = JSON.parse(trace.result_json || 'null');
+  } catch {
+    result = null;
+  }
+  const path = (result && result.path) || args.path;
+  if (!path) return null;
+  return {
+    key: `${trace.id}-${path}`,
+    skillId: (result && result.skill_id) || args.skill_id || '',
+    path,
+    size: result && Number.isFinite(result.size) ? result.size : null,
+    truncated: Boolean(result && result.truncated),
+    content: result && typeof result.content === 'string' ? result.content : '',
+  };
+}
+
 async function openDetail(message, kind) {
-  if (!message.id || message.id.startsWith('local-')) return;
+  if (!message.id || String(message.id).startsWith('local-')) return;
   if (detail.value && detail.value.messageId === message.id && detail.value.kind === kind) {
     detail.value = null;
     return;
@@ -1116,6 +1160,32 @@ async function openDetail(message, kind) {
       loading: false,
       data: message.citations || [],
     };
+    return;
+  }
+  if (kind === 'files') {
+    detail.value = { messageId: message.id, kind, loading: true, data: null };
+    try {
+      const traces = await api(
+        `/api/chat/sessions/${activeId.value}/messages/${message.id}/traces`
+      );
+      const files = new Map();
+      for (const trace of traces || []) {
+        const file = parseSkillFile(trace);
+        if (file && !files.has(`${file.skillId}|${file.path}`)) {
+          files.set(`${file.skillId}|${file.path}`, file);
+        }
+      }
+      if (
+        detail.value &&
+        detail.value.messageId === message.id &&
+        detail.value.kind === 'files'
+      ) {
+        detail.value = { messageId: message.id, kind, loading: false, data: [...files.values()] };
+      }
+    } catch (error) {
+      detail.value = null;
+      toast(error.message, 'error');
+    }
     return;
   }
   detail.value = { messageId: message.id, kind, loading: true, data: null };
@@ -1346,6 +1416,13 @@ onBeforeUnmount(() => {
                 >
                   引用（{{ message.citations.length }}）
                 </button>
+                <button
+                  v-if="hasSkillFiles(message)"
+                  class="chip"
+                  @click="openDetail(message, 'files')"
+                >
+                  引用文件
+                </button>
                 <button class="chip" @click="openDetail(message, 'team')">团队运行</button>
                 <button
                   v-if="message.routing"
@@ -1402,7 +1479,9 @@ onBeforeUnmount(() => {
                           ? '团队运行'
                           : detail.kind === 'citations'
                             ? '知识库引用'
-                            : '路由详情'
+                            : detail.kind === 'files'
+                              ? '引用文件'
+                              : '路由详情'
                     }}
                   </span>
                   <button class="subtle sm" @click="detail = null">收起</button>
@@ -1511,6 +1590,26 @@ onBeforeUnmount(() => {
                     </div>
                   </template>
 
+                  <template v-else-if="detail.kind === 'files'">
+                    <div v-if="!detail.data || !detail.data.length" class="muted">
+                      本轮没有读取技能文件。
+                    </div>
+                    <div v-for="file in detail.data || []" :key="file.key" class="trace-item">
+                      <div class="trace-head">
+                        <strong class="mono">{{ file.path }}</strong>
+                        <span class="muted">
+                          {{ formatBytes(file.size) }}{{ file.truncated ? ' · 已截断' : '' }}
+                        </span>
+                      </div>
+                      <div class="panel-row">
+                        <span class="k">技能</span>
+                        <span class="v">{{ file.skillId || '—' }}</span>
+                      </div>
+                      <pre v-if="file.content" class="trace-pre">{{ file.content }}</pre>
+                      <div v-else class="muted">未取到文件内容。</div>
+                    </div>
+                  </template>
+
                   <template v-else>
                     <template v-if="detail.data">
                       <div class="panel-row">
@@ -1602,6 +1701,10 @@ onBeforeUnmount(() => {
                   <span class="muted">{{ tool.state }}{{ tool.duration ? ` · ${tool.duration}ms` : '' }}</span>
                 </span>
               </div>
+            </div>
+
+            <div v-if="streamingFileCount" class="msg-tools">
+              <span class="chip plain">引用文件 {{ streamingFileCount }} 个</span>
             </div>
 
             <details v-if="streaming.thinking" class="panel">

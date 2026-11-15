@@ -35,6 +35,33 @@ class SkillReadToolsTest {
     }
 
     @Test
+    @DisplayName("读取结果写入工具追溯，供会话展示数据来源")
+    void recordsTraceEntry() {
+        SkillReadTools tools =
+                new SkillReadTools(
+                        List.of(
+                                skill(
+                                        "payroll-auditor",
+                                        Map.of("references/faq.md", "# FAQ\n口径说明"))));
+        ToolTraceRecorder recorder = new ToolTraceRecorder();
+        RuntimeContext context =
+                RuntimeContext.builder()
+                        .userId("7")
+                        .sessionId("s-1")
+                        .put(SkillReadBudget.class, new SkillReadBudget())
+                        .put(ToolTraceRecorder.class, recorder)
+                        .build();
+
+        tools.read("references/faq.md", null, context);
+
+        ToolTraceRecorder.Entry entry = recorder.take(SkillReadTools.SKILL_READ);
+        assertTrue(entry != null, "应写入 skill_read 追溯");
+        assertTrue(entry.argsJson().contains("references/faq.md"), entry.argsJson());
+        assertTrue(entry.resultJson().contains("口径说明"), entry.resultJson());
+        assertTrue(entry.resultJson().contains("\"skill_id\":\"payroll-auditor\""), entry.resultJson());
+    }
+
+    @Test
     @DisplayName("越界路径与不存在的文件返回可读错误")
     void rejectsIllegalPath() {
         SkillReadTools tools =

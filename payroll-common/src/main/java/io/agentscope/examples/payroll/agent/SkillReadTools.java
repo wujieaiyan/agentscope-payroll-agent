@@ -80,6 +80,13 @@ public final class SkillReadTools {
                             required = false)
                     String skillId,
             RuntimeContext context) {
+        long startedAt = System.nanoTime();
+        String result = doRead(path, skillId, context);
+        record(path, skillId, result, context, startedAt);
+        return result;
+    }
+
+    private String doRead(String path, String skillId, RuntimeContext context) {
         String normalized;
         try {
             normalized = SkillFilePackage.normalizePath(path);
@@ -163,6 +170,29 @@ public final class SkillReadTools {
             }
         }
         return content.substring(0, low);
+    }
+
+    /** 追溯记录模型实际读到的文件内容，供会话侧展示数据来源。 */
+    private void record(
+            String path, String skillId, String result, RuntimeContext context, long startedAt) {
+        ToolTraceRecorder recorder = context == null ? null : context.get(ToolTraceRecorder.class);
+        if (recorder == null) {
+            return;
+        }
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("path", path == null ? "" : path);
+        if (skillId != null && !skillId.isBlank()) {
+            args.put("skill_id", skillId);
+        }
+        try {
+            recorder.record(
+                    SKILL_READ,
+                    JsonSupport.toJson(args),
+                    result,
+                    (System.nanoTime() - startedAt) / 1_000_000);
+        } catch (RuntimeException e) {
+            log.warn("[技能文件] 记录追溯失败：path={}，原因={}", path, e.getMessage());
+        }
     }
 
     private static String error(String message) {
