@@ -34,6 +34,26 @@ class KbNodeRoutingTest {
     }
 
     @Test
+    @DisplayName("显式声明 kb:read 可让无 KB 标签的智能体获得检索")
+    void declaredKbReadEnablesSearch() {
+        assertTrue(
+                PayrollAgentFactory.kbSearchNode(
+                        "CALCULATOR",
+                        agent(
+                                List.of("薪酬"),
+                                List.of(AgentDefinition.CAPABILITY_KB_READ))));
+    }
+
+    @Test
+    @DisplayName("显式声明非空但无 kb:read 时关闭检索，不再按标签推断")
+    void declaredCapabilitiesCanOptOut() {
+        assertFalse(
+                PayrollAgentFactory.kbSearchNode(
+                        "QUERY",
+                        agent(List.of("KB"), List.of(AgentDefinition.CAPABILITY_VIDEO))));
+    }
+
+    @Test
     @DisplayName("团队失败与兼容构造不带引用，成功结果可显式回传")
     void citationsAreCarriedExplicitly() {
         assertTrue(ActiveTeamService.Attempt.skipped().citations().isEmpty());
@@ -44,6 +64,10 @@ class KbNodeRoutingTest {
     }
 
     private static AgentDefinition agent(List<String> tags) {
+        return agent(tags, List.of());
+    }
+
+    private static AgentDefinition agent(List<String> tags, List<String> capabilities) {
         return new AgentDefinition(
                 "kb-agent",
                 "知识库智能体",
@@ -55,6 +79,7 @@ class KbNodeRoutingTest {
                 AgentDefinition.STATUS_ONLINE,
                 "tester",
                 null,
-                null);
+                null,
+                capabilities);
     }
 }

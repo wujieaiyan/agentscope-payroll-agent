@@ -148,8 +148,6 @@ public final class PayrollAgentFactory {
             3. 工具返回 FORBIDDEN 时原样说明无权限，禁止改用通用知识或薪酬流程作答。
             """;
 
-    private static final String KB_GUIDANCE = KB_SEARCH_GUIDANCE + "\n" + KB_CONFIG_GUIDANCE;
-
     private static String calculatorPrompt(String skillId) {
         return COMMON_RULES
                 + "\n"
@@ -402,23 +400,12 @@ public final class PayrollAgentFactory {
                 8);
     }
 
-    /** 知识库角色或带 kb 标签的智能体可挂只读检索工具；其余节点保持原工具集。 */
+    /**
+     * 只读检索注册入口（规格 6.3）：声明 kb:read 的智能体/流程节点才挂 {@link KbQueryTools}；
+     * 未声明时按角色与标签回退到旧规则，写工具永不由这里注册。
+     */
     public static boolean kbSearchNode(String role, AgentDefinition agent) {
-        if (role != null && "KB_CONFIG".equalsIgnoreCase(role.trim())) {
-            return true;
-        }
-        if (agent == null || agent.tags().isEmpty()) {
-            return false;
-        }
-        for (String tag : agent.tags()) {
-            if (tag == null || tag.isBlank()) {
-                continue;
-            }
-            if (tag.toLowerCase(Locale.ROOT).contains("kb")) {
-                return true;
-            }
-        }
-        return false;
+        return AgentCapabilities.supportsKbRead(role, agent);
     }
 
     /**
@@ -628,6 +615,10 @@ public final class PayrollAgentFactory {
         KbTools kbTools = kbGateway == null ? null : new KbTools(kbGateway);
         if (kbTools != null) {
             toolkit.registerTool(kbTools);
+        }
+        // 规格 6.3：kb_search 只挂给具备 kb:read 的智能体，其余智能体不获得检索入口。
+        boolean kbRead = kbGateway != null && AgentCapabilities.supportsKbRead(activeAgent);
+        if (kbRead) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
         }
         List<McpClientWrapper> mcpClients =
@@ -636,24 +627,29 @@ public final class PayrollAgentFactory {
                         McpServerConfig.fromEnvironment(),
                         McpToolRegistrar.defaultFactory());
         log.info(
-                "[Agent] 核算智能体：{}（{}），技能={}，工具={}，知识库工具={}",
+                "[Agent] 核算智能体：{}（{}），技能={}，工具={}，知识库工具={}，只读检索={}",
                 activeAgent.name(),
                 activeAgent.id(),
                 activeAgent.skillIds(),
                 toolkit.getToolNames(),
-                kbTools != null);
-        String prompt =
-                kbTools == null
-                        ? activeAgentPrompt(activeAgent, boundSkills)
-                        : activeAgentPrompt(activeAgent, boundSkills) + "\n" + KB_GUIDANCE;
+                kbTools != null,
+                kbRead);
+        StringBuilder prompt = new StringBuilder(activeAgentPrompt(activeAgent, boundSkills));
+        if (kbRead) {
+            prompt.append('\n').append(KB_SEARCH_GUIDANCE);
+        }
+        if (kbTools != null) {
+            prompt.append('\n').append(KB_CONFIG_GUIDANCE);
+        }
+        String promptText = prompt.toString();
         if (scriptsRunnable) {
-            prompt = prompt + "\n" + SkillRunTools.guidance(boundSkills, skillExecutionTimeoutMs());
+            promptText = promptText + "\n" + SkillRunTools.guidance(boundSkills, skillExecutionTimeoutMs());
         }
         HarnessAgent agent =
                 createAgent(
                         "PayrollActiveAgent",
                         activeAgent.name() + "：" + activeAgent.description(),
-                        prompt,
+                        promptText,
                         model,
                         toolkit,
                         12,
