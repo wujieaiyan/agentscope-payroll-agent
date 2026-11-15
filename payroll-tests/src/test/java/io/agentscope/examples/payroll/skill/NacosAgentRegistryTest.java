@@ -105,6 +105,55 @@ class NacosAgentRegistryTest {
     }
 
     @Test
+    @DisplayName("保存并重新读取时保留能力声明")
+    void persistsCapabilities() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+
+        AgentDefinition saved =
+                registry.save(newAgent(null, "制度顾问", List.of(AgentDefinition.CAPABILITY_KB_READ)), "admin");
+        assertEquals(List.of(AgentDefinition.CAPABILITY_KB_READ), saved.capabilities());
+        assertTrue(nacos.configs.get(NacosAgentRegistry.DATA_ID).contains("kb:read"));
+
+        AgentDefinition reloaded =
+                registry(true).list().stream()
+                        .filter(agent -> agent.id().equals(saved.id()))
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals(List.of(AgentDefinition.CAPABILITY_KB_READ), reloaded.capabilities());
+    }
+
+    @Test
+    @DisplayName("更新未提交能力时保留已有声明")
+    void updatePreservesCapabilitiesWhenAbsent() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition saved =
+                registry.save(newAgent(null, "制度顾问", List.of(AgentDefinition.CAPABILITY_KB_READ)), "admin");
+
+        AgentDefinition updated =
+                registry.save(
+                        new AgentDefinition(
+                                saved.id(),
+                                "制度顾问",
+                                "📚",
+                                "只回答制度",
+                                List.of("知识库"),
+                                List.of(RoleSkills.CALCULATOR),
+                                AgentDefinition.VISIBILITY_PUBLIC,
+                                AgentDefinition.STATUS_ONLINE,
+                                "ignored",
+                                null,
+                                null),
+                        "other");
+        assertEquals(List.of(AgentDefinition.CAPABILITY_KB_READ), updated.capabilities());
+
+        AgentDefinition explicit =
+                registry.save(newAgent(saved.id(), "制度顾问", List.of(AgentDefinition.CAPABILITY_CALC)), "other");
+        assertEquals(List.of(AgentDefinition.CAPABILITY_CALC), explicit.capabilities());
+    }
+
+    @Test
     @DisplayName("删除智能体同步写入 Nacos")
     void deletePersists() throws IOException {
         nacos = new FakeNacos();
@@ -333,8 +382,26 @@ class NacosAgentRegistryTest {
         return newAgent(id, name, AgentDefinition.VISIBILITY_PUBLIC, AgentDefinition.STATUS_ONLINE);
     }
 
+    private static AgentDefinition newAgent(String id, String name, List<String> capabilities) {
+        return newAgent(
+                id,
+                name,
+                AgentDefinition.VISIBILITY_PUBLIC,
+                AgentDefinition.STATUS_ONLINE,
+                capabilities);
+    }
+
     private static AgentDefinition newAgent(
             String id, String name, String visibility, String status) {
+        return newAgent(id, name, visibility, status, List.of());
+    }
+
+    private static AgentDefinition newAgent(
+            String id,
+            String name,
+            String visibility,
+            String status,
+            List<String> capabilities) {
         return new AgentDefinition(
                 id,
                 name,
@@ -346,7 +413,8 @@ class NacosAgentRegistryTest {
                 status,
                 null,
                 null,
-                null);
+                null,
+                capabilities);
     }
 
     private static final class FakeNacos implements AutoCloseable {

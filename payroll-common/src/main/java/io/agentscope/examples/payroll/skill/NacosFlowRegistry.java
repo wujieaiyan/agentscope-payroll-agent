@@ -158,7 +158,11 @@ public final class NacosFlowRegistry {
                     input.edges(),
                     existing.createdBy(),
                     existing.createdAt(),
-                    now);
+                    now,
+                    // 规格 6.2：未提交能力声明时保留已有声明，避免旧画布保存后静默丢能力。
+                    input.capabilities().isEmpty()
+                            ? existing.capabilities()
+                            : input.capabilities());
             flows.set(index, saved);
         } else {
             String id = input.id() == null || input.id().isBlank()
@@ -172,7 +176,8 @@ public final class NacosFlowRegistry {
                     input.edges(),
                     operator,
                     now,
-                    now);
+                    now,
+                    input.capabilities());
             flows.add(saved);
         }
         persist(flows);

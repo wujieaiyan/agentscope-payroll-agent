@@ -38,6 +38,10 @@ public class AgentAdminController {
     private static final int MAX_AVATAR_LENGTH = 40;
     private static final int MAX_TAGS = 6;
     private static final int MAX_TAG_LENGTH = 12;
+    private static final int MAX_CAPABILITIES = 8;
+    private static final int MAX_CAPABILITY_LENGTH = 24;
+    private static final java.util.regex.Pattern CAPABILITY_PATTERN =
+            java.util.regex.Pattern.compile("[a-z0-9:_-]+");
 
     private final NacosAgentRegistry registry;
     private final AgentSkillRepository skillRepository;
@@ -268,6 +272,7 @@ public class AgentAdminController {
                 throw new PayrollException("单个标签不能超过 " + MAX_TAG_LENGTH + " 字");
             }
         }
+        List<String> capabilities = normalizeCapabilities(input.capabilities());
         return new AgentDefinition(
                 forcedId,
                 name,
@@ -279,7 +284,29 @@ public class AgentAdminController {
                 status,
                 input.createdBy(),
                 input.createdAt(),
-                input.updatedAt());
+                input.updatedAt(),
+                capabilities);
+    }
+
+    /** 能力声明统一小写去重，避免同一能力因大小写不同被判定为未声明。 */
+    private List<String> normalizeCapabilities(List<String> declared) {
+        List<String> capabilities = declared.stream()
+                .map(capability -> capability == null ? "" : capability.trim().toLowerCase(Locale.ROOT))
+                .filter(capability -> !capability.isBlank())
+                .distinct()
+                .toList();
+        if (capabilities.size() > MAX_CAPABILITIES) {
+            throw new PayrollException("能力声明最多 " + MAX_CAPABILITIES + " 项");
+        }
+        for (String capability : capabilities) {
+            if (capability.length() > MAX_CAPABILITY_LENGTH) {
+                throw new PayrollException("单项能力不能超过 " + MAX_CAPABILITY_LENGTH + " 个字符");
+            }
+            if (!CAPABILITY_PATTERN.matcher(capability).matches()) {
+                throw new PayrollException("能力声明只能包含小写字母、数字、冒号、下划线和连字符：" + capability);
+            }
+        }
+        return capabilities;
     }
 
     private String normalizeEnum(

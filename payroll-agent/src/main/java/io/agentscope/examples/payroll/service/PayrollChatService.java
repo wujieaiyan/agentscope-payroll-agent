@@ -14,6 +14,7 @@ import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.ActionGuard;
+import io.agentscope.examples.payroll.agent.AgentCapabilities;
 import io.agentscope.examples.payroll.agent.KbChatIntent;
 import io.agentscope.examples.payroll.agent.KbCitationCollector;
 import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
@@ -600,9 +601,10 @@ public final class PayrollChatService implements PayrollChat {
                     semanticDecision == null ? "-" : semanticDecision.label(),
                     preview(question, 120));
             if (resolvedFlow != null && !flowUsable(needKb, flowKbCapable(resolvedFlow))) {
-                // 默认流程没有知识库节点时，制度类问题若不改道就永远检索不到内容。
+                // 规格 6.2：能力过滤取代早期"命中关键词就置空流程"的补丁；丢流程后按
+                // 智能体（kb:read）→ 团队（KB 角色）→ PayrollKbAgent 的顺序继续。
                 log.info(
-                        "[知识库] 默认流程「{}」不含知识库节点，本轮需检索的问题改走检索链路",
+                        "[知识库][能力过滤] 流程「{}」不具备 kb:read，need_kb=true 时改选可检索链路",
                         resolvedFlow.flow().name());
                 resolvedFlow = null;
             }
@@ -752,16 +754,25 @@ public final class PayrollChatService implements PayrollChat {
                 String calculatorInput = context.augment(question, memoryBlock);
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
-                // 当前就是协同智能体时，制度类问题不再交给团队接管，避免丢失检索。
+                // 规格 6.4：不再按“制度类”硬编码绕过团队；仅当当前智能体已具备 kb:read，
+                // 或目录里根本不存在具备 kb:read 的智能体（团队必然检索失败）时才绕过。
                 boolean kbDirect =
                         needKb
                                 && resolvedFlow == null
                                 && !current.pipeline()
+                                && AgentCapabilities.supportsKbRead(current.activeAgent())
+                                && !ChatRouting.TEAM_ACTIVE.equals(plannedPath);
+                boolean skipTeamWithoutKb =
+                        needKb
+                                && resolvedFlow == null
+                                && !current.pipeline()
+                                && !catalogHasKbReadAgent()
                                 && !ChatRouting.TEAM_ACTIVE.equals(plannedPath);
                 boolean teamGate =
                         resolvedFlow == null
                                 && activeTeam.enabled()
                                 && !kbDirect
+                                && !skipTeamWithoutKb
                                 && (needKb
                                         || ChatRouting.TEAM_ACTIVE.equals(plannedPath)
                                         || (!routerDecided && current.pipeline()));
@@ -838,9 +849,14 @@ public final class PayrollChatService implements PayrollChat {
                 String reason;
                 String signature;
                 List<String> agentIds;
-                // 制度类问题在任何链路都拿不到 kb_search 时，改由只读检索智能体作答。
+                // 规格 6.2 选择顺序：流程（kb:read）→ 智能体（kb:read）→ 团队（KB 角色）→
+                // PayrollKbAgent；到这里流程已过滤，团队也已失败或跳过，只剩当前智能体或兜底。
                 HarnessAgent kbAgent =
-                        needKb && resolvedFlow == null && current.pipeline()
+                        needKb
+                                        && resolvedFlow == null
+                                        && (current.pipeline()
+                                                || !AgentCapabilities.supportsKbRead(
+                                                        current.activeAgent()))
                                 ? PayrollAgentFactory.sharedKbAgent(engine)
                                 : null;
                 if (kbAgent != null) {
@@ -1647,18 +1663,26 @@ public final class PayrollChatService implements PayrollChat {
         };
     }
 
-    /** 流程里至少有一个智能体节点能注册 kb_search，制度类问题才留在流程内。 */
+    /**
+     * 流程能力过滤（规格 6.2）：显式声明优先，未声明时任一节点具备 kb:read 即视为具备，
+     * 替代早期"命中关键词就把流程置空"的硬编码补丁。
+     */
     private static boolean flowKbCapable(ResolvedFlow resolved) {
-        for (FlowNode node : resolved.flow().nodes()) {
-            if (!FlowNode.TYPE_AGENT.equalsIgnoreCase(node.type())) {
-                continue;
-            }
-            AgentDefinition agent = resolved.agents().get(node.agentId());
-            if (agent != null && PayrollAgentFactory.kbSearchNode(roleOf(node.id()), agent)) {
-                return true;
-            }
+        return resolved != null && AgentCapabilities.flowSupportsKbRead(resolved.flow(), resolved.agents());
+    }
+
+    /** 团队能否检索取决于候选里是否存在具备 kb:read 的智能体（团队按 KB_CONFIG 模板选人）。 */
+    private boolean catalogHasKbReadAgent() {
+        if (agentCatalogSupplier == null) {
+            return false;
         }
-        return false;
+        try {
+            return AgentRouter.candidates(agentCatalogSupplier.get()).stream()
+                    .anyMatch(AgentCapabilities::supportsKbRead);
+        } catch (RuntimeException e) {
+            log.warn("[知识库][路由] 读取候选失败，按无可检索智能体处理：{}", rootMessage(e));
+            return false;
+        }
     }
 
     private static String builtInAgentId(String stageKey) {

@@ -14,12 +14,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 能力索引：内置角色映射优先，其次技能/标签/描述关键词推断。
+ * 能力索引：显式能力声明优先，其次内置角色映射，最后技能/标签/描述关键词推断。
  *
- * <p>P1 不新增 Nacos 字段；显式声明能力留给后续阶段。推断结果只用于辅助位，
- * 不可担任计算/验证/入账等强制角色。
+ * <p>规格 6.2：{@code AgentDefinition#capabilities} 非空时以声明为准，不再用关键词推断补位；
+ * 内置角色映射仍会合并，因为声明通常只写增量能力（如 {@code kb:read}）。
+ * 推断结果只用于辅助位，不可担任计算/验证/入账等强制角色。
  */
 public final class CapabilityIndex {
+
+    /** 知识库维护能力（写侧），对应 KB_CONFIG 角色。 */
+    private static final String DECLARED_KB_CONFIG = "kb:config";
 
     private static final Map<String, Set<String>> BUILTIN_CAPABILITIES =
             Map.of(
@@ -29,6 +33,12 @@ public final class CapabilityIndex {
                     Set.of(TeamIntent.CAP_PAYROLL_VALIDATE),
                     RoleSkills.ACCOUNTANT,
                     Set.of(TeamIntent.CAP_ACCOUNTING, TeamIntent.CAP_PAYROLL_QUERY));
+
+    private static final Map<String, Set<String>> DECLARED_CAPABILITIES =
+            Map.of(
+                    AgentDefinition.CAPABILITY_KB_READ, Set.of(TeamIntent.CAP_POLICY_KNOWLEDGE),
+                    AgentDefinition.CAPABILITY_CALC, Set.of(TeamIntent.CAP_PAYROLL_CALC),
+                    DECLARED_KB_CONFIG, Set.of(TeamIntent.CAP_KB_CONFIG));
 
     private static final Map<String, Set<String>> KEYWORD_CAPABILITIES = keywords();
 
@@ -87,8 +97,11 @@ public final class CapabilityIndex {
                 builtin = true;
             }
         }
-        String evidence = evidence(agent);
-        if (!builtin) {
+        boolean declared = !agent.capabilities().isEmpty();
+        if (declared) {
+            capabilities.addAll(declaredCapabilities(agent));
+        } else {
+            String evidence = evidence(agent);
             for (Map.Entry<String, Set<String>> entry : KEYWORD_CAPABILITIES.entrySet()) {
                 if (entry.getValue().stream().anyMatch(evidence::contains)) {
                     capabilities.add(entry.getKey());
@@ -96,9 +109,11 @@ public final class CapabilityIndex {
             }
         }
         String source =
-                builtin
-                        ? AgentCapabilityProfile.SOURCE_BUILTIN
-                        : AgentCapabilityProfile.SOURCE_INFERRED;
+                declared
+                        ? AgentCapabilityProfile.SOURCE_DECLARED
+                        : builtin
+                                ? AgentCapabilityProfile.SOURCE_BUILTIN
+                                : AgentCapabilityProfile.SOURCE_INFERRED;
         String latency = latency(capabilities);
         return new AgentCapabilityProfile(
                 agent.id(),
@@ -108,6 +123,21 @@ public final class CapabilityIndex {
                 latency,
                 builtin,
                 source);
+    }
+
+    private static Set<String> declaredCapabilities(AgentDefinition agent) {
+        Set<String> mapped = new LinkedHashSet<>();
+        for (String declared : agent.capabilities()) {
+            if (declared == null) {
+                continue;
+            }
+            Set<String> capabilities = DECLARED_CAPABILITIES.get(
+                    declared.trim().toLowerCase(Locale.ROOT));
+            if (capabilities != null) {
+                mapped.addAll(capabilities);
+            }
+        }
+        return mapped;
     }
 
     private String evidence(AgentDefinition agent) {

@@ -55,6 +55,70 @@ class TeamCapabilityIndexTest {
     }
 
     @Test
+    @DisplayName("显式能力声明优先于关键词推断，并与内置角色映射合并")
+    void declaredCapabilitiesOverrideInference() {
+        AgentDefinition declared =
+                new AgentDefinition(
+                        "kb-agent",
+                        "制度助手",
+                        "",
+                        "负责政策、规则与解释",
+                        List.of(),
+                        List.of("custom-policy-skill"),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        "test",
+                        null,
+                        null,
+                        List.of(AgentDefinition.CAPABILITY_KB_READ));
+        CapabilityIndex index = CapabilityIndex.from(List.of(declared));
+
+        AgentCapabilityProfile profile = index.profile("kb-agent");
+        assertEquals(AgentCapabilityProfile.SOURCE_DECLARED, profile.source());
+        assertTrue(profile.supports(TeamIntent.CAP_POLICY_KNOWLEDGE));
+        assertFalse(profile.canBeMandatoryRole());
+
+        AgentDefinition calculatorWithKb =
+                new AgentDefinition(
+                        "calc-kb",
+                        "核算与制度助手",
+                        "",
+                        "薪酬核算",
+                        List.of(),
+                        List.of(RoleSkills.CALCULATOR),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        "test",
+                        null,
+                        null,
+                        List.of(AgentDefinition.CAPABILITY_KB_READ));
+        AgentCapabilityProfile merged =
+                CapabilityIndex.from(List.of(calculatorWithKb)).profile("calc-kb");
+        assertEquals(AgentCapabilityProfile.SOURCE_DECLARED, merged.source());
+        assertTrue(merged.supports(TeamIntent.CAP_PAYROLL_CALC));
+        assertTrue(merged.supports(TeamIntent.CAP_POLICY_KNOWLEDGE));
+
+        AgentDefinition videoOnly =
+                new AgentDefinition(
+                        "video-agent",
+                        "视频助手",
+                        "",
+                        "负责政策、规则与解释",
+                        List.of(),
+                        List.of("custom-policy-skill"),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        "test",
+                        null,
+                        null,
+                        List.of(AgentDefinition.CAPABILITY_VIDEO));
+        AgentCapabilityProfile video =
+                CapabilityIndex.from(List.of(videoOnly)).profile("video-agent");
+        assertEquals(AgentCapabilityProfile.SOURCE_DECLARED, video.source());
+        assertFalse(video.supports(TeamIntent.CAP_POLICY_KNOWLEDGE));
+    }
+
+    @Test
     @DisplayName("内置技能 id 可直接解析，无技能或未知技能不可用")
     void resolvesSkillsUsable() {
         CapabilityIndex index = CapabilityIndex.from(TeamTestFixtures.builtinCatalog());

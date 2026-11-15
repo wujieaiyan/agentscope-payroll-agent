@@ -442,6 +442,8 @@ public final class PayrollAgentFactory {
                 + "|"
                 + agent.skillIds()
                 + "|"
+                + agent.capabilities()
+                + "|"
                 + skillFingerprint(agent.skillIds());
     }
 

@@ -29,6 +29,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/admin/flows")
 public class FlowAdminController {
 
+    private static final int MAX_CAPABILITIES = 8;
+    private static final int MAX_CAPABILITY_LENGTH = 24;
+    private static final java.util.regex.Pattern CAPABILITY_PATTERN =
+            java.util.regex.Pattern.compile("[a-z0-9:_-]+");
+
     private final NacosFlowRegistry flowRegistry;
     private final NacosAgentRegistry agentRegistry;
     private final AuthService authService;
@@ -199,7 +204,30 @@ public class FlowAdminController {
                 edges,
                 input.createdBy(),
                 input.createdAt(),
-                input.updatedAt());
+                input.updatedAt(),
+                normalizeCapabilities(input.capabilities()));
+    }
+
+    /** 流程级能力声明与智能体侧同规则：小写去重、限长、限项。 */
+    private List<String> normalizeCapabilities(List<String> declared) {
+        List<String> capabilities = declared.stream()
+                .map(capability ->
+                        capability == null ? "" : capability.trim().toLowerCase(java.util.Locale.ROOT))
+                .filter(capability -> !capability.isBlank())
+                .distinct()
+                .toList();
+        if (capabilities.size() > MAX_CAPABILITIES) {
+            throw new PayrollException("能力声明最多 " + MAX_CAPABILITIES + " 项");
+        }
+        for (String capability : capabilities) {
+            if (capability.length() > MAX_CAPABILITY_LENGTH) {
+                throw new PayrollException("单项能力不能超过 " + MAX_CAPABILITY_LENGTH + " 个字符");
+            }
+            if (!CAPABILITY_PATTERN.matcher(capability).matches()) {
+                throw new PayrollException("能力声明只能包含小写字母、数字、冒号、下划线和连字符：" + capability);
+            }
+        }
+        return capabilities;
     }
 
     private Map<String, Object> agentOption(AgentDefinition agent) {

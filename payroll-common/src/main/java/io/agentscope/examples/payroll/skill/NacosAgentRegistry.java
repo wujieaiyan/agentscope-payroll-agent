@@ -243,7 +243,11 @@ public final class NacosAgentRegistry {
                     input.status(),
                     existing.createdBy(),
                     existing.createdAt(),
-                    now);
+                    now,
+                    // 规格 6.2：未提交能力声明时保留已有声明，避免旧表单保存后静默丢能力。
+                    input.capabilities().isEmpty()
+                            ? existing.capabilities()
+                            : input.capabilities());
             agents.set(index, saved);
         } else {
             String id = input.id() == null || input.id().isBlank()
@@ -260,7 +264,8 @@ public final class NacosAgentRegistry {
                     input.status(),
                     operator,
                     now,
-                    now);
+                    now,
+                    input.capabilities());
             agents.add(saved);
         }
         persist(agents);
@@ -358,7 +363,8 @@ public final class NacosAgentRegistry {
                         AgentDefinition.STATUS_ONLINE,
                         "system",
                         now,
-                        now),
+                        now,
+                        List.of(AgentDefinition.CAPABILITY_CALC)),
                 new AgentDefinition(
                         RoleSkills.VALIDATOR,
                         "薪酬复核专家",
@@ -370,7 +376,8 @@ public final class NacosAgentRegistry {
                         AgentDefinition.STATUS_ONLINE,
                         "system",
                         now,
-                        now),
+                        now,
+                        List.of(AgentDefinition.CAPABILITY_CALC)),
                 new AgentDefinition(
                         RoleSkills.ACCOUNTANT,
                         "薪酬入账专家",
@@ -382,6 +389,7 @@ public final class NacosAgentRegistry {
                         AgentDefinition.STATUS_ONLINE,
                         "system",
                         now,
-                        now));
+                        now,
+                        List.of(AgentDefinition.CAPABILITY_CALC)));
     }
 }
