@@ -33,9 +33,14 @@ class KbQueryToolsTest {
     }
 
     @Test
-    @DisplayName("未绑定知识库时直接返回提示，不发起检索")
-    void unboundScopeIsRejectedLocally() {
+    @DisplayName("未绑定知识库时按全部可读检索，series_ids 传空")
+    void unboundScopeSearchesAll() {
         FakeGateway gateway = gateway(true);
+        gateway.result =
+                """
+                {"status":"OK","data":{"results":[{"series_id":3,"series_name":"制度",
+                 "hits":[{"chunk_id":1,"document_id":2,"content":"年假 5 天"}]}]}}
+                """;
         KbQueryTools tools = new KbQueryTools(gateway);
 
         String reply =
@@ -45,8 +50,41 @@ class KbQueryToolsTest {
                         null,
                         RuntimeContext.builder().userId("7").sessionId("s-1").build());
 
-        assertTrue(reply.contains("本会话未启用知识库"), reply);
-        assertEquals(0, gateway.calls);
+        assertEquals(gateway.result, reply);
+        assertEquals(1, gateway.calls);
+        assertEquals(List.of(), gateway.lastArgs.get("series_ids"));
+    }
+
+    @Test
+    @DisplayName("未绑定时仍可显式指定库，不做会话子集校验")
+    void unboundScopeAllowsExplicitSeries() {
+        FakeGateway gateway = gateway(true);
+        KbQueryTools tools = new KbQueryTools(gateway);
+
+        tools.search(
+                "年假",
+                List.of(9L),
+                null,
+                RuntimeContext.builder().userId("7").sessionId("s-1").build());
+
+        assertEquals(1, gateway.calls);
+        assertEquals(List.of(9L), gateway.lastArgs.get("series_ids"));
+    }
+
+    @Test
+    @DisplayName("没有可读库时返回 NO_LIBRARY，不误报未收录")
+    void noAccessibleLibraryIsExplicit() {
+        FakeGateway gateway = gateway(true);
+        gateway.result =
+                """
+                {"status":"OK","data":{"results":[],"denied_series":[],
+                 "reason":"NO_ACCESSIBLE_LIBRARY"}}
+                """;
+
+        String reply = new KbQueryTools(gateway).search("年假", null, null, USER);
+
+        assertTrue(reply.contains("NO_LIBRARY"), reply);
+        assertTrue(reply.contains("没有可检索的知识库"), reply);
     }
 
     @Test

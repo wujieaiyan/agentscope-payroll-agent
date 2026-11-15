@@ -44,11 +44,11 @@ public final class TeamPlanPipeline {
         return prepare(question, planId, false);
     }
 
-    /** {@code kbBound=true} 时，制度/条款类问题按 KB_CONFIG 模板组队。 */
-    public Attempt prepare(String question, String planId, boolean kbBound) {
+    /** {@code kbQuestion=true} 时，制度/条款类问题按 KB_CONFIG 模板组队。 */
+    public Attempt prepare(String question, String planId, boolean kbQuestion) {
         TeamIntent intent;
         try {
-            intent = intentExtractor.extract(question, kbBound);
+            intent = intentExtractor.extract(question, kbQuestion);
         } catch (RuntimeException e) {
             log.warn("[动态团队] 意图抽取失败：{}", rootMessage(e));
             return Fallback.of(

@@ -17,10 +17,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 会话只读检索工具：只允许查询本轮绑定的知识库，不注册任何写操作。
+ * 会话只读检索工具：不注册任何写操作。
  *
- * <p>绑定集合由运行时写入 {@link KbSearchScope}，模型传入的 {@code series_ids} 必须是它的
- * 子集；实际检索仍在 Web 侧按库级 READER 权限执行，拒绝原样转述，禁止改用通用知识作答。
+ * <p>默认检索当前账号可读的全部已启用库；会话显式绑定（{@link KbSearchScope}）时收窄到
+ * 绑定集合，模型传入的 {@code series_ids} 必须是它的子集。实际检索仍在 Web 侧按库级
+ * READER 权限执行，拒绝原样转述，禁止改用通用知识作答。
  */
 public final class KbQueryTools {
 
@@ -61,12 +62,16 @@ public final class KbQueryTools {
     @Tool(
             name = KB_SEARCH,
             description =
-                    "检索本会话绑定的知识库，返回命中的文档分块、来源与命中路径；"
-                            + "回答制度、流程、条款、规定类问题前先调用。未绑定知识库时不要调用。",
+                    "检索知识库，返回命中的文档分块、来源与命中路径；不传 series_ids 时检索当前账号"
+                            + "可读的全部已启用库，传入时只检索这些库（会话已收窄时必须是子集）。"
+                            + "回答制度、流程、条款、规定类问题前先调用。",
             readOnly = true)
     public String search(
             @ToolParam(name = "query", description = "检索问题，1 到 200 字") String query,
-            @ToolParam(name = "series_ids", description = "可选，会话绑定库的子集；不传用全部绑定", required = false)
+            @ToolParam(
+                            name = "series_ids",
+                            description = "可选，指定知识库 ID；不传用当前账号可读的全部已启用库",
+                            required = false)
                     List<Long> seriesIds,
             @ToolParam(name = "top_k", description = "可选，返回知识点数，默认 5，最大 8", required = false)
                     Integer topK,
@@ -91,9 +96,6 @@ public final class KbQueryTools {
             return outcome("检索问题不能超过 200 个字符");
         }
         KbSearchScope scope = context == null ? null : context.get(KbSearchScope.class);
-        if (scope == null || !scope.bound()) {
-            return outcome("本会话未启用知识库，请先在会话顶部选择知识库");
-        }
         List<Long> requested;
         try {
             requested = requestedSeries(seriesIds, scope);
@@ -139,7 +141,13 @@ public final class KbQueryTools {
                 budget.succeed(cacheKey, result);
             }
             if (hitCount(result) == 0) {
-                return new Outcome(noHit(value), arguments, false);
+                String reply =
+                        switch (reasonOf(result)) {
+                            case "NO_ACCESSIBLE_LIBRARY" -> noLibrary(value);
+                            case "TOPIC_NOT_COVERED" -> noTopic(value);
+                            default -> noHit(value);
+                        };
+                return new Outcome(reply, arguments, false);
             }
             return new Outcome(result, arguments, true);
         } catch (RuntimeException e) {
@@ -164,6 +172,33 @@ public final class KbQueryTools {
         response.put("message", "当前知识库未收录该内容，请检查文档是否处理完成或换关键词");
         response.put("query", query);
         return JsonSupport.toJson(response);
+    }
+
+    /** 库内完全没有问题点名的主题词：提示补资料，而不是让用户反复换关键词。 */
+    private static String noTopic(String query) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "NO_HIT");
+        response.put("message", "当前知识库没有覆盖该主题的资料，请确认相关文档是否已上传并处理完成");
+        response.put("query", query);
+        return JsonSupport.toJson(response);
+    }
+
+    /** 默认全库但账号下没有可读的已启用库：与“未收录”区分，避免误导用户换关键词。 */
+    private static String noLibrary(String query) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "NO_LIBRARY");
+        response.put("message", "当前账号没有可检索的知识库（未创建、未启用或无权访问），请先联系管理员配置");
+        response.put("query", query);
+        return JsonSupport.toJson(response);
+    }
+
+    private static String reasonOf(String result) {
+        Map<String, Object> payload = parse(result);
+        if (!(payload.get("data") instanceof Map<?, ?> data)) {
+            return "";
+        }
+        Object reason = data.get("reason");
+        return reason == null ? "" : reason.toString().trim().toUpperCase(java.util.Locale.ROOT);
     }
 
     private static String statusOf(String result) {
@@ -198,16 +233,21 @@ public final class KbQueryTools {
         }
     }
 
+    /**
+     * 空集合表示“不指定库”，由服务端解析为全部可读库；会话显式收窄时默认用收窄集合，
+     * 模型显式传入的 ID 必须落在收窄集合内。
+     */
     private static List<Long> requestedSeries(List<Long> seriesIds, KbSearchScope scope) {
+        boolean narrowed = scope != null && scope.bound();
         if (seriesIds == null || seriesIds.isEmpty()) {
-            return scope.seriesIds();
+            return narrowed ? scope.seriesIds() : List.of();
         }
         LinkedHashSet<Long> distinct = new LinkedHashSet<>();
         for (Long seriesId : seriesIds) {
             if (seriesId == null || seriesId <= 0) {
                 throw new IllegalArgumentException("知识库 ID 不合法");
             }
-            if (!scope.contains(seriesId)) {
+            if (narrowed && !scope.contains(seriesId)) {
                 throw new IllegalArgumentException("只能检索本会话已绑定的知识库");
             }
             distinct.add(seriesId);

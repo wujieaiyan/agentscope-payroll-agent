@@ -156,9 +156,10 @@ payroll:
     answer-model: "${PAYROLL_KB_ANSWER_MODEL:qwen2.5:3b-instruct}"
     answer-timeout: "${PAYROLL_KB_ANSWER_TIMEOUT:120s}"
     task-threads: "${PAYROLL_KB_TASK_THREADS:2}"
-    # 会话绑定知识库：单会话最多绑定库数；团队节点检索开关。
+    # 会话绑定知识库：单会话最多绑定库数；未绑定时默认检索的可读库上限；团队节点检索开关。
     chat:
       max-series: "${PAYROLL_KB_CHAT_MAX_SERIES:3}"
+      auto-max-series: "${PAYROLL_KB_CHAT_AUTO_MAX_SERIES:5}"
       team-enabled: "${PAYROLL_KB_CHAT_TEAM_ENABLED:true}"
     # 多路召回与知识点融合；fusion-enabled=false 时退回旧的向量+BM25 加权求和。
     retrieval:

@@ -87,8 +87,8 @@ class TeamIntentTest {
     }
 
     @Test
-    @DisplayName("绑定知识库后制度问答按 KB_CONFIG 处理")
-    void boundPolicyQuestionUsesKbTemplate() {
+    @DisplayName("制度类问题按 KB_CONFIG 处理（默认全库）")
+    void kbPolicyQuestionUsesKbTemplate() {
         TeamIntent intent = TeamIntentExtractor.rules("研发部年假怎么算？", true);
 
         assertEquals(TeamIntent.TASK_KB_CONFIG, intent.taskType());
@@ -97,8 +97,8 @@ class TeamIntentTest {
     }
 
     @Test
-    @DisplayName("绑定知识库后工资计算仍走薪酬意图")
-    void boundPayrollQuestionStaysPayroll() {
+    @DisplayName("工资计算始终走薪酬意图，不被 KB 路由抢走")
+    void payrollQuestionStaysPayroll() {
         TeamIntent intent = TeamIntentExtractor.rules("核算 EMP001 2026-10 的工资", true);
 
         assertEquals(TeamIntent.TASK_CALCULATE, intent.taskType());
@@ -106,8 +106,8 @@ class TeamIntentTest {
     }
 
     @Test
-    @DisplayName("未绑定知识库时制度问答不进入 KB_CONFIG")
-    void unboundPolicyQuestionIsNotKb() {
+    @DisplayName("未标记 KB 意图时制度问答按政策解释处理")
+    void policyQuestionWithoutKbIntentIsNotKbConfig() {
         TeamIntent intent = TeamIntentExtractor.rules("研发部年假怎么算？", false);
 
         assertEquals(TeamIntent.TASK_POLICY_EXPLAIN, intent.taskType());

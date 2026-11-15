@@ -209,6 +209,8 @@ public class ChatSessionController {
         }
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("session_id", sessionId);
+        // 未显式绑定时默认检索当前账号可读的全部已启用库。
+        view.put("mode", bound.isEmpty() ? "ALL" : "SELECTED");
         view.put("series", series);
         view.put("denied", denied);
         view.put("max_series", maxKbSeries);

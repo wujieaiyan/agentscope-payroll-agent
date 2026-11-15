@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
@@ -88,6 +89,8 @@ public class KbSkillService {
     private final KbRetrievalService retrievalService;
     private final H2AdminRepository adminRepository;
 
+    private final int autoMaxSeries;
+
     public KbSkillService(
             KbSeriesService seriesService,
             KbConfigService configService,
@@ -97,7 +100,8 @@ public class KbSkillService {
             KbDocumentService documentService,
             KbPermissionService permissionService,
             KbRetrievalService retrievalService,
-            H2AdminRepository adminRepository) {
+            H2AdminRepository adminRepository,
+            @Value("${payroll.kb.chat.auto-max-series:5}") int autoMaxSeries) {
         this.seriesService = seriesService;
         this.configService = configService;
         this.directoryService = directoryService;
@@ -107,6 +111,7 @@ public class KbSkillService {
         this.permissionService = permissionService;
         this.retrievalService = retrievalService;
         this.adminRepository = adminRepository;
+        this.autoMaxSeries = Math.max(1, Math.min(autoMaxSeries, MAX_SEARCH_SERIES));
     }
 
     public static List<String> toolNames() {
@@ -215,7 +220,8 @@ public class KbSkillService {
     }
 
     /**
-     * 多库检索：逐库校验 READER，单库独立召回后按分数合并、按 chunkId 去重，再截断到 topK。
+     * 多库检索：未指定库时自动检索当前用户可读的全部 ACTIVE 库；指定时逐库校验 READER。
+     * 单库独立召回后按分数合并、按 chunkId 去重，再截断到 topK。
      * 无权库只回数字 ID，不返回名称与正文；全部无权时直接拒绝。
      */
     private Map<String, Object> search(AuthUser user, Map<String, Object> args) {
@@ -227,7 +233,11 @@ public class KbSkillService {
         if (query.length() > 200) {
             throw new PayrollException("检索问题不能超过 200 个字符");
         }
-        List<Long> seriesIds = searchSeriesIds(args);
+        boolean narrowed = hasRequestedSeries(args);
+        List<Long> seriesIds = narrowed ? searchSeriesIds(args) : autoSeriesIds(user);
+        if (seriesIds.isEmpty()) {
+            return noLibraryOutcome(query, started);
+        }
         int topK =
                 Math.max(
                         1,
@@ -329,11 +339,58 @@ public class KbSkillService {
         data.put("denied_series", denied);
         data.put("truncated", truncated);
         if (results.isEmpty()) {
-            data.put("reason", readyDocument ? "BELOW_THRESHOLD" : "NO_READY_DOCUMENT");
+            boolean topicMissing =
+                    libraries.stream()
+                            .anyMatch(
+                                    library ->
+                                            "QUERY_TERM_NOT_IN_CORPUS"
+                                                    .equals(
+                                                            library.result()
+                                                                    .diagnostics()
+                                                                    .get("reason")));
+            data.put(
+                    "reason",
+                    topicMissing
+                            ? "TOPIC_NOT_COVERED"
+                            : readyDocument ? "BELOW_THRESHOLD" : "NO_READY_DOCUMENT");
         }
         Map<String, Object> diagnostics = new LinkedHashMap<>();
         diagnostics.put("engine", engines(libraries));
         diagnostics.put("took_ms", System.currentTimeMillis() - started);
+        diagnostics.put("scope", narrowed ? "SELECTED" : "ALL");
+        diagnostics.put("series_count", seriesIds.size());
+        data.put("diagnostics", diagnostics);
+        return data;
+    }
+
+    private static boolean hasRequestedSeries(Map<String, Object> args) {
+        List<Long> requested = longList(args, "series_ids");
+        return requested != null && !requested.isEmpty();
+    }
+
+    /** 默认范围：当前用户具备 READER 且状态为 ACTIVE 的库，超出 autoMaxSeries 时截断。 */
+    private List<Long> autoSeriesIds(AuthUser user) {
+        return seriesService
+                .list(user, null, null, null, "ACTIVE", 1, autoMaxSeries)
+                .items()
+                .stream()
+                .map(SeriesView::id)
+                .toList();
+    }
+
+    /** 默认全库模式下没有任何可检索库：返回空结果与明确原因，由模型告知用户。 */
+    private static Map<String, Object> noLibraryOutcome(String query, long started) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("query", query);
+        data.put("results", List.of());
+        data.put("denied_series", List.of());
+        data.put("truncated", false);
+        data.put("reason", "NO_ACCESSIBLE_LIBRARY");
+        Map<String, Object> diagnostics = new LinkedHashMap<>();
+        diagnostics.put("engine", "NONE");
+        diagnostics.put("took_ms", System.currentTimeMillis() - started);
+        diagnostics.put("scope", "ALL");
+        diagnostics.put("series_count", 0);
         data.put("diagnostics", diagnostics);
         return data;
     }

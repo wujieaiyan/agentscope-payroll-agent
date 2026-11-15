@@ -21,7 +21,7 @@ public interface ChatContextStore {
     default void savePersona(long sessionId, String persona) {
     }
 
-    /** 会话绑定的知识库 ID；空表示未启用知识库。 */
+    /** 会话显式绑定的知识库 ID；空表示未收窄，检索时默认使用当前账号可读的全部已启用库。 */
     default List<Long> kbSeriesIds(long sessionId) {
         return List.of();
     }

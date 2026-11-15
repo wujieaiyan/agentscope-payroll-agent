@@ -282,6 +282,82 @@ class KbWebTest {
         assertFalse(audits.contains("差旅报销需在出差结束后"), audits);
     }
 
+    @Test
+    @DisplayName("未指定库时自动检索当前账号可读的全部已启用库")
+    void autoSearchesAllReadableLibraries() throws Exception {
+        HttpClient admin = newClient();
+        login(admin, "admin", ADMIN_PASSWORD);
+        long deptId = firstDepartmentId(admin);
+
+        long leaveSeries = createSeries(admin, deptId, "休假制度库");
+        uploadMarkdown(
+                admin,
+                leaveSeries,
+                "休假制度.md",
+                """
+                # 休假制度
+
+                员工入职满一年后享有带薪年假。
+
+                ## 天数
+
+                年假为 5 天，逐年递增。
+                """);
+        awaitDocumentsReady(admin, leaveSeries);
+
+        long expenseSeries = createSeries(admin, deptId, "报销制度库");
+        uploadMarkdown(
+                admin,
+                expenseSeries,
+                "报销制度.md",
+                """
+                # 报销制度
+
+                差旅报销需在出差结束后 7 天内提交。
+                """);
+        awaitDocumentsReady(admin, expenseSeries);
+
+        String suffix = UUID.randomUUID().toString().substring(0, 6);
+        createUser(admin, "kb_auto_viewer_" + suffix, "kb-auto-pass", "VIEWER");
+        long viewerId = userId(admin, "kb_auto_viewer_" + suffix);
+        for (long seriesId : new long[] {leaveSeries, expenseSeries}) {
+            post(
+                    admin,
+                    "/api/kb/series/" + seriesId + "/members",
+                    """
+                    {"subjectType":"USER","subjectIds":[%d],"role":"READER"}
+                    """
+                            .formatted(viewerId));
+        }
+
+        String all = kbSearchAll(viewerId, "制度", 4);
+        assertTrue(all.contains("\"status\":\"OK\""), all);
+        assertTrue(all.contains("休假制度库-"), all);
+        assertTrue(all.contains("报销制度库-"), all);
+        assertTrue(all.contains("\"scope\":\"ALL\""), all);
+        assertTrue(all.contains("\"denied_series\":[]"), all);
+
+        String lonelySuffix = UUID.randomUUID().toString().substring(0, 6);
+        createUser(admin, "kb_auto_none_" + lonelySuffix, "kb-auto-none-pass", "VIEWER");
+        long lonelyId = userId(admin, "kb_auto_none_" + lonelySuffix);
+
+        String none = kbSearchAll(lonelyId, "制度", 3);
+        assertTrue(none.contains("\"status\":\"OK\""), none);
+        assertTrue(none.contains("\"reason\":\"NO_ACCESSIBLE_LIBRARY\""), none);
+    }
+
+    private String kbSearchAll(long userId, String query, int topK) throws Exception {
+        String body =
+                """
+                {"user_id":%d,"tool":"kb_search",
+                 "arguments":{"query":"%s","top_k":%d}}
+                """
+                        .formatted(userId, query, topK);
+        HttpResponse<String> response = signedPost("/internal/kb/execute", body);
+        assertEquals(200, response.statusCode(), response.body());
+        return response.body();
+    }
+
     private long createSeries(HttpClient admin, long deptId, String name) throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 6);
         String created =

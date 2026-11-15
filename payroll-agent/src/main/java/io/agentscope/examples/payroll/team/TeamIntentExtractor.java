@@ -92,14 +92,14 @@ public final class TeamIntentExtractor {
     }
 
     /**
-     * 提取意图；{@code kbBound=true} 表示会话已绑定知识库，此时制度/流程/条款类问题
-     * 直接按 {@code KB_CONFIG} 处理，避免被薪酬政策模板接管。
+     * 提取意图；{@code kbQuestion=true} 表示制度/流程/条款类问题（默认检索全部可读库），
+     * 此时直接按 {@code KB_CONFIG} 处理，避免被薪酬政策模板接管。
      */
-    public TeamIntent extract(String question, boolean kbBound) {
+    public TeamIntent extract(String question, boolean kbQuestion) {
         String text = question == null ? "" : question.trim();
-        TeamIntent ruleIntent = rules(text, kbBound);
-        if (kbBound && KbChatIntent.matches(text)) {
-            log.info("[动态团队] 会话已绑定知识库，按 KB 问题处理：{}", text);
+        TeamIntent ruleIntent = rules(text, kbQuestion);
+        if (kbQuestion && KbChatIntent.matches(text)) {
+            log.info("[动态团队] 制度类问题按 KB 处理：{}", text);
             return ruleIntent;
         }
         String json = llm.completeJson(INSTRUCTION, text, "intent-" + System.nanoTime());
@@ -168,14 +168,14 @@ public final class TeamIntentExtractor {
         return rules(question, false);
     }
 
-    public static TeamIntent rules(String question, boolean kbBound) {
+    public static TeamIntent rules(String question, boolean kbQuestion) {
         String text = question == null ? "" : question.trim();
         String lower = text.toLowerCase(Locale.ROOT);
         boolean writeAction = containsAny(lower, WRITE_KEYWORDS);
         String task = classify(lower);
-        boolean kbQuestion =
-                containsAny(lower, KB_KEYWORDS) || (kbBound && KbChatIntent.matches(text));
-        if (kbQuestion) {
+        boolean kbTask =
+                containsAny(lower, KB_KEYWORDS) || (kbQuestion && KbChatIntent.matches(text));
+        if (kbTask) {
             task = TeamIntent.TASK_KB_CONFIG;
             writeAction = writeAction || containsAny(lower, KB_WRITE_KEYWORDS);
         }

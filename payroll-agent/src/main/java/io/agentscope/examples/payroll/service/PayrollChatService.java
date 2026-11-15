@@ -431,8 +431,8 @@ public final class PayrollChatService implements PayrollChat {
             String question = message.trim();
             long startedAt = System.currentTimeMillis();
             KbSearchScope kbScope = kbSearchScope();
-            boolean kbBound = kbScope.bound();
-            boolean kbQuestion = kbBound && KbChatIntent.matches(question);
+            // 未绑定即默认检索全部可读库，制度类问题始终走具备 kb_search 的链路。
+            boolean kbQuestion = KbChatIntent.matches(question);
             sessionContext.put(KbSearchScope.class, kbScope);
             Set<String> tools = Collections.synchronizedSet(new LinkedHashSet<>());
             collectedTraces.clear();
@@ -445,6 +445,13 @@ public final class PayrollChatService implements PayrollChat {
             log.info("[多智能体] 开始处理问题：{}", preview(question, 120));
 
             ResolvedFlow resolvedFlow = resolveActiveFlow();
+            if (kbQuestion && resolvedFlow != null && !flowKbCapable(resolvedFlow)) {
+                // 默认流程没有知识库节点时，制度类问题若不改道就永远检索不到内容。
+                log.info(
+                        "[知识库] 默认流程「{}」不含知识库节点，本轮制度类问题改走检索链路",
+                        resolvedFlow.flow().name());
+                resolvedFlow = null;
+            }
             PayrollAgentFactory.Team current = team(resolvedFlow != null);
             String plannedPath =
                     resolvedFlow != null
@@ -576,7 +583,7 @@ public final class PayrollChatService implements PayrollChat {
                 String calculatorInput = context.augment(question, memoryBlock);
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
-                // 已绑定知识库且当前就是协同智能体时，制度类问题不再交给团队接管，避免丢失检索。
+                // 当前就是协同智能体时，制度类问题不再交给团队接管，避免丢失检索。
                 boolean kbDirect =
                         kbQuestion
                                 && resolvedFlow == null
@@ -586,7 +593,8 @@ public final class PayrollChatService implements PayrollChat {
                         resolvedFlow == null
                                 && activeTeam.enabled()
                                 && !kbDirect
-                                && (ChatRouting.TEAM_ACTIVE.equals(plannedPath)
+                                && (kbQuestion
+                                        || ChatRouting.TEAM_ACTIVE.equals(plannedPath)
                                         || (!routerDecided && current.pipeline()));
                 if (teamGate) {
                     teamAttempt =
@@ -597,7 +605,7 @@ public final class PayrollChatService implements PayrollChat {
                                     question,
                                     calculatorInput,
                                     events,
-                                    kbBound);
+                                    kbQuestion);
                     if (teamAttempt.succeeded()) {
                         String teamReply = composeReply(teamAttempt.reply(), guard);
                         // 末端节点已实时流出正文时只补尾部差量，避免整段重复推送。
@@ -660,7 +668,18 @@ public final class PayrollChatService implements PayrollChat {
                 String reason;
                 String signature;
                 List<String> agentIds;
-                if (resolvedFlow != null) {
+                // 制度类问题在任何链路都拿不到 kb_search 时，改由只读检索智能体作答。
+                HarnessAgent kbAgent =
+                        kbQuestion && resolvedFlow == null && current.pipeline()
+                                ? PayrollAgentFactory.sharedKbAgent(engine)
+                                : null;
+                if (kbAgent != null) {
+                    reply = kbAgentReply(calculatorInput, kbAgent, events, tools);
+                    path = ChatRouting.AGENT;
+                    reason = routerNote + "没有匹配到可检索的流程或团队，本轮由知识库问答智能体检索作答。";
+                    signature = "kbagent" + routerSuffix(routerSignature);
+                    agentIds = List.of("PayrollKbAgent");
+                } else if (resolvedFlow != null) {
                     reply = flowReply(calculatorInput, resolvedFlow, events, tools);
                     path = ChatRouting.FLOW;
                     reason =
@@ -986,6 +1005,30 @@ public final class PayrollChatService implements PayrollChat {
         String reply = result.text().trim();
         if (reply.isBlank()) {
             throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
+        }
+        return reply;
+    }
+
+    /** 制度类问题在没有任何可检索角色时，由只读检索智能体直接作答。 */
+    private String kbAgentReply(
+            String input, HarnessAgent agent, ChatStreamListener events, Set<String> tools) {
+        StageResult result;
+        try {
+            result =
+                    runStage(
+                            "knowledge",
+                            "知识库问答智能体",
+                            agent,
+                            input,
+                            events,
+                            true,
+                            tools);
+        } catch (RuntimeException e) {
+            throw chatFailure(e);
+        }
+        String reply = result.text().trim();
+        if (reply.isBlank()) {
+            throw new PayrollException("知识库问答智能体未返回内容，请重试或检查模型服务状态。");
         }
         return reply;
     }
@@ -1419,6 +1462,20 @@ public final class PayrollChatService implements PayrollChat {
             case "accountant" -> "ACCOUNTANT";
             default -> stageKey.toUpperCase(Locale.ROOT);
         };
+    }
+
+    /** 流程里至少有一个智能体节点能注册 kb_search，制度类问题才留在流程内。 */
+    private static boolean flowKbCapable(ResolvedFlow resolved) {
+        for (FlowNode node : resolved.flow().nodes()) {
+            if (!FlowNode.TYPE_AGENT.equalsIgnoreCase(node.type())) {
+                continue;
+            }
+            AgentDefinition agent = resolved.agents().get(node.agentId());
+            if (agent != null && PayrollAgentFactory.kbSearchNode(roleOf(node.id()), agent)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String builtInAgentId(String stageKey) {

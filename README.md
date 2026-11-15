@@ -718,7 +718,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_ACTION_CONFIRM_ENABLED` | `false` | 写操作会话内确认开关；关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度 |
 | `PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS` | 6 个 `kb_*` 写工具 | 无论全局开关如何都强制先出提案的工具清单（逗号分隔） |
 | `PAYROLL_ACTION_PROPOSAL_TTL_MINUTES` | `15` | 提案有效期（分钟）；过期后卡片失效，确认返回 410 |
-| `PAYROLL_KB_CHAT_MAX_SERIES` | `3` | 单会话最多绑定的知识库数 |
+| `PAYROLL_KB_CHAT_MAX_SERIES` | `3` | 单会话最多显式绑定的知识库数（绑定仅用于收窄检索范围） |
+| `PAYROLL_KB_CHAT_AUTO_MAX_SERIES` | `5` | 未显式绑定时，`kb_search` 默认检索的可读已启用库上限（硬上限 10） |
 | `PAYROLL_KB_CHAT_TEAM_ENABLED` | `true` | 是否允许团队 `KB_CONFIG` 节点注册只读检索工具 |
 | `PAYROLL_UPLOAD_MAX_FILE_SIZE` | `600MB` | multipart 单文件上限；需与 `PAYROLL_KB_MAX_FILE_SIZE` 同步 |
 | `PAYROLL_UPLOAD_MAX_REQUEST_SIZE` | `1GB` | multipart 单次请求上限（多文件合计） |

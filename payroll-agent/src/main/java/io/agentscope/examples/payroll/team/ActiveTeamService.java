@@ -90,7 +90,7 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
         return attempt(chat, userId, sessionId, question, executionInput, listener, false);
     }
 
-    /** {@code kbBound=true} 时，制度/条款类问题按 KB_CONFIG 模板组队。 */
+    /** {@code kbQuestion=true} 时，制度/条款类问题按 KB_CONFIG 模板组队。 */
     public Attempt attempt(
             PayrollChatService chat,
             long userId,
@@ -98,7 +98,7 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
             String question,
             String executionInput,
             ChatStreamListener listener,
-            boolean kbBound) {
+            boolean kbQuestion) {
         if (!allowed(userId, sessionId)) {
             return Attempt.skipped();
         }
@@ -106,7 +106,7 @@ public final class ActiveTeamService implements ActiveTeamCoordinator {
         String planId = "active-" + sessionId + "-" + System.nanoTime();
         TeamPlanPipeline.Attempt prepared;
         try {
-            prepared = pipeline.prepare(question, planId, kbBound);
+            prepared = pipeline.prepare(question, planId, kbQuestion);
         } catch (RuntimeException e) {
             log.warn("[动态团队] ACTIVE 组队准备失败，回退静态：{}", rootMessage(e));
             return recordFallback(

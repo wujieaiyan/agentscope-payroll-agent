@@ -101,7 +101,7 @@ ALTER TABLE chat_messages ADD COLUMN citations_json LONGTEXT NULL;
 
 H2 在建表/升级段同步 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参考 `PayrollDatabase.java:100-113` 的现有写法）。
 
-- 字段语义：`kb_series_ids` 为 JSON 数组，空或 NULL 表示"本会话未启用知识库"；上限 3 个（可配）。
+- 字段语义：`kb_series_ids` 为 JSON 数组，空或 NULL 表示**未收窄**——检索时默认覆盖当前账号可读的全部已启用库（最多 `payroll.kb.chat.auto-max-series` 个，默认 5）；显式绑定用于收窄范围，上限 3 个（可配）。
 - 读模型不扩展 `ChatSession` 记录：新增 `H2ChatStore.kbSeriesIds(sessionId)`、`updateKbSeriesIds(sessionId, list)`，避免会话列表反序列化连锁改动。
 - 绑定属于会话所有者：切换 `persona_key`（角色切换）时**保留**绑定，但下一轮如果实际链路不支持 KB（pipeline/flow），工具不注册，提示"当前角色不支持知识库检索"。
 
@@ -109,7 +109,7 @@ H2 在建表/升级段同步 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参考
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/chat/sessions/{id}/knowledge` | `chat:use` | 返回绑定库的 `id/name/status/role`，以及 `allowed` / `denied` |
+| GET | `/api/chat/sessions/{id}/knowledge` | `chat:use` | 返回 `mode`（`ALL` 默认全库 / `SELECTED` 已收窄）、绑定库的 `id/name/status/role`，以及 `denied` |
 | PUT | `/api/chat/sessions/{id}/knowledge` | `chat:use` + `kb:read` | body `{"series_ids":[1,2]}`，逐个校验库级 READER；越权库写审计后拒绝 |
 
 规则：
@@ -125,7 +125,7 @@ H2 在建表/升级段同步 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参考
 
 ```java
 @Tool(name = "kb_search",
-      description = "检索本会话绑定的知识库，返回命中的文档分块与来源；回答制度/流程/条款问题前先调用",
+      description = "检索知识库，返回命中的文档分块与来源；不传 series_ids 时检索当前账号可读的全部已启用库",
       readOnly = true)
 String search(
     @ToolParam(name = "query") String query,
@@ -139,19 +139,20 @@ String search(
 | 项 | 规则 |
 | --- | --- |
 | query | 必填，1~200 字（与 `KbRetrievalService` 一致） |
-| series_ids | 可选，必须是**会话绑定集合的子集**；不传用全部绑定 |
+| series_ids | 可选。不传时检索当前账号可读的全部已启用库（上限 `auto-max-series`）；会话显式收窄时默认用收窄集合，模型传入的 ID 必须是**收窄集合的子集** |
 | top_k | 默认 5，上限 8；实际生效值受库配置 `rerankTopN` 约束 |
 | 多库合并 | 每库先取 `ceil(topK / 库数)+2`，完成四路融合与知识点合并后按归一化分合并、按 `chunkId` 去重，总量截断到 topK |
 | 内容上限 | 单条正文 ≤1200 字，总正文 ≤6000 字，超出截断并标记 `truncated` |
-| 会话未绑定 | 返回 `{"status":"ERROR","message":"本会话未启用知识库，请先在会话顶部选择知识库"}` |
+| 会话未绑定 | 正常检索全部可读库，`diagnostics.scope="ALL"`；账号下没有可读库时返回 `NO_LIBRARY`（服务端 `reason=NO_ACCESSIBLE_LIBRARY`），与“未收录”区分 |
 | 重复调用 | 同一轮内相同 `(query, series_ids)` 复用首次结果，最多 3 次检索 |
 | 注册范围 | 协同智能体：`KbQueryTools + KbTools`；团队/流程节点：仅当角色为 `KB_CONFIG` 或智能体标签含 `kb` 时注册 `KbQueryTools`；pipeline 节点不注册 |
 
 内部协议：复用 `/internal/kb/execute`，`tool="kb_search"`，`arguments` 为上述参数。Web 侧 `KbSkillService` 增加分支：
 
 - `requiredPermission` → `kb:read`；
+- 未指定 `series_ids` 时用 `KbSeriesService.list(user, ..., status=ACTIVE, size=auto-max-series)` 解析默认范围；
 - 逐库 `permissionService.requireRead`；无权库不返回内容与名称，只回 `denied_series:[...]`（数字 ID）；
-- 全部无权 → `FORBIDDEN`；部分无权 → `OK` + `denied_series`；
+- 显式指定的库全部无权 → `FORBIDDEN`；部分无权 → `OK` + `denied_series`；默认范围下没有任何可读库 → `OK` + `reason=NO_ACCESSIBLE_LIBRARY`；
 - 记录审计 `kb.search`（query、series_ids、命中数、耗时、结果状态），**不落正文**；
 - 返回结构：
 
@@ -236,7 +237,7 @@ TITLE_PATH 在 ES 侧需要 `title_path` 可检索字段；索引未含该字段
 
 由主智能体作答，规则写进 `KB_GUIDANCE`（`PayrollAgentFactory`）：
 
-1. 会话已绑定知识库且问题涉及制度、流程、条款、办事指南时，必须先 `kb_search`，不得凭通用知识直接回答；
+1. 问题涉及制度、流程、条款、办事指南时，必须先 `kb_search`（不传 `series_ids` 即检索全部可读库），不得凭通用知识直接回答；
 2. 只依据工具返回的知识点作答，句末标注 `[n]`，`n` 必须是本次返回的序号；同一 `point_id` 只引用一次，合并后的知识点不重复计数；
 3. 命中为空时明确说"当前知识库未收录该内容"，并建议检查文档是否处理完成或换关键词；
 4. 返回 `FORBIDDEN` 时原样转述无权限，不得改用通用知识；
@@ -296,9 +297,10 @@ SSE：
 
 会话头部（`ChatView.vue` 发送区上方）：
 
-- "知识库"按钮：未绑定显示"未启用"；已绑定显示库名 chip（最多 3 个），点击打开多选弹窗；
-- 弹窗数据来自 `GET .../knowledge`，只展示有权限的库，禁用无权限项；
-- 切换绑定提示"从下一轮生效"，避免进行中的轮次语义漂移。
+- "知识库"按钮：默认显示"全部可读"；显式收窄后显示所选库名 chip（最多 3 个），点击打开多选弹窗；
+- 弹窗说明默认范围（你有只读权限的全部已启用库），勾选后仅检索所选库；提供"恢复全部可读"清空选择；
+- 弹窗数据来自 `GET .../knowledge` 与 `GET /api/kb/series`，只展示有权限的库，禁用未启用项；
+- 切换范围提示"从下一轮生效"，避免进行中的轮次语义漂移。
 
 回答区：
 
@@ -344,8 +346,8 @@ P0 策略：团队节点也具备只读检索，不再把 KB 问句强行赶回�
 4. **上下文注入**：`executeFlowNode` 在节点 `RuntimeContext` 中额外放入会话绑定 `KbSessionBinding`（`kb_series_ids`）与本轮共享的 `KbCitationCollector`；团队路径由 `executeDynamicFlow` 创建一次 collector，注入每个节点，避免各节点各自为政。
 5. **引用回传**：`DynamicFlowResult` 增加 `citations`（`PayrollChatService.java:2016-2035`），`ActiveTeamService.Attempt` 增加同字段（`ActiveTeamService.java:191-201`），由 `PayrollChatService` 与单智能体走同一个 `onCitations` 发送与 `citations_json` 落库出口。
 6. **写操作隔离**：团队节点永不注册 `KbTools` 写工具，不产生提案；`PlanValidator` 对 `writeAction` 的拒绝保持现状，KB 写仍只经协同智能体 + 强制确认。
-7. **路由行为**：绑定会话中的制度/条款问题可由 `KB_CONFIG` 模板或协同智能体回答，两者都能检索；工资核算问题维持既有团队/流水线，且这些节点不含 `kb_search`。ACTIVE 组队失败或未选中 KB 节点时按现有回退进入单智能体（`ActiveTeamService.java:108-120`、`202-214`），单智能体始终注册 `kb_search`，检索能力不丢失。
-8. **未绑定会话**：`kb_search` 按角色/标签照常注册，但工具层直接返回"本会话未启用知识库"的 `ERROR`，不发起检索；因此不存在"绑定前/后两套工具集"的缓存分裂。
+7. **路由行为**：绑定会话中的制度/条款问题可由 `KB_CONFIG` 模板或协同智能体回答，两者都能检索；工资核算问题维持既有团队/流水线，且这些节点不含 `kb_search`。ACTIVE 组队失败或未选中 KB 节点时按现有回退进入单智能体（`ActiveTeamService.java:108-120`、`202-214`），单智能体始终注册 `kb_search`，检索能力不丢失。默认安装没有知识库角色、默认流程也不含 KB 节点时，制度类问题改由只读检索智能体 `PayrollKbAgent` 作答（`PayrollAgentFactory.sharedKbAgent`），不再掉回无检索的薪酬流水线。
+8. **未绑定会话**：`kb_search` 按角色/标签照常注册，且默认检索当前账号可读的全部已启用库（`auto-max-series` 上限）；显式绑定只用于收窄范围，因此不存在"绑定前/后两套工具集"的缓存分裂。
 
 可配置开关：`payroll.kb.chat.team-enabled`（默认 `true`），关闭后团队节点回到只读白名单，行为退化为当前版本。
 
@@ -398,6 +400,7 @@ payroll:
       enabled: "${PAYROLL_KB_CHAT_ENABLED:true}"
       team-enabled: "${PAYROLL_KB_CHAT_TEAM_ENABLED:true}"
       max-series: "${PAYROLL_KB_CHAT_MAX_SERIES:3}"
+      auto-max-series: "${PAYROLL_KB_CHAT_AUTO_MAX_SERIES:5}"
       max-hits: "${PAYROLL_KB_CHAT_MAX_HITS:6}"
       max-content-chars: "${PAYROLL_KB_CHAT_MAX_CONTENT_CHARS:6000}"
       search-timeout-ms: "${PAYROLL_KB_CHAT_SEARCH_TIMEOUT_MS:8000}"
@@ -426,13 +429,13 @@ payroll:
 ## 十一、验收场景（端到端）
 
 1. 绑定"研发部制度库"后提问"研发部年假怎么算"，回答包含引用来源；刷新页面与断线续流后引用不丢。
-2. 未绑定知识库提问同类问题，不触发检索，回答明确提示"本会话未启用知识库"。
+2. 未绑定知识库提问同类问题，自动检索当前账号可读的全部已启用库并给出引用（`scope=ALL`）；账号下没有可读库时明确提示"没有可检索的知识库"，不误报未收录。
 3. VIEWER 账号只能看到 READER+ 的库；直接 PUT 无权库被拒并落审计。
 4. 文档仍在 `PARSING`/`INDEXING` 时检索返回"无可用文档"，不编造答案。
 5. ES 停机时本地回退仍能命中；Ollama 不可用但本地 BM25 可用时不影响检索。
 6. 全局 `PAYROLL_ACTION_CONFIRM_ENABLED=false` 时，"给研发部建一个知识库"仍生成提案，确认后落库。
-7. 绑定知识库后询问工资核算，仍按团队/流水线处理，且该链路节点不注册 `kb_search`，不触发 KB 检索。
-8. 绑定知识库后询问制度问题并被路由到 `KB_CONFIG` 团队：节点调用 `kb_search`，回答带引用，citations 与单智能体走同一发送/落库出口；该节点工具集只含只读工具，不含任何 `kb_create_*` / `kb_save_config` 等写工具。
+7. 询问工资核算，仍按团队/流水线处理，且该链路节点不注册 `kb_search`，不触发 KB 检索。
+8. 制度问题被路由到 `KB_CONFIG` 团队：节点调用 `kb_search`（未绑定时为全部可读库），回答带引用，citations 与单智能体走同一发送/落库出口；该节点工具集只含只读工具，不含任何 `kb_create_*` / `kb_save_config` 等写工具。
 9. ACTIVE 组队失败或未选中 KB 节点时回退单智能体，同一问题仍能检索并展示引用，引用序号与正文 `[n]` 一致。
 10. 同一段落同时被向量与 BM25 命中时只返回一条知识点，`routes` 含两路且正文不重复；同一文档命中超过 3 条时按 `max-per-document` 截断。
 11. 向量路不可用（ES/Ollama 停机）时，BM25 与标题路仍能命中条款标题，`diagnostics.routes` 显示各路候选数与耗时。
