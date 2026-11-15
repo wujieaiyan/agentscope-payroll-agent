@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-15.1",
+  "version": "2026-11-16.1",
   "labels": [
     "kb_read",
     "kb_admin",
@@ -22,7 +22,7 @@
     { "label": "kb_read", "question": "合同到期续签提前多久办？" },
     { "label": "kb_read", "question": "保密协议适用于哪些人？" },
     { "label": "kb_read", "question": "工牌丢了怎么补办？" },
-    { "label": "kb_read", "question": "食堂几点开饭？" },
+    { "label": "kb_read", "question": "报销制度在哪个知识库能查到？" },
     { "label": "kb_read", "question": "公司车位怎么申请？" },
     { "label": "kb_read", "question": "向公司借款需要什么凭证？" },
     { "label": "kb_read", "question": "供应商准入需要哪些资质？" },
@@ -33,8 +33,8 @@
     { "label": "kb_read", "question": "会议室怎么预订？" },
     { "label": "kb_read", "question": "出差补贴一天多少钱？" },
     { "label": "kb_read", "question": "周末值班后怎么补休？" },
-    { "label": "kb_read", "question": "公司允许带宠物上班吗？" },
-    { "label": "kb_read", "question": "工装多久发一次？" },
+    { "label": "kb_read", "question": "差旅标准在哪查？应该看哪个库？" },
+    { "label": "kb_read", "question": "制度条款一般去哪个知识库找？" },
     { "label": "kb_read", "question": "员工体检安排在什么时候？" },
 
     { "label": "kb_admin", "question": "帮我建一个知识库" },
