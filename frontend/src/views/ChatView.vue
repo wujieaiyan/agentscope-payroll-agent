@@ -1759,13 +1759,26 @@ onBeforeUnmount(() => {
                   <button
                     :class="{ on: feedbackMap[message.id] === 'UP' }"
                     title="有帮助"
+                    aria-label="有帮助"
                     @click="submitFeedback(message, 'UP')"
-                  >有帮助</button>
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M7 21V10.6l4.6-8.1a1.8 1.8 0 0 1 3.1 1.8L13.5 10H19a2 2 0 0 1 2 2.3l-1.1 6A2 2 0 0 1 18 20H7z" />
+                      <path d="M7 10H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3" />
+                    </svg>
+                  </button>
                   <button
+                    class="down"
                     :class="{ on: feedbackMap[message.id] === 'DOWN' }"
                     title="没帮助"
+                    aria-label="没帮助"
                     @click="submitFeedback(message, 'DOWN')"
-                  >没帮助</button>
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M7 21V10.6l4.6-8.1a1.8 1.8 0 0 1 3.1 1.8L13.5 10H19a2 2 0 0 1 2 2.3l-1.1 6A2 2 0 0 1 18 20H7z" />
+                      <path d="M7 10H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3" />
+                    </svg>
+                  </button>
                 </span>
               </div>
 
