@@ -31,7 +31,7 @@ public final class ActionGuard {
     private static final Logger log = LoggerFactory.getLogger(ActionGuard.class);
     private static final int MAX_TEXT_CHARS = 8_000;
 
-    /** 知识库写工具无条件确认：全局开关关闭时也必须先出提案。 */
+    /** 无条件确认工具：全局开关关闭时也必须先出提案。 */
     public static final Set<String> DEFAULT_ALWAYS_CONFIRM_TOOLS =
             Set.of(
                     KbTools.CREATE_LIBRARY,
@@ -39,7 +39,12 @@ public final class ActionGuard {
                     KbTools.GRANT_MEMBER,
                     KbTools.REMOVE_MEMBER,
                     KbTools.MOVE_DIRECTORY,
-                    KbTools.REBUILD_INDEX);
+                    KbTools.REBUILD_INDEX,
+                    SkillRunTools.SKILL_RUN);
+
+    /** 配置清单不能覆盖的强制项：脚本执行永远需要确认（D4）。 */
+    private static final Set<String> MANDATORY_ALWAYS_CONFIRM_TOOLS =
+            Set.of(SkillRunTools.SKILL_RUN);
 
     private final long userId;
     private final long sessionId;
@@ -194,15 +199,17 @@ public final class ActionGuard {
     }
 
     private static Set<String> normalizeTools(Set<String> tools) {
-        if (tools == null) {
-            return DEFAULT_ALWAYS_CONFIRM_TOOLS;
-        }
         Set<String> normalized = new LinkedHashSet<>();
-        for (String tool : tools) {
-            if (tool != null && !tool.isBlank()) {
-                normalized.add(tool.trim().toLowerCase(Locale.ROOT));
+        if (tools == null) {
+            normalized.addAll(DEFAULT_ALWAYS_CONFIRM_TOOLS);
+        } else {
+            for (String tool : tools) {
+                if (tool != null && !tool.isBlank()) {
+                    normalized.add(tool.trim().toLowerCase(Locale.ROOT));
+                }
             }
         }
+        normalized.addAll(MANDATORY_ALWAYS_CONFIRM_TOOLS);
         return Set.copyOf(normalized);
     }
 

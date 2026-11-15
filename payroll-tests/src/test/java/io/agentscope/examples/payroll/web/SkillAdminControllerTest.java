@@ -58,10 +58,12 @@ class SkillAdminControllerTest {
     @DisplayName("新增返回摘要并写入审计")
     void createWritesAudit() {
         SkillSummary saved = summary("payroll-auditor", "薪酬审计", "nacos", false);
-        when(registry.create("payroll-auditor", "薪酬审计", "正文")).thenReturn(saved);
+        when(registry.create("payroll-auditor", "薪酬审计", "正文", false)).thenReturn(saved);
 
         ApiResponse response =
-                controller.create(new SkillAdminController.SkillInput("payroll-auditor", "薪酬审计", "正文"));
+                controller.create(
+                        new SkillAdminController.SkillInput(
+                                "payroll-auditor", "薪酬审计", "正文", false));
 
         assertSame(saved, response.data());
         verify(auditService).record(eq("skill.create"), eq("skill"), eq("payroll-auditor"), eq(null), any());
@@ -72,19 +74,41 @@ class SkillAdminControllerTest {
     void updateWritesAudit() {
         SkillDetail before =
                 new SkillDetail(
-                        "payroll-auditor", "旧描述", "旧正文", "nacos", false, false, 1L, List.of());
+                        "payroll-auditor", "旧描述", "旧正文", "nacos", false, false, 1L, List.of(),
+                        false);
         SkillSummary after = summary("payroll-auditor", "新描述", "nacos", false);
         when(registry.detail("payroll-auditor")).thenReturn(before);
-        when(registry.update("payroll-auditor", "新描述", "新正文")).thenReturn(after);
+        when(registry.update("payroll-auditor", "新描述", "新正文", false)).thenReturn(after);
 
         ApiResponse response =
                 controller.update(
                         "payroll-auditor",
-                        new SkillAdminController.SkillInput(null, "新描述", "新正文"));
+                        new SkillAdminController.SkillInput(null, "新描述", "新正文", null));
 
         assertSame(after, response.data());
         verify(auditService)
                 .record("skill.update", "skill", "payroll-auditor", meta(before), meta(after));
+    }
+
+    @Test
+    @DisplayName("编辑可开启脚本执行，审计快照记录开关状态")
+    void updatePersistsExecutionFlag() {
+        SkillDetail before =
+                new SkillDetail(
+                        "payroll-auditor", "旧描述", "旧正文", "nacos", false, false, 1L, List.of(),
+                        true);
+        SkillSummary after = summary("payroll-auditor", "新描述", "nacos", false);
+        when(registry.detail("payroll-auditor")).thenReturn(before);
+        when(registry.update("payroll-auditor", "新描述", "新正文", true)).thenReturn(after);
+
+        controller.update(
+                "payroll-auditor",
+                new SkillAdminController.SkillInput(null, "新描述", "新正文", true));
+
+        verify(registry).update("payroll-auditor", "新描述", "新正文", true);
+        verify(auditService)
+                .record("skill.update", "skill", "payroll-auditor", meta(before), meta(after));
+        assertEquals(true, meta(before).get("executionEnabled"));
     }
 
     @Test
@@ -100,7 +124,8 @@ class SkillAdminControllerTest {
                                 false,
                                 false,
                                 1L,
-                                List.of()));
+                                List.of(),
+                                false));
         when(agentRegistry.list()).thenReturn(List.of(agent("个税顾问", "payroll-auditor")));
 
         PayrollException error =
@@ -124,7 +149,8 @@ class SkillAdminControllerTest {
                                 true,
                                 true,
                                 1L,
-                                List.of()));
+                                List.of(),
+                                false));
         when(agentRegistry.list())
                 .thenReturn(List.of(agent("薪酬计算专家", RoleSkills.CALCULATOR)));
         when(registry.delete(RoleSkills.CALCULATOR)).thenReturn(true);
@@ -140,7 +166,8 @@ class SkillAdminControllerTest {
     void deleteWritesAudit() {
         SkillDetail before =
                 new SkillDetail(
-                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of());
+                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of(),
+                        false);
         when(registry.detail("payroll-auditor")).thenReturn(before);
         when(registry.delete("payroll-auditor")).thenReturn(true);
 
@@ -160,7 +187,8 @@ class SkillAdminControllerTest {
     void detailReturnsRegistryValue() {
         SkillDetail detail =
                 new SkillDetail(
-                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of());
+                        "payroll-auditor", "薪酬审计", "正文", "nacos", false, false, 1L, List.of(),
+                        false);
         when(registry.detail("payroll-auditor")).thenReturn(detail);
 
         assertSame(detail, controller.detail("payroll-auditor").data());
@@ -277,6 +305,7 @@ class SkillAdminControllerTest {
         meta.put("source", skill.source());
         meta.put("builtin", skill.builtin());
         meta.put("contentLength", skill.content().length());
+        meta.put("executionEnabled", skill.executionEnabled());
         return meta;
     }
 }

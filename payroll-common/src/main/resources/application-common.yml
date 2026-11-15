@@ -77,7 +77,8 @@ payroll:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
       ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
       # 命中清单的写工具无论 enabled 如何都先出确认提案；默认覆盖知识库 6 个写工具。
-      always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index}"
+      # skill_run 额外由代码强制加入（不可通过配置移除）。
+      always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index,skill_run}"
   # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
   routing:
     enabled: "${PAYROLL_ROUTING_ENABLED:true}"

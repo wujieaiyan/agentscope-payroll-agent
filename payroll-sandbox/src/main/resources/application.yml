@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: payroll-sandbox
+
+server:
+  port: "${PAYROLL_SANDBOX_PORT:8200}"
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    io.agentscope.payroll.sandbox: "${PAYROLL_SANDBOX_LOG_LEVEL:INFO}"

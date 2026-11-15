@@ -80,6 +80,24 @@ class NacosSkillRegistryTest {
     }
 
     @Test
+    @DisplayName("执行开关写入 frontmatter，重启后可读并可关闭")
+    void storesExecutionFlag() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"), true);
+
+        String raw = nacos.configs.get(AUDITOR + ".md");
+        assertTrue(raw.contains("execution:\n  enabled: true"), raw);
+        assertTrue(registry(true).detail(AUDITOR).executionEnabled());
+        assertFalse(registry.detail(RoleSkills.CALCULATOR).executionEnabled(), "内置技能默认关闭");
+
+        registry.update(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"), false);
+
+        assertFalse(nacos.configs.get(AUDITOR + ".md").contains("execution:"), "关闭后应移除标记");
+        assertFalse(registry(true).detail(AUDITOR).executionEnabled());
+    }
+
+    @Test
     @DisplayName("编辑器查详情时返回可再次保存的正文")
     void detailForBuiltinOmitsFrontmatter() throws IOException {
         nacos = new FakeNacosServer();
@@ -99,7 +117,7 @@ class NacosSkillRegistryTest {
         nacos = new FakeNacosServer();
         NacosSkillRegistry registry = registry(true);
 
-        registry.update(RoleSkills.CALCULATOR, "覆盖版计算角色", roleContent("来自 Nacos 的覆盖版。"));
+        registry.update(RoleSkills.CALCULATOR, "覆盖版计算角色", roleContent("来自 Nacos 的覆盖版。"), false);
         SkillSummary overridden =
                 registry.list().stream()
                         .filter(skill -> skill.id().equals(RoleSkills.CALCULATOR))
@@ -141,7 +159,7 @@ class NacosSkillRegistryTest {
         PayrollException missing =
                 assertThrows(
                         PayrollException.class,
-                        () -> registry.update("no-such-skill", "", "正文"));
+                        () -> registry.update("no-such-skill", "", "正文", false));
         assertTrue(missing.getMessage().contains("不存在"), missing.getMessage());
 
         PayrollException blank =
@@ -217,7 +235,7 @@ class NacosSkillRegistryTest {
         registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
         registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
 
-        registry.update(AUDITOR, "更新描述", roleContent("更新后的审计规则。"));
+        registry.update(AUDITOR, "更新描述", roleContent("更新后的审计规则。"), false);
 
         SkillDetail detail = registry(true).detail(AUDITOR);
         assertTrue(detail.content().contains("更新后的审计规则"), detail.content());

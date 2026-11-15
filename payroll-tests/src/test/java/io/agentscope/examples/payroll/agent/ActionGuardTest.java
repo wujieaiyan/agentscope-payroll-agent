@@ -101,7 +101,7 @@ class ActionGuardTest {
     }
 
     @Test
-    @DisplayName("强制清单不区分大小写，且不包含普通写工具")
+    @DisplayName("强制清单不区分大小写，skill_run 不可被配置移除")
     void alwaysConfirmListIsCaseInsensitiveAndNarrow() {
         ActionGuard guard =
                 guard(
@@ -112,7 +112,8 @@ class ActionGuardTest {
         assertNotNull(
                 guard.intercept("Kb_Save_Config", Map.of("series_id", 7), false, false, false));
         assertNull(guard.intercept("disable_employee", Map.of(), false, false, false));
-        assertEquals(java.util.Set.of("kb_save_config"), guard.alwaysConfirmTools());
+        assertEquals(
+                java.util.Set.of("kb_save_config", "skill_run"), guard.alwaysConfirmTools());
     }
 
     @Test

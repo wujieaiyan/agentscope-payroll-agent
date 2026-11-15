@@ -11,7 +11,7 @@ const detailLoading = ref(false);
 const showForm = ref(false);
 const editing = ref(false);
 const saving = ref(false);
-const form = reactive({ id: '', description: '', content: '' });
+const form = reactive({ id: '', description: '', content: '', executionEnabled: false });
 
 const tab = ref('body');
 const files = ref([]);
@@ -19,6 +19,7 @@ const fileLoading = ref(false);
 const showFileForm = ref(false);
 const fileEditing = ref(false);
 const fileSaving = ref(false);
+const executionSaving = ref(false);
 const fileForm = reactive({ path: '', originalPath: '', content: '' });
 
 const skills = computed(() => {
@@ -37,6 +38,9 @@ const canEditFiles = computed(
 );
 const referenceFiles = computed(() => files.value.filter((file) => file.kind !== 'script'));
 const scriptFiles = computed(() => files.value.filter((file) => file.kind === 'script'));
+const canToggleExecution = computed(
+  () => canEditFiles.value && scriptFiles.value.length > 0 && !executionSaving.value
+);
 const activeFiles = computed(() =>
   tab.value === 'files-scripts' ? scriptFiles.value : referenceFiles.value
 );
@@ -88,7 +92,7 @@ async function openSkill(skill) {
 
 function createSkill() {
   editing.value = false;
-  Object.assign(form, { id: '', description: '', content: '' });
+  Object.assign(form, { id: '', description: '', content: '', executionEnabled: false });
   showForm.value = true;
 }
 
@@ -98,6 +102,7 @@ function editSkill(skill) {
     id: skill.id,
     description: skill.description || '',
     content: skill.content || '',
+    executionEnabled: Boolean(skill.executionEnabled ?? skill.execution_enabled),
   });
   showForm.value = true;
 }
@@ -111,7 +116,12 @@ async function save() {
   if (saving.value) return;
   saving.value = true;
   try {
-    const body = { id: form.id.trim(), description: form.description.trim(), content: form.content };
+    const body = {
+      id: form.id.trim(),
+      description: form.description.trim(),
+      content: form.content,
+      executionEnabled: form.executionEnabled,
+    };
     if (editing.value) {
       await api(`/api/admin/skills/${encodeURIComponent(body.id)}`, { method: 'PUT', body });
     } else {
@@ -137,6 +147,30 @@ async function remove(skill) {
     await load();
   } catch (error) {
     toast(error.message, 'error');
+  }
+}
+
+async function toggleExecution(enabled) {
+  if (!canToggleExecution.value) return;
+  executionSaving.value = true;
+  try {
+    const id = detail.value.id;
+    await api(`/api/admin/skills/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: {
+        id,
+        description: detail.value.description || '',
+        content: detail.value.content,
+        executionEnabled: enabled,
+      },
+    });
+    detail.value.executionEnabled = enabled;
+    toast(enabled ? '已开启脚本执行' : '已关闭脚本执行', 'success');
+    await load();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    executionSaving.value = false;
   }
 }
 
@@ -316,6 +350,27 @@ onMounted(load);
             </template>
 
             <template v-else>
+              <div class="exec-row">
+                <div>
+                  <strong>允许对话执行脚本</strong>
+                  <p class="file-hint">
+                    开启后模型可提交 <code>scripts/</code> 下的脚本；每次执行仍需用户在确认卡片确认。
+                    脚本在禁网、只读、非 root 的一次性容器中运行，最长 10 秒。
+                  </p>
+                </div>
+                <label class="exec-switch">
+                  <input
+                    type="checkbox"
+                    :checked="Boolean(detail.executionEnabled)"
+                    :disabled="!canToggleExecution"
+                    @change="toggleExecution($event.target.checked)"
+                  />
+                  <span>{{ detail.executionEnabled ? '已开启' : '已关闭' }}</span>
+                </label>
+              </div>
+              <p v-if="!scriptFiles.length" class="file-hint warn">
+                先上传至少一个脚本文件，才能开启执行。
+              </p>
               <p class="file-hint">
                 参考文件放 <code>references/</code>，脚本放 <code>scripts/</code>（仅 .py / .sh / .js）；
                 单文件 ≤ 64KB、合计 ≤ 256KB、最多 20 个。对话中通过 <code>skill_read</code> 读取。
@@ -367,6 +422,12 @@ onMounted(load);
             <label class="field span-2">
               正文（Markdown）
               <textarea v-model="form.content" rows="16" class="mono"></textarea>
+            </label>
+            <label class="field span-2 exec-check">
+              <span>
+                <input v-model="form.executionEnabled" type="checkbox" />
+                允许对话执行 scripts/ 下的脚本（需部署沙箱服务；执行仍需用户确认）
+              </span>
             </label>
           </div>
         </div>
@@ -482,5 +543,33 @@ onMounted(load);
 .file-size {
   flex: 0 0 auto;
   font-size: 12px;
+}
+
+.exec-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.exec-row + .file-hint {
+  margin-top: 10px;
+}
+
+.exec-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.exec-check input[type='checkbox'] {
+  height: auto;
+  margin-right: 6px;
 }
 </style>

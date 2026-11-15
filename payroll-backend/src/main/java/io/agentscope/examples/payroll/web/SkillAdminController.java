@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.web;
 
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.service.AuditService;
@@ -111,7 +113,12 @@ public class SkillAdminController {
     @PostMapping
     @RequirePermission(Permissions.SKILL_MANAGE)
     public ApiResponse create(@RequestBody SkillInput input) {
-        SkillSummary saved = registry.create(input.id(), input.description(), input.content());
+        SkillSummary saved =
+                registry.create(
+                        input.id(),
+                        input.description(),
+                        input.content(),
+                        Boolean.TRUE.equals(input.executionEnabled()));
         auditService.record("skill.create", "skill", saved.id(), null, meta(saved));
         return ApiResponse.ok(saved);
     }
@@ -120,7 +127,12 @@ public class SkillAdminController {
     @RequirePermission(Permissions.SKILL_MANAGE)
     public ApiResponse update(@PathVariable String id, @RequestBody SkillInput input) {
         SkillDetail before = registry.detail(id);
-        SkillSummary saved = registry.update(id, input.description(), input.content());
+        SkillSummary saved =
+                registry.update(
+                        id,
+                        input.description(),
+                        input.content(),
+                        Boolean.TRUE.equals(input.executionEnabled()));
         auditService.record("skill.update", "skill", saved.id(), meta(before), meta(saved));
         return ApiResponse.ok(saved);
     }
@@ -181,6 +193,7 @@ public class SkillAdminController {
         meta.put("source", skill.source());
         meta.put("builtin", skill.builtin());
         meta.put("contentLength", skill.content().length());
+        meta.put("executionEnabled", skill.executionEnabled());
         return meta;
     }
 
@@ -194,7 +207,9 @@ public class SkillAdminController {
     }
 
     /** 新增与编辑共用请求体；编辑时路径 id 优先。 */
-    public record SkillInput(String id, String description, String content) {
+    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
+    public record SkillInput(
+            String id, String description, String content, Boolean executionEnabled) {
     }
 
     /** 文件包全量替换请求体。 */

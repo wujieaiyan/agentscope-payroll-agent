@@ -1,6 +1,6 @@
 # 技能资源与脚本沙箱设计方案
 
-- 状态：P1 已实现（P1-1～P1-4，2026-11-15）；P2 沙箱执行待开发
+- 状态：P1 与 P2 均已实现（P1-1～P1-4、P2-1～P2-3，2026-11-15）
 - 日期：2026-11-15
 - 关联：`docs/kb-chat-integration-design.md`、`payroll-common/.../skill/NacosSkillRegistry.java`、`payroll-agent/.../HarnessAgentSupport.java`
 
@@ -130,15 +130,20 @@ agent-runtime --(HMAC + 内部令牌)--> sandbox-service --(docker run, 每次�
 ```
 POST /internal/sandbox/execute
 {
+  "user_id": 7,
   "skill_id": "payroll-policy",
   "script_path": "scripts/check.py",
   "args": ["--month", "2026-11"],
-  "timeout_ms": 10000
+  "timeout_ms": 10000,
+  "scripts": [{"path": "scripts/check.py", "content": "..."}]
 }
-→ { "exit_code": 0, "stdout": "...", "stderr": "...", "duration_ms": 1234 }
+→ { "status": "OK", "exit_code": 0, "stdout": "...", "stderr": "...",
+    "duration_ms": 1234, "script_sha256": "...", "truncated": false, "message": null }
 ```
 
-鉴权复用现有 HMAC 内部通道约定；参数为数组，不接受 shell 字符串拼接。
+鉴权复用现有 HMAC 内部通道约定；参数为数组，不接受 shell 字符串拼接。状态映射：
+`BUSY→429`、`UNAVAILABLE→503`、`INVALID→400`，`OK/TIMEOUT/ERROR` 返回 200 并在 `status`
+中区分。`scripts` 只包含当前技能包的 `scripts/**`，沙箱不访问 Nacos 或 Web 接口。
 
 ### 5.3 安全基线（硬约束）
 
@@ -155,6 +160,22 @@ POST /internal/sandbox/execute
 ### 5.4 工具与注册条件
 
 `skill_run(script_path, args)` 仅当：沙箱已配置 + 技能 frontmatter `execution.enabled=true` + 用户具备该技能所属智能体的使用权限，三者同时满足才注册。失败时明确返回原因（沙箱未配置 / 技能未开启执行 / 超时 / 退出码非零），不静默降级为"模型自己猜结果"。
+
+实现落点：
+
+| 层 | 文件 | 说明 |
+| --- | --- | --- |
+| 协议 | `payroll-protocol/.../sandbox/SandboxProtocol.java` | 路径/参数/超时校验、解释器映射、SHA-256 |
+| 沙箱服务 | `payroll-sandbox/.../SandboxController.java` | HMAC 校验、JSON 解析、HTTP 状态映射 |
+| 调度 | `payroll-sandbox/.../SandboxService.java` | 全局 4 并发 + 同用户 1 并发、入参复验 |
+| 隔离 | `payroll-sandbox/.../DockerSandboxRunner.java` | 一次性容器、超时按名 kill、临时目录清理 |
+| 工具 | `payroll-common/.../agent/SkillRunTools.java` | 只提交提案，取 `ActionGuard` 强制确认 |
+| 注册 | `payroll-agent/.../PayrollAgentFactory.java` | 沙箱可用且存在可执行脚本时注册并注入指引 |
+| 确认执行 | `payroll-backend/.../backend/SkillRunActionContributor.java` | 重新读取技能包、调用沙箱、返回预览 |
+| 开关 | `NacosSkillRegistry` / `SkillAdminController` / `SkillsView.vue` | frontmatter 读写、审计快照与页面开关 |
+
+`ActionGuard` 将 `skill_run` 放入不可配置移除的强制确认集合；即使全局确认开关关闭，工具仍只返回
+`PENDING_CONFIRM`。确认执行时重新校验技能仍开启执行且脚本仍在包内，审计只记录参数与预览。
 
 ## 六、管理台与接口
 
@@ -180,6 +201,11 @@ POST /internal/sandbox/execute
 | `PAYROLL_SANDBOX_TOKEN` | 空 | 沙箱内部 HMAC 令牌 |
 | `PAYROLL_SANDBOX_TIMEOUT_MS` | `10000` | 单次执行上限，硬上限 10s |
 | `PAYROLL_SKILL_EXEC_ENABLED` | `false` | 执行总开关，需与技能级开关同时为真 |
+| `PAYROLL_SANDBOX_PORT` | `8200` | 沙箱服务监听端口 |
+| `PAYROLL_SANDBOX_DOCKER` | `docker` | 调度器使用的 docker CLI 路径 |
+| `PAYROLL_SANDBOX_SCRIPT_IMAGE` | `payroll-sandbox-runtime:local` | 脚本运行时镜像 |
+| `PAYROLL_SANDBOX_MAX_CONCURRENCY` | `4` | 沙箱全局并发，单用户固定 1 |
+| `PAYROLL_SANDBOX_WORK_DIR` | 空 | 脚本临时目录；容器内调度须与宿主机同路径 |
 
 ## 八、分期任务与验收
 
@@ -193,7 +219,31 @@ POST /internal/sandbox/execute
 | P2-2 | 执行工具 | `skill_run`、双开关、ActionGuard 确认、审计与追溯 | 未开启执行的技能无 `skill_run`；确认后执行并落审计；拒绝执行无副作用 |
 | P2-3 | 部署与测试 | compose 增加沙箱、配置文档、端到端脚本 | 一键启动三服务；全量测试与前端构建通过 |
 
-P1-1～P1-4 已于 2026-11-15 实现：回归测试覆盖文件包读写、`mdHash` 错配忽略、路径与大小校验、`skill_read` 额度与截断、管理台文件接口与审计；网页端已完成新增/编辑/删除参考文件的实测。P2 沙箱未开始。
+P1-1～P1-4 已于 2026-11-15 实现：回归测试覆盖文件包读写、`mdHash` 错配忽略、路径与大小校验、`skill_read` 额度与截断、管理台文件接口与审计；网页端已完成新增/编辑/删除参考文件的实测。
+
+P2-1～P2-3 同样于 2026-11-15 实现：
+
+- 新增 `payroll-sandbox` 模块与 `SandboxProtocol` 校验；协议、服务、控制器、Runner 共 19 个单测
+  覆盖路径/参数/超时、并发拒绝、HTTP 状态映射、隔离参数、超时 kill 与临时目录清理。
+- `skill_run` 注册条件、双开关、强制确认、同名脚本消歧、预览截断与失败文案共 13 个单测；
+  `SkillRunActionContributor` 通过可注入仓库/网关完成成功与拒绝分支测试。
+- 管理台执行开关（frontmatter `execution.enabled`）完成创建/编辑/关闭的注册表往返测试与审计快照校验；
+  开关纳入智能体缓存指纹，切换后重建实例。
+- compose 已加入沙箱服务、脚本运行时镜像与共享 work 目录；前端构建与全量测试通过。
+- 本机 Docker（WSL Ubuntu，Engine 29.9.3）已实跑容器隔离验收：正常执行约 300ms；2s 预算的死循环
+  在约 4s 被杀；容器内访问外网被拒绝；`/src` 与根文件系统只读；`/mnt/d` 等宿主路径不可见；
+  路径穿越返回 400；执行结束无残留容器与工作目录。
+- 端到端链路实测（web 8080 + runtime 8100 + sandbox 8200）：对话触发 `skill_run` 生成 PENDING 提案，
+  确认后状态 `EXECUTED`、`exit_code=0`、stdout 含 `SANDBOX_CHECK_OK`，并写入 `chat.action.confirm` /
+  `chat.action.execute` 审计（仅保存 stdout 预览，不落全量输出与令牌）。
+- 该链路随后在 IDEA 调试模式下复测通过：Web 与 runtime 均为带 `jdwp` 的调试 JVM（端口分别 8080/8100），
+  确认执行耗时 373ms，`uid=65534`、`cwd=/work`，执行后无残留容器；验证数据已清理，默认流程恢复为
+  原 `activeFlowId`。
+- **契约修正**：沙箱响应体必须固定 snake_case（`exit_code`/`duration_ms`/`script_sha256`），
+  在 `SandboxResult` 上显式加 `@JsonNaming(SnakeCaseStrategy)`；此前 Spring 默认驼峰序列化会导致
+  `SandboxClient` 解析出 `exit_code=-1`，表现为“脚本执行失败”。新增 `SandboxResultJsonTest` 守住该契约。
+- **附带修复**：审计查询的 LIKE 转义由反斜杠改为 `!`，避免 MySQL 下 `ESCAPE '\'` 非法字面量导致
+  带过滤条件的审计查询 500；H2 与 MySQL 均可用。
 
 ## 九、风险与回滚
 

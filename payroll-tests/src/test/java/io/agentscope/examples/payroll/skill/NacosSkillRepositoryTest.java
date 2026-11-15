@@ -61,6 +61,22 @@ class NacosSkillRepositoryTest {
     }
 
     @Test
+    @DisplayName("frontmatter 执行开关透传到技能元数据")
+    void parsesExecutionFlag() {
+        String markdown =
+                CALCULATOR_MD.replace(
+                        "---\n## 角色", "execution:\n  enabled: true\n---\n## 角色");
+        NacosSkillRepository repository =
+                repository(Map.of("payroll-calculator.md", markdown), clock());
+
+        assertTrue(SkillExecutions.executionEnabled(repository.getSkill(RoleSkills.CALCULATOR)));
+        assertFalse(
+                SkillExecutions.executionEnabled(
+                        repository(Map.of("payroll-calculator.md", CALCULATOR_MD), clock())
+                                .getSkill(RoleSkills.CALCULATOR)));
+    }
+
+    @Test
     @DisplayName("缺少 frontmatter 时按纯文本使用并回退内置描述")
     void fallsBackToBuiltInDescription() {
         NacosSkillRepository repository =

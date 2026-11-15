@@ -339,7 +339,24 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 知识库与技能文件的分工：制度、政策等长文与需要引用出处的问答走 `kb_search`（带引用）；
 FAQ 片段、模板、字段口径等短参考走 `skill_read`（不带引用）。
 
-### 技能文件配置项
+### `skill_run` 工具（沙箱执行）
+
+技能正文 frontmatter 增加 `execution.enabled: true` 后，该技能包的 `scripts/*` 才允许执行：
+
+- 双开关：环境层 `PAYROLL_SKILL_EXEC_ENABLED=true` 且沙箱地址/令牌齐全，技能层再开启
+  `execution.enabled`，`skill_run` 才会注册；任一不满足模型都看不到该工具，也不会静默改成
+  “自行猜测结果”。
+- 强制确认：`skill_run` 被视为写操作，无条件走会话内确认（不受全局确认开关影响）；
+  模型只提交 `script_path`/`args`/可选 `skill_id`，确认后由 Web 节点重新读取当前技能包并调用沙箱。
+- 执行隔离：独立 `payroll-sandbox` 服务通过 `docker run` 启动一次性容器，禁网
+  （`--network none`）、只读根盘、`/work` 可写 tmpfs、非 root（65534）、1 CPU、256MB 内存、
+  `cap-drop ALL`；超时默认 5 秒、最长 10 秒，超时按容器名强制 `docker kill`。
+- 输出：返回退出码、耗时、脚本哈希与截断后的 stdout/stderr 预览；提案与审计不落完整脚本或
+  完整输出，管理台确认卡片展示预览。
+- 管理台“技能管理”的脚本页签提供“启用执行”开关，保存时写入 frontmatter `execution.enabled`；
+  正文变更会使智能体缓存键失效，重启后同样生效。
+
+### 技能文件与沙箱配置项
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -347,6 +364,17 @@ FAQ 片段、模板、字段口径等短参考走 `skill_read`（不带引用）
 | `PAYROLL_SKILL_FILE_MAX_BYTES` | `65536` | 单文件上限 |
 | `PAYROLL_SKILL_FILES_MAX_BYTES` | `262144` | 单技能文件总量上限 |
 | `PAYROLL_SKILL_READ_MAX_PER_TURN` | `5` | 单轮 `skill_read` 次数上限 |
+| `PAYROLL_SKILL_EXEC_ENABLED` | `false` | 智能体/runtime 侧脚本执行总开关 |
+| `PAYROLL_SANDBOX_URL` | 空 | 沙箱服务地址（如 `http://sandbox:8200`） |
+| `PAYROLL_SANDBOX_TOKEN` | 空 | Web/runtime 与沙箱服务共用的内部 HMAC 令牌 |
+| `PAYROLL_SANDBOX_TIMEOUT_MS` | `10000` | 单次执行超时，超过 10 秒按 10 秒 |
+| `PAYROLL_SANDBOX_SCRIPT_IMAGE` | `payroll-sandbox-runtime:local` | 承载 `.py`/`.sh`/`.js` 的运行时镜像 |
+| `PAYROLL_SANDBOX_MAX_CONCURRENCY` | `4` | 沙箱服务全局并发；同一用户始终 1 并发 |
+| `PAYROLL_SANDBOX_WORK_DIR` | 空 | 脚本临时目录；容器内调度时须与宿主机同路径 |
+
+拆分部署时 Web 与 runtime 都要配置 `PAYROLL_SKILL_EXEC_ENABLED`/`PAYROLL_SANDBOX_URL`/
+`PAYROLL_SANDBOX_TOKEN`：runtime 负责注册 `skill_run` 并生成提案，确认后的实际执行在 Web 节点完成。
+沙箱响应体固定 snake_case（`exit_code`/`duration_ms`/`script_sha256`），两端依赖该契约解析。
 
 ## 流式对话（SSE）
 
@@ -748,13 +776,18 @@ Docker 三镜像编排见 [docker/docker-compose.yml](docker/docker-compose.yml)
 
 ```bash
 mvn -DskipTests package
+docker build -f docker/sandbox-runtime.Dockerfile -t payroll-sandbox-runtime:local .
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 镜像与职责：`payroll-frontend:local`（Nginx 托管 Vue3 产物并代理 `/api`）、
-`payroll-backend:local`（2 个 Web 节点）、`payroll-runtime:local`（2 个运行期节点）；
+`payroll-backend:local`（2 个 Web 节点）、`payroll-runtime:local`（2 个运行期节点）、
+`payroll-sandbox:local`（脚本调度）与 `payroll-sandbox-runtime:local`（脚本运行时）；
 另有 MySQL、Redis、Ollama 容器，入口 `http://127.0.0.1:18088`。
 Web/runtime 共享 `kb-data` 与 `output-data` 卷，避免多实例各写本地文件。
+沙箱调度容器挂载 `/var/run/docker.sock` 启动一次性脚本容器；`PAYROLL_SANDBOX_WORK_DIR`
+在宿主机与调度容器内必须是同一绝对路径（compose 已按同源同目标挂载，默认
+`/tmp/payroll-sandbox-work`），否则宿主机 Docker 看不到脚本 bind 源。
 轮次状态、续流、取消、语义缓存与容器化 Ollama 的细节见
 [docs/multi-node-deploy.md](docs/multi-node-deploy.md)。断线续传的协议、前端退避策略、租约判定
 与配置项见 [docs/chat-resume.md](docs/chat-resume.md)。

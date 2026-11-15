@@ -1,6 +1,7 @@
-# 三镜像多节点演练：前端(Nginx) + 2 个 Web 后端 + 2 个 agent-runtime + MySQL + Redis + Ollama。
+# 三镜像多节点演练：前端(Nginx) + 2 个 Web 后端 + 2 个 agent-runtime + MySQL + Redis + Ollama + 沙箱。
 # 用法：
 #   mvn -DskipTests package
+#   docker build -f docker/sandbox-runtime.Dockerfile -t payroll-sandbox-runtime:local .
 #   docker compose -f docker/docker-compose.yml up -d --build
 #   浏览器访问 http://127.0.0.1:18088
 # 说明：
@@ -9,6 +10,8 @@
 #   - runtime 只在容器网络内暴露 8100，对外不可达。
 #   - Web/runtime 共享 kb-data（知识库文件）与 output-data（导出文件），避免多实例各写本地。
 #   - 模型由 compose 内的 Ollama 提供，直接挂载宿主机模型目录（只读），无需宿主机 Ollama。
+#   - sandbox 通过 docker.sock 启动一次性脚本容器；work 目录在宿主机与容器内保持同一绝对路径，
+#     否则宿主机 Docker 看不到脚本 bind 源。脚本容器本身禁网、只读、非 root、限额运行。
 
 name: payroll-multinode
 
@@ -33,6 +36,10 @@ x-app-env: &app-env
   MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED: "false"
   # Web 与 runtime 共用同一 HMAC 密钥。
   PAYROLL_AGENT_RUNTIME_TOKEN: ${PAYROLL_AGENT_RUNTIME_TOKEN:-local-demo-token-change-me}
+  # 技能脚本执行：runtime 经内部 HMAC 调用沙箱服务。
+  PAYROLL_SANDBOX_URL: ${PAYROLL_SANDBOX_URL:-http://sandbox:8200}
+  PAYROLL_SANDBOX_TOKEN: ${PAYROLL_SANDBOX_TOKEN:-local-sandbox-token-change-me}
+  PAYROLL_SKILL_EXEC_ENABLED: "true"
   TZ: Asia/Shanghai
 
 x-app: &app
@@ -176,6 +183,25 @@ services:
     volumes:
       - kb-data:/app/data
       - output-data:/app/output
+
+  # 脚本沙箱调度器：通过 docker.sock 起一次性容器；脚本目录以同一绝对路径挂载，宿主机可见。
+  sandbox:
+    image: payroll-sandbox:local
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/sandbox.Dockerfile
+    environment:
+      PAYROLL_SANDBOX_TOKEN: ${PAYROLL_SANDBOX_TOKEN:-local-sandbox-token-change-me}
+      PAYROLL_SANDBOX_SCRIPT_IMAGE: ${PAYROLL_SANDBOX_SCRIPT_IMAGE:-payroll-sandbox-runtime:local}
+      PAYROLL_SANDBOX_MAX_CONCURRENCY: "4"
+      PAYROLL_SANDBOX_WORK_DIR: ${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}
+      TZ: Asia/Shanghai
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}:${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}
+    expose:
+      - "8200"
 
   frontend:
     image: payroll-frontend:local

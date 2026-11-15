@@ -16,7 +16,11 @@ import io.agentscope.examples.payroll.model.OllamaThinkingModel;
 import io.agentscope.examples.payroll.service.KbSkillClient;
 import io.agentscope.examples.payroll.service.KbSkillGateway;
 import io.agentscope.examples.payroll.service.PayrollEngine;
+import io.agentscope.examples.payroll.service.SandboxClient;
+import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.RoleSkills;
+import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
+import io.agentscope.examples.payroll.skill.SkillExecutions;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
@@ -405,7 +409,7 @@ public final class PayrollAgentFactory {
                 + skillFingerprint(agent.skillIds());
     }
 
-    /** 技能正文与资源参与缓存签名：Nacos 技能或文件包改动后，旧的系统提示词必须失效。 */
+    /** 技能正文、资源与执行开关参与缓存签名：任一变化都必须让旧的系统提示词与工具集失效。 */
     private static String skillFingerprint(List<String> skillIds) {
         if (skillIds == null || skillIds.isEmpty()) {
             return "";
@@ -420,8 +424,11 @@ public final class PayrollAgentFactory {
             String resources = skill == null || skill.getResources().isEmpty()
                     ? ""
                     : Integer.toHexString(skill.getResources().hashCode());
+            String execution = skill != null && SkillExecutions.executionEnabled(skill)
+                    ? "exec"
+                    : "";
             fingerprint.append(skillId).append(':').append(content).append(':').append(resources)
-                    .append(';');
+                    .append(':').append(execution).append(';');
         }
         return fingerprint.toString();
     }
@@ -515,6 +522,12 @@ public final class PayrollAgentFactory {
         if (SkillReadTools.hasResources(skills)) {
             toolkit.registerTool(new SkillReadTools(skills));
         }
+        SandboxGateway sandboxGateway = sandboxGateway();
+        boolean scriptsRunnable = SkillRunTools.available(skills, sandboxGateway);
+        if (scriptsRunnable) {
+            toolkit.registerTool(
+                    new SkillRunTools(skills, sandboxGateway, skillExecutionTimeoutMs()));
+        }
         KbSkillGateway kbGateway = kbSearch ? kbGateway() : null;
         if (kbGateway != null) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
@@ -527,6 +540,9 @@ public final class PayrollAgentFactory {
         String prompt = flowNodePrompt(agent, skills);
         if (kbGateway != null) {
             prompt = prompt + "\n" + KB_SEARCH_GUIDANCE;
+        }
+        if (scriptsRunnable) {
+            prompt = prompt + "\n" + SkillRunTools.guidance(skills, skillExecutionTimeoutMs());
         }
         HarnessAgent nodeAgent =
                 createAgent(
@@ -563,6 +579,13 @@ public final class PayrollAgentFactory {
         if (SkillReadTools.hasResources(boundSkills)) {
             toolkit.registerTool(new SkillReadTools(boundSkills));
         }
+        SandboxGateway sandboxGateway = sandboxGateway();
+        boolean scriptsRunnable = SkillRunTools.available(boundSkills, sandboxGateway);
+        if (scriptsRunnable) {
+            toolkit.registerTool(
+                    new SkillRunTools(
+                            boundSkills, sandboxGateway, skillExecutionTimeoutMs()));
+        }
         KbSkillGateway kbGateway = kbGateway();
         KbTools kbTools = kbGateway == null ? null : new KbTools(kbGateway);
         if (kbTools != null) {
@@ -585,6 +608,9 @@ public final class PayrollAgentFactory {
                 kbTools == null
                         ? activeAgentPrompt(activeAgent, boundSkills)
                         : activeAgentPrompt(activeAgent, boundSkills) + "\n" + KB_GUIDANCE;
+        if (scriptsRunnable) {
+            prompt = prompt + "\n" + SkillRunTools.guidance(boundSkills, skillExecutionTimeoutMs());
+        }
         HarnessAgent agent =
                 createAgent(
                         "PayrollActiveAgent",
@@ -603,6 +629,16 @@ public final class PayrollAgentFactory {
     private static KbSkillGateway kbGateway() {
         KbSkillGateway gateway = KbSkillClient.fromEnvironment();
         return gateway.enabled() ? gateway : null;
+    }
+
+    /** 沙箱地址或令牌缺失时返回 null，与 KB 通道一致，不注册必然失败的工具。 */
+    private static SandboxGateway sandboxGateway() {
+        SandboxGateway gateway = SandboxClient.fromEnvironment();
+        return gateway.enabled() ? gateway : null;
+    }
+
+    private static int skillExecutionTimeoutMs() {
+        return SkillExecutionSettings.fromEnvironment().timeoutMs();
     }
 
     static List<AgentSkill> boundSkills(

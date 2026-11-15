@@ -63,7 +63,8 @@ public final class NacosSkillRegistry {
             boolean builtin,
             boolean overridden,
             long updatedAt,
-            List<SkillFilePackage.Summary> files) {
+            List<SkillFilePackage.Summary> files,
+            boolean executionEnabled) {
     }
 
     private record RemoteSkill(
@@ -72,7 +73,8 @@ public final class NacosSkillRegistry {
             String description,
             String content,
             long updatedAt,
-            List<SkillFilePackage.SkillFile> files) {
+            List<SkillFilePackage.SkillFile> files,
+            boolean executionEnabled) {
     }
 
     private record Snapshot(List<RemoteSkill> remotes, Map<String, RemoteSkill> byId, long fetchedAt) {
@@ -138,7 +140,8 @@ public final class NacosSkillRegistry {
                     builtin,
                     builtin,
                     remote.updatedAt(),
-                    summaries(remote.files()));
+                    summaries(remote.files()),
+                    remote.executionEnabled());
         }
         if (builtin) {
             AgentSkill skill = RoleSkills.skill(skillId);
@@ -150,7 +153,8 @@ public final class NacosSkillRegistry {
                     true,
                     false,
                     0,
-                    List.of());
+                    List.of(),
+                    false);
         }
         throw new PayrollException("技能不存在：" + skillId);
     }
@@ -232,21 +236,27 @@ public final class NacosSkillRegistry {
     }
 
     public synchronized SkillSummary create(String id, String description, String content) {
+        return create(id, description, content, false);
+    }
+
+    public synchronized SkillSummary create(
+            String id, String description, String content, boolean executionEnabled) {
         requireWritable();
         String skillId = normalizeId(id);
         if (exists(skillId)) {
             throw new PayrollException("技能已存在：" + skillId);
         }
-        return save(skillId, description, content);
+        return save(skillId, description, content, executionEnabled);
     }
 
-    public synchronized SkillSummary update(String id, String description, String content) {
+    public synchronized SkillSummary update(
+            String id, String description, String content, boolean executionEnabled) {
         requireWritable();
         String skillId = normalizeId(id);
         if (!exists(skillId)) {
             throw new PayrollException("技能不存在：" + skillId);
         }
-        return save(skillId, description, content);
+        return save(skillId, description, content, executionEnabled);
     }
 
     public synchronized boolean delete(String id) {
@@ -279,7 +289,8 @@ public final class NacosSkillRegistry {
         return true;
     }
 
-    private SkillSummary save(String skillId, String description, String content) {
+    private SkillSummary save(
+            String skillId, String description, String content, boolean executionEnabled) {
         String cleanDescription = description == null ? "" : description.trim();
         if (cleanDescription.length() > MAX_DESCRIPTION_LENGTH) {
             throw new PayrollException("描述不能超过 " + MAX_DESCRIPTION_LENGTH + " 字");
@@ -304,7 +315,7 @@ public final class NacosSkillRegistry {
             throw new PayrollException(
                     "提示词正文需要包含角色规则，至少出现“角色 / 规则 / 步骤 / 输出要求”之一");
         }
-        String markdown = composeMarkdown(skillId, cleanDescription, cleanContent);
+        String markdown = composeMarkdown(skillId, cleanDescription, cleanContent, executionEnabled);
         RemoteSkill existing = snapshot().byId().get(skillId);
         if (!client.publish(skillId + DATA_ID_SUFFIX, markdown, "markdown")) {
             throw new PayrollException(
@@ -437,7 +448,8 @@ public final class NacosSkillRegistry {
                                 remote.description(),
                                 remote.content(),
                                 remote.updatedAt(),
-                                files));
+                                files,
+                                remote.executionEnabled()));
             } catch (RuntimeException e) {
                 log.warn("[Skill] 技能 {} 的文件包校验失败，已忽略文件：{}", remote.id(), e.getMessage());
             }
@@ -448,6 +460,7 @@ public final class NacosSkillRegistry {
         String raw = entry.content();
         String content = raw;
         String description = "";
+        boolean executionEnabled = false;
         try {
             MarkdownSkillParser.ParsedMarkdown parsed = MarkdownSkillParser.parse(raw);
             if (parsed != null) {
@@ -461,6 +474,7 @@ public final class NacosSkillRegistry {
                     if (value != null) {
                         description = value.toString().trim();
                     }
+                    executionEnabled = SkillExecutions.executionEnabled(parsed.getMetadata());
                 }
             }
         } catch (RuntimeException e) {
@@ -469,7 +483,8 @@ public final class NacosSkillRegistry {
         if (description.isBlank() && RoleSkills.ids().contains(id)) {
             description = RoleSkills.description(id);
         }
-        return new RemoteSkill(id, raw, description, content, entry.updatedAt(), List.of());
+        return new RemoteSkill(
+                id, raw, description, content, entry.updatedAt(), List.of(), executionEnabled);
     }
 
     private static SkillSummary summary(RemoteSkill remote, boolean builtin) {
@@ -502,13 +517,17 @@ public final class NacosSkillRegistry {
         return files.stream().map(SkillFilePackage::summary).toList();
     }
 
-    private static String composeMarkdown(String id, String description, String content) {
+    private static String composeMarkdown(
+            String id, String description, String content, boolean executionEnabled) {
         StringBuilder markdown = new StringBuilder("---\n");
         markdown.append("name: ").append(id).append('\n');
         if (!description.isBlank()) {
             markdown.append("description: ")
                     .append(quoteYaml(description))
                     .append('\n');
+        }
+        if (executionEnabled) {
+            markdown.append("execution:\n  enabled: true\n");
         }
         markdown.append("---\n").append(content).append('\n');
         return markdown.toString();

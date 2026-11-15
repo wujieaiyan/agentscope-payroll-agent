@@ -16,6 +16,12 @@
 
     <dependencies>
         <dependency>
+            <groupId>io.agentscope.examples</groupId>
+            <artifactId>payroll-protocol</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>

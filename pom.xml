@@ -20,9 +20,11 @@
     <description>薪酬核算平台：前端（Vue3）、后端（Web）、智能体（运行时）三端拆分</description>
 
     <modules>
+        <module>payroll-protocol</module>
         <module>payroll-common</module>
         <module>payroll-agent</module>
         <module>payroll-backend</module>
+        <module>payroll-sandbox</module>
         <module>payroll-tests</module>
     </modules>
 

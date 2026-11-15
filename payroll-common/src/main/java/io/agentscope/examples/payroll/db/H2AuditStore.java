@@ -133,8 +133,8 @@ public final class H2AuditStore {
         if (query.keyword() != null && !query.keyword().isBlank()) {
             String pattern = "%" + escapeLike(query.keyword().trim()) + "%";
             conditions.add(
-                    "(action LIKE ? ESCAPE '\\' OR resource_id LIKE ? ESCAPE '\\' "
-                            + "OR message LIKE ? ESCAPE '\\' OR actor_name LIKE ? ESCAPE '\\')");
+                    "(action LIKE ? ESCAPE '!' OR resource_id LIKE ? ESCAPE '!' "
+                            + "OR message LIKE ? ESCAPE '!' OR actor_name LIKE ? ESCAPE '!')");
             params.add(pattern);
             params.add(pattern);
             params.add(pattern);
@@ -148,12 +148,13 @@ public final class H2AuditStore {
         if (value == null || value.isBlank()) {
             return;
         }
-        conditions.add(column + " LIKE ? ESCAPE '\\'");
+        conditions.add(column + " LIKE ? ESCAPE '!'");
         params.add("%" + escapeLike(value.trim()) + "%");
     }
 
+    /** 反斜杠转义写法在 MySQL 中是非法字符串字面量，改用两个方言都接受的 '!'。 */
     private static String escapeLike(String value) {
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return value.replace("!", "!!").replace("%", "!%").replace("_", "!_");
     }
 
     private static void bind(PreparedStatement statement, List<Object> params) throws SQLException {
