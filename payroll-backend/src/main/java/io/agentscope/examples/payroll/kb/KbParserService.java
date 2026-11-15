@@ -1,8 +1,11 @@
 package io.agentscope.examples.payroll.kb;
 
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.kb.KbConfigModels.OcrConfig;
+import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.Heading;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.PageRange;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,6 +18,8 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.DataFormatter;
@@ -38,14 +43,38 @@ public class KbParserService {
 
     private static final Logger log = LoggerFactory.getLogger(KbParserService.class);
     private static final Pattern MD_HEADING = Pattern.compile("^(#{1,6})\\s+(.+)$");
+    /** 页面文字层少于该字符数视为无文字页，交给 OCR 兜底。 */
+    private static final int MIN_PAGE_TEXT_CHARS = 10;
 
     public static final List<String> SUPPORTED = List.of("pdf", "docx", "xlsx", "xls", "md", "markdown");
 
+    /** 解析进度回调，仅扫描页 OCR 阶段触发；抛出的异常会原样向上传递。 */
+    @FunctionalInterface
+    public interface PageListener {
+        void onPageProgress(int pageNo, int totalPages, int ocrPages);
+    }
+
+    /** 进度回调抛出的控制流信号（如取消），解析层不包装成解析失败。 */
+    public interface AbortSignal {
+    }
+
+    private final KbOcrService ocrService;
+
+    public KbParserService(KbOcrService ocrService) {
+        this.ocrService = ocrService;
+    }
+
     public KbParsedDocument parse(Path file, String ext) {
+        return parse(file, ext, KbConfigModels.defaultParse(), null);
+    }
+
+    public KbParsedDocument parse(
+            Path file, String ext, ParseConfig parseConfig, PageListener listener) {
+        ParseConfig config = parseConfig == null ? KbConfigModels.defaultParse() : parseConfig;
         String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         try {
             return switch (normalized) {
-                case "pdf" -> parsePdf(file);
+                case "pdf" -> parsePdf(file, config, listener);
                 case "docx" -> parseDocx(file);
                 case "xlsx", "xls" -> parseExcel(file);
                 case "md", "markdown" -> parseMarkdown(file);
@@ -56,23 +85,33 @@ public class KbParserService {
         } catch (IOException e) {
             throw new PayrollException("解析文档失败：" + e.getMessage());
         } catch (RuntimeException e) {
+            if (e instanceof AbortSignal) {
+                throw e;
+            }
             log.warn("[知识库] 解析失败：file={}，原因={}", file, e.getMessage());
             throw new PayrollException("解析文档失败：" + e.getMessage());
         }
     }
 
-    private KbParsedDocument parsePdf(Path file) throws IOException {
+    private KbParsedDocument parsePdf(Path file, ParseConfig config, PageListener listener)
+            throws IOException {
+        OcrConfig ocrConfig = config.ocr == null ? new OcrConfig() : config.ocr;
+        boolean filterHeaderFooter =
+                config.options == null || config.options.filterHeaderFooter;
         try (PDDocument document = PDDocument.load(file.toFile())) {
             int pageCount = document.getNumberOfPages();
             List<String> pageTexts = new ArrayList<>(pageCount);
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);
             for (int page = 1; page <= pageCount; page++) {
-                PDFTextStripper stripper = new PDFTextStripper();
-                stripper.setSortByPosition(true);
                 stripper.setStartPage(page);
                 stripper.setEndPage(page);
                 pageTexts.add(stripper.getText(document));
             }
-            filterHeaderFooter(pageTexts);
+            OcrStats ocrStats = ocrBlankPages(document, pageTexts, ocrConfig, listener);
+            if (filterHeaderFooter) {
+                filterHeaderFooter(pageTexts);
+            }
             StringBuilder text = new StringBuilder();
             List<PageRange> ranges = new ArrayList<>();
             for (int i = 0; i < pageTexts.size(); i++) {
@@ -88,8 +127,104 @@ public class KbParserService {
                 text.append(content);
                 ranges.add(new PageRange(i + 1, start, text.length()));
             }
-            return new KbParsedDocument(text.toString(), pageCount, ranges, List.of());
+            String merged = text.toString();
+            if (merged.strip().length() < MIN_PAGE_TEXT_CHARS && ocrStats.blankPages() > 0) {
+                throw new PayrollException(
+                        "扫描件 OCR 未识别出文字（共 "
+                                + pageCount
+                                + " 页，OCR 完成 "
+                                + ocrStats.ocrPages()
+                                + " 页，失败 "
+                                + ocrStats.skippedPages()
+                                + " 页），请提高扫描清晰度或换用带文字层的 PDF");
+            }
+            return new KbParsedDocument(merged, pageCount, ranges, List.of());
         }
+    }
+
+    /** 无文字层的页面渲染后交给 OCR；引擎缺失时只在整份文档都不可读时失败。 */
+    private OcrStats ocrBlankPages(
+            PDDocument document,
+            List<String> pageTexts,
+            OcrConfig ocrConfig,
+            PageListener listener)
+            throws IOException {
+        List<Integer> blankPages = new ArrayList<>();
+        long layerChars = 0;
+        for (int i = 0; i < pageTexts.size(); i++) {
+            int chars = pageTexts.get(i).strip().length();
+            layerChars += chars;
+            if (chars < MIN_PAGE_TEXT_CHARS) {
+                blankPages.add(i);
+            }
+        }
+        if (blankPages.isEmpty()) {
+            return new OcrStats(0, 0, 0);
+        }
+        if (!ocrService.enabled() || !ocrService.available()) {
+            if (layerChars < MIN_PAGE_TEXT_CHARS) {
+                throw new PayrollException(
+                        ocrService.enabled()
+                                ? "该 PDF 为扫描件（无文字层），但未找到 OCR 引擎 tesseract。"
+                                        + "请安装 Tesseract（含 chi_sim 语言包），或用 payroll.kb.ocr.command 指定可执行文件，"
+                                        + "也可改用带文字层的 PDF"
+                                : "该 PDF 为扫描件（无文字层），OCR 已被关闭"
+                                        + "（payroll.kb.ocr.enabled=false），请启用 OCR 或改用带文字层的 PDF");
+            }
+            log.warn(
+                    "[知识库] 有 {} 页扫描页未做 OCR（引擎不可用/已关闭），按现有文字层继续解析：{}",
+                    blankPages.size(),
+                    document.getDocumentInformation().getTitle());
+            return new OcrStats(0, 0, blankPages.size());
+        }
+        int budget = blankPages.size();
+        int maxPages = ocrService.maxPages();
+        if (maxPages > 0 && blankPages.size() > maxPages) {
+            if (layerChars < MIN_PAGE_TEXT_CHARS) {
+                throw new PayrollException(
+                        "扫描页数 "
+                                + blankPages.size()
+                                + " 超过 OCR 上限 "
+                                + maxPages
+                                + "，请调整 payroll.kb.ocr.max-pages 或拆分文档后再入库");
+            }
+            budget = maxPages;
+        }
+        String languages = ocrService.resolveLanguages(ocrConfig.languages);
+        PDFRenderer renderer = new PDFRenderer(document);
+        long started = System.currentTimeMillis();
+        int ocrPages = 0;
+        int skipped = blankPages.size() - budget;
+        for (int index = 0; index < budget; index++) {
+            int pageIndex = blankPages.get(index);
+            try {
+                BufferedImage image =
+                        renderer.renderImageWithDPI(pageIndex, ocrService.dpi(), ImageType.RGB);
+                String text = ocrService.recognize(image, languages, ocrConfig.minConfidence);
+                pageTexts.set(pageIndex, text == null ? "" : text);
+                ocrPages++;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new PayrollException("解析被中断，请重试入库");
+            } catch (IOException | RuntimeException e) {
+                skipped++;
+                log.warn("[知识库] 第 {} 页 OCR 失败：{}", pageIndex + 1, e.getMessage());
+            }
+            if (listener != null) {
+                listener.onPageProgress(pageIndex + 1, pageTexts.size(), ocrPages);
+            }
+        }
+        log.info(
+                "[知识库] PDF OCR：pages={}，扫描页={}，OCR 完成={}，跳过={}，耗时={}ms",
+                pageTexts.size(),
+                blankPages.size(),
+                ocrPages,
+                skipped,
+                System.currentTimeMillis() - started);
+        return new OcrStats(blankPages.size(), ocrPages, skipped);
+    }
+
+    private record OcrStats(int blankPages, int ocrPages, int skippedPages) {
     }
 
     /** 连续出现且长度较短的页眉页脚行在 3 页以上时剔除。 */

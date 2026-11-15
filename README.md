@@ -729,6 +729,13 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 | `PAYROLL_KB_RETRIEVAL_ROUTES` | `VECTOR,BM25,TITLE_PATH` | 启用的召回路径（逗号分隔）；VECTOR 索引策略下仅保留向量路 |
 | `PAYROLL_KB_RETRIEVAL_RRF_K` | `60` | RRF 平滑常数 |
 | `PAYROLL_KB_RETRIEVAL_MAX_PER_DOC` | `3` | 单个文档最多保留的知识点条数 |
+| `PAYROLL_KB_OCR_ENABLED` | `true` | 扫描件（无文字层 PDF）按页渲染后交给 Tesseract 识别 |
+| `PAYROLL_KB_OCR_COMMAND` | `tesseract` | OCR 可执行文件；不在 PATH 时可写绝对路径 |
+| `PAYROLL_KB_OCR_TESSDATA` | 空 | 语言包目录；为空时使用 Tesseract 默认 tessdata |
+| `PAYROLL_KB_OCR_LANGUAGES` | `chi_sim+eng` | 知识库解析配置未指定语言时使用的 Tesseract 语言包 |
+| `PAYROLL_KB_OCR_DPI` | `300` | 扫描页渲染分辨率；降低可提速但影响识别率 |
+| `PAYROLL_KB_OCR_TIMEOUT` | `120` | 单页 OCR 超时（秒） |
+| `PAYROLL_KB_OCR_MAX_PAGES` | `0` | 单文档 OCR 页数上限；`0` 表示不限 |
 | `PAYROLL_MCP_TRUST_READ_ONLY_HINTS` | `true` | 是否采纳 MCP 服务端 `readOnlyHint`；`false` 时所有 MCP 工具都需确认 |
 | `PAYROLL_NACOS_SERVER` | `http://127.0.0.1:8848` | Nacos 地址；可带 `/nacos` 上下文路径（自动去除），设为空则关闭外置；支持角色 Skill、Agent、流程与技能管理 |
 | `PAYROLL_NACOS_ENABLED` | 有地址则 `true` | 显式关闭/开启 Nacos 技能与 Agent 读取 |

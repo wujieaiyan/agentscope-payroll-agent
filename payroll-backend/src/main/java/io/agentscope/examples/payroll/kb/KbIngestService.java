@@ -91,7 +91,36 @@ public class KbIngestService {
             ConfigPayload payload = configService.payload(config);
 
             long stage = System.currentTimeMillis();
-            KbParsedDocument parsed = parserService.parse(file, document.ext());
+            KbParsedDocument parsed =
+                    parserService.parse(
+                            file,
+                            document.ext(),
+                            payload.parse,
+                            (pageNo, totalPages, ocrPages) -> {
+                                if (pageNo % 20 != 0 && pageNo != totalPages) {
+                                    return;
+                                }
+                                ensureNotCanceled(taskId);
+                                int progress =
+                                        2
+                                                + (int)
+                                                        Math.floor(
+                                                                28.0 * pageNo
+                                                                        / Math.max(1, totalPages));
+                                taskStore.updateProgress(
+                                        taskId, "PARSE", Math.max(2, Math.min(30, progress)));
+                                log(
+                                        taskId,
+                                        "PARSE",
+                                        "扫描页 OCR 进度："
+                                                + pageNo
+                                                + "/"
+                                                + totalPages
+                                                + "，已识别 "
+                                                + ocrPages
+                                                + " 页",
+                                        null);
+                            });
             if (parsed.text() == null || parsed.text().strip().length() < 10) {
                 throw new PayrollException("解析文本过短或为空，请确认文档包含可提取文字");
             }
@@ -290,7 +319,8 @@ public class KbIngestService {
         taskStore.appendLog(taskId, stage, "INFO", message, costMs);
     }
 
-    private static final class IngestCanceled extends RuntimeException {
+    private static final class IngestCanceled extends RuntimeException
+            implements KbParserService.AbortSignal {
         private IngestCanceled() {
             super(null, null, false, false);
         }
