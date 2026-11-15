@@ -1,6 +1,9 @@
 package io.agentscope.payroll.runtime;
 
+import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
 import io.agentscope.examples.payroll.agent.McpServerConfig;
+import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
+import io.agentscope.examples.payroll.agent.SemanticRouteSettings;
 import io.agentscope.examples.payroll.agent.ToolSafety;
 import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
@@ -178,6 +181,39 @@ public class PayrollAgentConfiguration {
         return router;
     }
 
+    /** L1 语义路由：关闭或初始化失败时返回禁用实例，调用方按 L0 + L2 继续。 */
+    @Bean(destroyMethod = "close")
+    public SemanticRouteClassifier routeSemanticClassifier(
+            @Value("${payroll.router.semantic.enabled:false}") boolean enabled,
+            @Value("${payroll.router.semantic.min-score:0.55}") double minScore,
+            @Value("${payroll.router.semantic.margin:0.05}") double margin,
+            @Value("${payroll.router.semantic.index:payroll-route-intents}") String index,
+            @Value("${payroll.router.semantic.timeout-ms:150}") int timeoutMs,
+            @Value("${payroll.router.semantic.seed-timeout-seconds:60}") int seedTimeoutSeconds,
+            @Value("${payroll.router.semantic.es-url:http://localhost:9200}") String esUrl,
+            @Value("${payroll.router.semantic.es-username:}") String esUsername,
+            @Value("${payroll.router.semantic.es-password:}") String esPassword,
+            @Value("${payroll.router.semantic.embedding-base-url:http://localhost:11434}")
+                    String embeddingBaseUrl,
+            @Value("${payroll.router.semantic.embedding-model:qwen3-embedding:0.6b}")
+                    String embeddingModel,
+            @Value("${payroll.router.semantic.embedding-dim:1024}") int embeddingDim) {
+        return SemanticRouteClassifier.start(
+                new SemanticRouteSettings(
+                        enabled,
+                        minScore,
+                        margin,
+                        index,
+                        timeoutMs,
+                        seedTimeoutSeconds,
+                        esUrl,
+                        esUsername,
+                        esPassword,
+                        embeddingBaseUrl,
+                        embeddingModel,
+                        embeddingDim));
+    }
+
     /** 每个对话窗口独立实例：模型上下文、路由与团队执行都按会话隔离。 */
     @Bean
     public PayrollChatFactory payrollChatFactory(
@@ -190,13 +226,33 @@ public class PayrollAgentConfiguration {
             ActiveTeamService activeTeamService,
             ToolSafety toolSafety,
             AgentRouter router,
+            SemanticRouteClassifier semantic,
             @Value("${payroll.orchestrator:legacy}") String orchestrator,
             @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
             @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
             @Value("${payroll.chat.action-confirm.ttl-minutes:15}") int actionProposalTtlMinutes,
             @Value("${payroll.chat.action-confirm.always-confirm-tools:}")
-                    String alwaysConfirmToolsCsv) {
+                    String alwaysConfirmToolsCsv,
+            @Value("${payroll.chat.kb-policy.enabled:false}") boolean kbPolicyEnabled,
+            @Value("${payroll.chat.kb-policy.follow-up:true}") boolean kbPolicyFollowUp,
+            @Value("${payroll.chat.kb-policy.bound-candidate:false}") boolean kbPolicyBoundCandidate,
+            @Value("${payroll.chat.kb-policy.action-guard:true}") boolean kbPolicyActionGuard,
+            @Value("${payroll.chat.kb-policy.follow-up-max-chars:20}") int kbPolicyFollowUpMaxChars) {
         Set<String> alwaysConfirmTools = parseTools(alwaysConfirmToolsCsv);
+        KbRoutingPolicy.Options kbPolicy =
+                new KbRoutingPolicy.Options(
+                        kbPolicyEnabled,
+                        kbPolicyFollowUp,
+                        kbPolicyBoundCandidate,
+                        kbPolicyActionGuard,
+                        kbPolicyFollowUpMaxChars);
+        log.info(
+                "[知识库][路由] L0 规则：enabled={}，follow-up={}，bound-candidate={}，action-guard={}，max-chars={}",
+                kbPolicyEnabled,
+                kbPolicyFollowUp,
+                kbPolicyBoundCandidate,
+                kbPolicyActionGuard,
+                kbPolicyFollowUpMaxChars);
         boolean graph = "graph".equalsIgnoreCase(orchestrator == null ? "" : orchestrator.trim());
         if (graph) {
             log.info("[多智能体] 编排模式：langgraph4j 图编排（POC）");
@@ -232,7 +288,9 @@ public class PayrollAgentConfiguration {
                         toolSafety,
                         answerCache,
                         router,
-                        alwaysConfirmTools);
+                        alwaysConfirmTools,
+                        kbPolicy,
+                        semantic);
     }
 
     /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */

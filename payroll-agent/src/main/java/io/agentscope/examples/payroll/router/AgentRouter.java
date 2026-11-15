@@ -44,6 +44,19 @@ public final class AgentRouter {
             4. 无法确定或候选都不匹配时选 "pipeline"，并给出较低的 confidence。
             """;
 
+    /** 仅追加在非薪酬问题上；薪酬问题继续使用 {@link #INSTRUCTION} 原文，保证 prompt 可比。 */
+    private static final String KB_SECTION =
+            """
+
+            知识库判定（need_kb / kb_kind，仅非薪酬问题需要填写）：
+            - need_kb：本轮是否需要检索知识库。制度、流程、条款、手册、产品资料、技术文档类问题，
+              或对上一轮已引用内容的追问填 true；视频制作、写作、闲聊、纯数据查询、执行类指令填 false。
+            - kb_kind：需要检索填 "read"；知识库管理操作（建库、解析/分块/检索配置、目录与成员权限、
+              入库任务）填 "admin"；其余填 "none"。
+            - 输出 JSON 需同时包含这两个字段，缺省按 false / "none" 处理：
+              {"target":"agent|team|pipeline","agent_id":"候选 id 或空串","need_kb":false,"kb_kind":"none","reason":"一句话中文理由","confidence":0.0}
+            """;
+
     /** 模型调用抽象，便于单测注入固定输出。 */
     @FunctionalInterface
     public interface RouteModel {
@@ -102,6 +115,18 @@ public final class AgentRouter {
             List<AgentDefinition> candidates,
             boolean teamAvailable,
             String sessionKey) {
+        return decide(question, candidates, teamAvailable, sessionKey, false);
+    }
+
+    /**
+     * @param payroll 薪酬问题使用原 instruction，不追加知识库判定段
+     */
+    public RouteDecision decide(
+            String question,
+            List<AgentDefinition> candidates,
+            boolean teamAvailable,
+            String sessionKey,
+            boolean payroll) {
         if (!enabled) {
             return null;
         }
@@ -109,7 +134,9 @@ public final class AgentRouter {
         long startedAt = System.currentTimeMillis();
         String raw;
         try {
-            raw = model.complete(instruction(agents, teamAvailable), question, sessionKey);
+            raw =
+                    model.complete(
+                            instruction(agents, teamAvailable, payroll), question, sessionKey);
         } catch (RuntimeException e) {
             return logFallback("轻量模型调用失败：" + rootMessage(e), agents, teamAvailable, startedAt);
         }
@@ -120,10 +147,12 @@ public final class AgentRouter {
         long elapsed = System.currentTimeMillis() - startedAt;
         if (decision.routed()) {
             log.info(
-                    "[智能体路由] 决策：target={}，agent={}，置信度={}，候选={}，团队可用={}，耗时={}ms，理由={}",
+                    "[智能体路由] 决策：target={}，agent={}，置信度={}，need_kb={}，kb_kind={}，候选={}，团队可用={}，耗时={}ms，理由={}",
                     decision.target(),
                     decision.agent() == null ? "" : decision.agent().id(),
                     String.format(Locale.ROOT, "%.2f", decision.confidence()),
+                    decision.needKb(),
+                    decision.kbKind(),
                     agents.size(),
                     teamAvailable,
                     elapsed,
@@ -166,6 +195,8 @@ public final class AgentRouter {
                             confidence,
                             minConfidence));
         }
+        boolean needKb = needKb(node);
+        String kbKind = kbKind(node, needKb);
         return switch (target) {
             case RouteDecision.TARGET_AGENT -> {
                 if (agentId.isBlank()) {
@@ -177,17 +208,59 @@ public final class AgentRouter {
                 yield agent == null
                         ? RouteDecision.fallback("路由给出的智能体不在候选列表：" + agentId)
                         : new RouteDecision(
-                                RouteDecision.TARGET_AGENT, agent, reason, confidence, null);
+                                RouteDecision.TARGET_AGENT,
+                                agent,
+                                reason,
+                                confidence,
+                                null,
+                                needKb,
+                                kbKind,
+                                RouteDecision.KB_SOURCE_ROUTER);
             }
             case RouteDecision.TARGET_TEAM ->
                     teamAvailable
                             ? new RouteDecision(
-                                    RouteDecision.TARGET_TEAM, null, reason, confidence, null)
+                                    RouteDecision.TARGET_TEAM,
+                                    null,
+                                    reason,
+                                    confidence,
+                                    null,
+                                    needKb,
+                                    kbKind,
+                                    RouteDecision.KB_SOURCE_ROUTER)
                             : RouteDecision.fallback("路由选择团队，但当前用户/会话未启用动态团队");
             case RouteDecision.TARGET_PIPELINE ->
                     new RouteDecision(
-                            RouteDecision.TARGET_PIPELINE, null, reason, confidence, null);
+                            RouteDecision.TARGET_PIPELINE,
+                            null,
+                            reason,
+                            confidence,
+                            null,
+                            needKb,
+                            kbKind,
+                            RouteDecision.KB_SOURCE_ROUTER);
             default -> RouteDecision.fallback("路由目标非法：" + target);
+        };
+    }
+
+    /** 字段缺失或类型异常都按 false，不判路由失败。 */
+    private static boolean needKb(JsonNode node) {
+        JsonNode value = node.get("need_kb");
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        return Boolean.parseBoolean(value.asText("").trim());
+    }
+
+    /** 非法或缺失值：需要检索时按 read，不检索时按 none。 */
+    private static String kbKind(JsonNode node, boolean needKb) {
+        String raw = text(node, "kb_kind").toLowerCase(Locale.ROOT);
+        return switch (raw) {
+            case RouteDecision.KB_READ, RouteDecision.KB_ADMIN -> raw;
+            default -> needKb ? RouteDecision.KB_READ : RouteDecision.KB_NONE;
         };
     }
 
@@ -202,8 +275,12 @@ public final class AgentRouter {
         return RouteDecision.fallback(reason);
     }
 
-    private static String instruction(List<AgentDefinition> agents, boolean teamAvailable) {
+    static String instruction(
+            List<AgentDefinition> agents, boolean teamAvailable, boolean payroll) {
         StringBuilder text = new StringBuilder(INSTRUCTION);
+        if (!payroll) {
+            text.append(KB_SECTION);
+        }
         text.append("\n候选智能体：\n");
         if (agents.isEmpty()) {
             text.append("- （无可用单智能体）\n");

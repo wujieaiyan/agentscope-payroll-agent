@@ -732,6 +732,31 @@ public final class H2ChatStore implements ChatContextStore {
         }
     }
 
+    /** 只取最近一条助手消息的引用列，走 (session_id, message_id) 索引。 */
+    @Override
+    public boolean lastAssistantCited(long sessionId) {
+        String sql =
+                """
+                SELECT citations_json FROM chat_messages
+                WHERE session_id = ? AND role = ?
+                ORDER BY message_id DESC LIMIT 1
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, sessionId);
+            statement.setString(2, ROLE_ASSISTANT);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return false;
+                }
+                String value = rs.getString(1);
+                return value != null && !value.isBlank() && !"[]".equals(value.trim());
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取上一轮引用失败：" + e.getMessage(), e);
+        }
+    }
+
     @Override
     public ChatContextSnapshot loadContext(long sessionId) {
         String sql =

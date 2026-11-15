@@ -83,6 +83,13 @@ payroll:
       # 命中清单的写工具无论 enabled 如何都先出确认提案；默认覆盖知识库 6 个写工具。
       # skill_run 额外由代码强制加入（不可通过配置移除）。
       always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index,skill_run}"
+    # 知识库 L0 确定性路由：enabled=false 时与旧 KbChatIntent 判定完全一致，便于灰度对比。
+    kb-policy:
+      enabled: "${PAYROLL_KB_POLICY_ENABLED:false}"
+      follow-up: "${PAYROLL_KB_POLICY_FOLLOW_UP:true}"
+      bound-candidate: "${PAYROLL_KB_POLICY_BOUND_CANDIDATE:false}"
+      action-guard: "${PAYROLL_KB_POLICY_ACTION_GUARD:true}"
+      follow-up-max-chars: "${PAYROLL_KB_POLICY_FOLLOW_UP_MAX_CHARS:20}"
   # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
   routing:
     enabled: "${PAYROLL_ROUTING_ENABLED:true}"
@@ -91,6 +98,20 @@ payroll:
     enabled: "${PAYROLL_ROUTER_ENABLED:true}"
     timeout-ms: "${PAYROLL_ROUTER_TIMEOUT_MS:10000}"
     min-confidence: "${PAYROLL_ROUTER_MIN_CONFIDENCE:0.55}"
+    # L1 语义路由：独立多语言嵌入模型与意图索引，只影响非薪酬轮次的 need_kb。
+    semantic:
+      enabled: "${PAYROLL_ROUTER_SEMANTIC_ENABLED:false}"
+      min-score: "${PAYROLL_ROUTER_SEMANTIC_MIN_SCORE:0.50}"
+      margin: "${PAYROLL_ROUTER_SEMANTIC_MARGIN:0.05}"
+      index: "${PAYROLL_ROUTER_SEMANTIC_INDEX:payroll-route-intents}"
+      timeout-ms: "${PAYROLL_ROUTER_SEMANTIC_TIMEOUT_MS:150}"
+      seed-timeout-seconds: "${PAYROLL_ROUTER_SEMANTIC_SEED_TIMEOUT_SECONDS:60}"
+      es-url: "${PAYROLL_ROUTER_SEMANTIC_ES_URL:${payroll.memory.es-url}}"
+      es-username: "${PAYROLL_ROUTER_SEMANTIC_ES_USERNAME:${payroll.memory.es-username}}"
+      es-password: "${PAYROLL_ROUTER_SEMANTIC_ES_PASSWORD:${payroll.memory.es-password}}"
+      embedding-base-url: "${OLLAMA_BASE_URL:http://localhost:11434}"
+      embedding-model: "${PAYROLL_ROUTER_SEMANTIC_EMBEDDING_MODEL:qwen3-embedding:0.6b}"
+      embedding-dim: "${PAYROLL_ROUTER_SEMANTIC_EMBEDDING_DIM:1024}"
   mcp:
     # 是否采纳外部服务的 readOnlyHint；false 时所有 MCP 工具一律视为写，逐个确认。
     trust-read-only-hints: "${PAYROLL_MCP_TRUST_READ_ONLY_HINTS:true}"

@@ -37,6 +37,12 @@ public final class KbChatIntent {
         return containsAny(text, KB_MARKERS);
     }
 
+    /** 薪酬类判定供 L0 路由复用；词表与 {@link #matches} 保持同一份，避免两处漂移。 */
+    public static boolean isPayroll(String question) {
+        String text = question == null ? "" : question.trim().toLowerCase(Locale.ROOT);
+        return !text.isEmpty() && containsAny(text, PAYROLL_MARKERS);
+    }
+
     private static boolean containsAny(String text, List<String> keywords) {
         for (String keyword : keywords) {
             if (text.contains(keyword)) {

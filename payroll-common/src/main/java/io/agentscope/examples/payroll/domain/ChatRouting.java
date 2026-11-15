@@ -18,7 +18,21 @@ public record ChatRouting(
         List<String> agentIds,
         long teamRunId,
         long elapsedMs,
-        List<String> stages) {
+        List<String> stages,
+        Kb kb) {
+
+    /**
+     * 本轮知识库判定：{@code source} 为 router / force / fallback，{@code scope} 为 session / all，
+     * {@code reroute} 表示模型选中了不具备检索能力的智能体、被显式改道到检索智能体。
+     */
+    public record Kb(boolean need, String kind, String source, String scope, boolean reroute) {
+
+        public Kb {
+            kind = kind == null || kind.isBlank() ? "none" : kind;
+            source = source == null ? "" : source;
+            scope = scope == null ? "" : scope;
+        }
+    }
 
     public static final String PIPELINE = "PIPELINE";
     public static final String AGENT = "AGENT";
@@ -26,6 +40,33 @@ public record ChatRouting(
     public static final String GRAPH = "GRAPH";
     public static final String TEAM_ACTIVE = "TEAM_ACTIVE";
     public static final String ACTION = "ACTION";
+
+    public ChatRouting(
+            String path,
+            String persona,
+            String reason,
+            String fromPath,
+            String fallbackReason,
+            String model,
+            String definitionSignature,
+            List<String> agentIds,
+            long teamRunId,
+            long elapsedMs,
+            List<String> stages) {
+        this(
+                path,
+                persona,
+                reason,
+                fromPath,
+                fallbackReason,
+                model,
+                definitionSignature,
+                agentIds,
+                teamRunId,
+                elapsedMs,
+                stages,
+                null);
+    }
 
     public ChatRouting {
         path = path == null || path.isBlank() ? PIPELINE : path;

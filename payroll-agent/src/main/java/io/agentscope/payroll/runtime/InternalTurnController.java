@@ -1,13 +1,19 @@
 package io.agentscope.payroll.runtime;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.agentscope.examples.payroll.agent.KbChatIntent;
+import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
+import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.router.AgentRouter;
+import io.agentscope.examples.payroll.router.KbRoutePlanner;
 import io.agentscope.examples.payroll.router.RouteDecision;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.InternalAuth;
 import io.agentscope.examples.payroll.service.SemanticCacheContext;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.web.ChatSse;
@@ -46,7 +52,10 @@ public class InternalTurnController {
     private final Executor chatStreamExecutor;
     private final AgentRouter router;
     private final NacosAgentRegistry agentRegistry;
+    private final NacosFlowRegistry flowRegistry;
     private final ActiveTeamService activeTeam;
+    private final SemanticRouteClassifier semantic;
+    private final KbRoutingPolicy.Options kbPolicy;
     private final String token;
     private final String role;
     private final long maxSkewSeconds;
@@ -56,7 +65,16 @@ public class InternalTurnController {
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
             AgentRouter router,
             NacosAgentRegistry agentRegistry,
+            NacosFlowRegistry flowRegistry,
             ActiveTeamService activeTeam,
+            SemanticRouteClassifier semantic,
+            @Value("${payroll.chat.kb-policy.enabled:false}") boolean kbPolicyEnabled,
+            @Value("${payroll.chat.kb-policy.follow-up:true}") boolean kbPolicyFollowUp,
+            @Value("${payroll.chat.kb-policy.bound-candidate:false}")
+                    boolean kbPolicyBoundCandidate,
+            @Value("${payroll.chat.kb-policy.action-guard:true}") boolean kbPolicyActionGuard,
+            @Value("${payroll.chat.kb-policy.follow-up-max-chars:20}")
+                    int kbPolicyFollowUpMaxChars,
             @Value("${payroll.internal.token:}") String token,
             @Value("${payroll.node-role:all}") String role,
             @Value("${payroll.internal.max-skew-seconds:120}") long maxSkewSeconds) {
@@ -64,7 +82,17 @@ public class InternalTurnController {
         this.chatStreamExecutor = chatStreamExecutor;
         this.router = router == null ? AgentRouter.disabled() : router;
         this.agentRegistry = agentRegistry;
+        this.flowRegistry = flowRegistry;
         this.activeTeam = activeTeam == null ? ActiveTeamService.disabled() : activeTeam;
+        this.semantic =
+                semantic == null ? SemanticRouteClassifier.disabled("未配置") : semantic;
+        this.kbPolicy =
+                new KbRoutingPolicy.Options(
+                        kbPolicyEnabled,
+                        kbPolicyFollowUp,
+                        kbPolicyBoundCandidate,
+                        kbPolicyActionGuard,
+                        kbPolicyFollowUpMaxChars);
         this.token = token == null ? "" : token.trim();
         this.role = role == null ? "all" : role.trim().toLowerCase();
         this.maxSkewSeconds = maxSkewSeconds;
@@ -167,14 +195,26 @@ public class InternalTurnController {
         } catch (RuntimeException e) {
             teamAvailable = false;
         }
+        boolean payroll = KbChatIntent.isPayroll(request.message());
         RouteDecision decision =
                 router.decide(
                         request.message(),
                         candidates,
                         teamAvailable,
-                        request.sessionId() + ":" + request.userId());
+                        request.sessionId() + ":" + request.userId(),
+                        payroll);
+        // 预览不读会话状态：按未绑定、无引用上下文计算 L0，与真实链路同一条合并规则。
+        KbRoutingPolicy.Result l0 =
+                KbRoutingPolicy.decide(request.message(), false, false, kbPolicy);
+        SemanticRouteClassifier.Decision semanticDecision =
+                KbRoutePlanner.semanticEligible(l0, payroll)
+                        ? semantic.classify(request.message())
+                        : null;
+        KbRoutePlanner.Plan kbPlan =
+                KbRoutePlanner.plan(payroll, l0, semanticDecision, decision);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("enabled", router.enabled());
+        result.put("payroll", payroll);
         result.put("target", decision == null ? null : decision.target());
         result.put(
                 "agent_id",
@@ -187,6 +227,31 @@ public class InternalTurnController {
         result.put(
                 "failure_reason",
                 decision == null ? "路由未启用" : decision.failureReason());
+        Map<String, Object> kb = new LinkedHashMap<>();
+        kb.put("need", kbPlan.need());
+        kb.put("kind", kbPlan.kind());
+        kb.put("source", kbPlan.source());
+        result.put("kb", kb);
+        Map<String, Object> l0Info = new LinkedHashMap<>();
+        l0Info.put("decision", l0.decision().name());
+        l0Info.put("source", l0.source().name());
+        l0Info.put("action_guard", l0.actionGuard());
+        result.put("l0", l0Info);
+        Map<String, Object> semanticInfo = new LinkedHashMap<>();
+        semanticInfo.put(
+                "label",
+                semanticDecision == null
+                        ? SemanticRouteClassifier.LABEL_UNAVAILABLE
+                        : semanticDecision.label());
+        semanticInfo.put("score", semanticDecision == null ? 0D : semanticDecision.score());
+        semanticInfo.put("margin", semanticDecision == null ? 0D : semanticDecision.margin());
+        semanticInfo.put(
+                "confident", semanticDecision != null && semanticDecision.confident());
+        semanticInfo.put("reason", semanticDecision == null ? "未执行" : semanticDecision.reason());
+        result.put("semantic", semanticInfo);
+        String flowId = flowActiveId();
+        result.put("flow_active", flowId != null);
+        result.put("flow_id", flowId);
         result.put("team_available", teamAvailable);
         result.put(
                 "candidates",
@@ -202,6 +267,20 @@ public class InternalTurnController {
                         .toList());
         result.put("elapsed_ms", System.currentTimeMillis() - startedAt);
         return ResponseEntity.ok(result);
+    }
+
+    /** 预览用的默认流程 id；读取失败按未配置流程处理，不影响路由预览。 */
+    private String flowActiveId() {
+        if (flowRegistry == null) {
+            return null;
+        }
+        try {
+            FlowDefinition flow = flowRegistry.activeFlow();
+            return flow == null || flow.id() == null || flow.id().isBlank() ? null : flow.id();
+        } catch (RuntimeException e) {
+            log.warn("[智能体路由] 预览读取默认流程失败：{}", rootMessage(e));
+            return null;
+        }
     }
 
     @GetMapping("/health")

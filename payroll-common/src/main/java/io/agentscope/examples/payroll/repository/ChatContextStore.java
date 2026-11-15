@@ -26,6 +26,11 @@ public interface ChatContextStore {
         return List.of();
     }
 
+    /** 最近一条助手消息是否带引用；用于判断本轮是否为知识库追问。 */
+    default boolean lastAssistantCited(long sessionId) {
+        return false;
+    }
+
     /** 角色切换时作废会话内未确认的写操作提案，返回作废数量。 */
     default int cancelPendingActions(long sessionId) {
         return 0;

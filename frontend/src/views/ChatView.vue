@@ -93,6 +93,18 @@ function pathClass(routing) {
   return `route-${kind}`;
 }
 
+function kbSourceLabel(source) {
+  return { router: '模型', force: '规则强制', semantic: '语义', fallback: '路由失败' }[source] || '—';
+}
+
+function kbKindLabel(kind) {
+  return { read: '只读检索', admin: '知识库管理', none: '不检索' }[kind] || kind || '—';
+}
+
+function semanticLabel(label) {
+  return { kb_read: '制度问答', kb_admin: '知识库管理', other: '无关任务', unavailable: '不可用' }[label] || label || '—';
+}
+
 function formatTime(value) {
   if (!value) return '';
   const text = String(value).replace('T', ' ').slice(0, 16);
@@ -346,6 +358,12 @@ function exportMarkdown() {
       if (message.routing) meta.push(`链路 ${pathLabel(message.routing)}（${message.routing.path}）`);
       if (message.model) meta.push(`模型 ${message.model}`);
       if (message.routing?.agent_ids?.length) meta.push(`智能体 ${message.routing.agent_ids.join('、')}`);
+      if (message.routing?.kb) {
+        const kb = message.routing.kb;
+        const parts = [`知识库${kb.need ? '检索' : '不检索'}`, kbKindLabel(kb.kind), `来源 ${kbSourceLabel(kb.source)}`];
+        if (kb.reroute) parts.push('已改道检索智能体');
+        meta.push(parts.join(' · '));
+      }
       if (meta.length) lines.push('', `> ${meta.join(' · ')}`);
     }
     if (message.tools?.length) lines.push('', `> 工具调用 ${message.tools.length} 次`);
@@ -1947,6 +1965,17 @@ onBeforeUnmount(() => {
                         <span class="k">原因</span>
                         <span class="v">{{ detail.data.reason || '—' }}</span>
                       </div>
+                      <div v-if="detail.data.kb" class="panel-row">
+                        <span class="k">知识库判定</span>
+                        <span class="v">
+                          {{ detail.data.kb.need ? '是' : '否' }}
+                          （来源：{{ kbSourceLabel(detail.data.kb.source) }} · {{ kbKindLabel(detail.data.kb.kind) }}）
+                          <template v-if="detail.data.kb.need">
+                            · 范围 {{ detail.data.kb.scope === 'session' ? '当前会话' : '全部可读库' }}
+                          </template>
+                          <template v-if="detail.data.kb.reroute"> · 已改道检索智能体</template>
+                        </span>
+                      </div>
                       <div v-if="detail.data.from_path" class="panel-row">
                         <span class="k">回退</span>
                         <span class="v">
@@ -2358,6 +2387,34 @@ onBeforeUnmount(() => {
             <span class="v">
               {{ routePanel.confidence != null ? Number(routePanel.confidence).toFixed(2) : '—' }}
             </span>
+          </div>
+          <div class="panel-row">
+            <span class="k">类别</span>
+            <span class="v">{{ routePanel.payroll ? '薪酬问题（不判检索）' : '非薪酬问题' }}</span>
+          </div>
+          <div v-if="routePanel.kb" class="panel-row">
+            <span class="k">知识库</span>
+            <span class="v">
+              {{ routePanel.kb.need ? '需要检索' : '不检索' }}
+              （{{ kbKindLabel(routePanel.kb.kind) }} · 来源：{{ kbSourceLabel(routePanel.kb.source) }}）
+            </span>
+          </div>
+          <div v-if="routePanel.semantic && routePanel.semantic.label !== 'unavailable'" class="panel-row">
+            <span class="k">语义</span>
+            <span class="v">
+              {{ semanticLabel(routePanel.semantic.label) }}
+              · score {{ Number(routePanel.semantic.score || 0).toFixed(2) }}
+              · margin {{ Number(routePanel.semantic.margin || 0).toFixed(2) }}
+              · {{ routePanel.semantic.confident ? '采用' : '未采用' }}
+            </span>
+          </div>
+          <div v-else-if="routePanel.semantic" class="panel-row">
+            <span class="k">语义</span>
+            <span class="v">{{ routePanel.semantic.reason || '未启用' }}</span>
+          </div>
+          <div class="panel-row">
+            <span class="k">默认流程</span>
+            <span class="v">{{ routePanel.flow_active ? `已启用（${routePanel.flow_id}）` : '未启用' }}</span>
           </div>
           <div class="panel-row">
             <span class="k">团队</span>

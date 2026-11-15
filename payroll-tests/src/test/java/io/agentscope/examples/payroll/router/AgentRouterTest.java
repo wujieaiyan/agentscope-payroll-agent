@@ -159,6 +159,94 @@ class AgentRouterTest {
         assertTrue(decision.failureReason().contains("workflow"));
     }
 
+    @Test
+    void parsesKbDecision() {
+        AgentRouter router = routerReturning(
+                "{\"target\":\"agent\",\"agent_id\":\"policy-001\",\"need_kb\":true,"
+                        + "\"kb_kind\":\"read\",\"reason\":\"制度问答\",\"confidence\":0.9}");
+        RouteDecision decision =
+                router.decide("年假政策是什么？", List.of(POLICY_AGENT), false, "1:1");
+        assertTrue(decision.routed());
+        assertTrue(decision.needKb());
+        assertEquals(RouteDecision.KB_READ, decision.kbKind());
+        assertEquals(RouteDecision.KB_SOURCE_ROUTER, decision.kbSource());
+    }
+
+    @Test
+    void missingKbFieldsDefaultToNoSearch() {
+        RouteDecision decision =
+                routerReturning(
+                                "{\"target\":\"pipeline\",\"agent_id\":\"\",\"reason\":\"x\","
+                                        + "\"confidence\":0.9}")
+                        .decide("问题", List.of(POLICY_AGENT), false, "1:1");
+        assertTrue(decision.routed());
+        assertFalse(decision.needKb());
+        assertEquals(RouteDecision.KB_NONE, decision.kbKind());
+    }
+
+    @Test
+    void needKbTrueWithoutKindDefaultsToRead() {
+        RouteDecision decision =
+                routerReturning(
+                                "{\"target\":\"pipeline\",\"agent_id\":\"\",\"need_kb\":true,"
+                                        + "\"reason\":\"x\",\"confidence\":0.9}")
+                        .decide("问题", List.of(POLICY_AGENT), false, "1:1");
+        assertTrue(decision.needKb());
+        assertEquals(RouteDecision.KB_READ, decision.kbKind());
+    }
+
+    @Test
+    void illegalKbFieldsDoNotFailRouting() {
+        RouteDecision decision =
+                routerReturning(
+                                "{\"target\":\"pipeline\",\"agent_id\":\"\",\"need_kb\":\"yes\","
+                                        + "\"kb_kind\":\"whatever\",\"reason\":\"x\",\"confidence\":0.9}")
+                        .decide("问题", List.of(POLICY_AGENT), false, "1:1");
+        assertTrue(decision.routed());
+        assertFalse(decision.needKb());
+        assertEquals(RouteDecision.KB_NONE, decision.kbKind());
+    }
+
+    @Test
+    void parsesAdminKind() {
+        RouteDecision decision =
+                routerReturning(
+                                "{\"target\":\"agent\",\"agent_id\":\"policy-001\",\"need_kb\":false,"
+                                        + "\"kb_kind\":\"admin\",\"reason\":\"建库\",\"confidence\":0.9}")
+                        .decide("新建知识库", List.of(POLICY_AGENT), false, "1:1");
+        assertEquals(RouteDecision.KB_ADMIN, decision.kbKind());
+        assertFalse(decision.needKb());
+    }
+
+    @Test
+    void payrollInstructionStaysByteIdentical() {
+        String expected =
+                """
+                你是薪酬管理台的智能体路由决策器。根据用户问题在三个执行目标中选择一个：
+                - "agent"：单个专家智能体直接作答，必须给出候选列表中的 agent_id；
+                - "team"：由多个智能体动态组队完成，仅当“团队可用：是”时可选；
+                - "pipeline"：内置三段流水线（计算 → 验证 → 核算），始终可选，作为默认。
+
+                只输出一个合法 JSON 对象，不要 Markdown 代码围栏，不要解释：
+                {"target":"agent|team|pipeline","agent_id":"候选 id 或空串","reason":"一句话中文理由","confidence":0.0}
+
+                判断规则：
+                1. 工资计算、批量核算、工资条明细等需要严格核算的问题，优先 "pipeline"，需要多角色协作且团队可用时选 "team"；
+                2. 单一专家即可胜任的制度问答、政策解释、数据查询，选 "agent" 并给出最匹配的 agent_id；
+                3. 知识库类问题（建库、解析/分块/检索配置、目录与成员权限、入库任务）不要选 "pipeline"；
+                   其中建库、保存配置、加/移成员、移动目录、重建索引等写操作只能选 "agent"，
+                   并优先 tags 含 kb 或 kb-config 的候选智能体；只读问答同样优先该智能体；
+                4. 无法确定或候选都不匹配时选 "pipeline"，并给出较低的 confidence。
+
+                候选智能体：
+                - （无可用单智能体）
+                团队可用：是
+                """;
+        assertEquals(expected, AgentRouter.instruction(List.of(), true, true));
+        assertTrue(AgentRouter.instruction(List.of(), true, false).contains("need_kb"));
+        assertTrue(AgentRouter.instruction(List.of(), true, false).contains("kb_kind"));
+    }
+
     private static AgentRouter routerReturning(String json) {
         return new AgentRouter((instruction, question, key) -> json, true, 0.55D);
     }
