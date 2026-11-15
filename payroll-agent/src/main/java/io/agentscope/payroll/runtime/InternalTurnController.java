@@ -3,11 +3,13 @@ package io.agentscope.payroll.runtime;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.agentscope.examples.payroll.agent.KbChatIntent;
 import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
+import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
+import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.router.RouteDecision;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.InternalAuth;
@@ -19,9 +21,11 @@ import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.web.ChatSse;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -55,6 +59,7 @@ public class InternalTurnController {
     private final NacosFlowRegistry flowRegistry;
     private final ActiveTeamService activeTeam;
     private final SemanticRouteClassifier semantic;
+    private final PayrollRouteAdvisor payrollRouteAdvisor;
     private final KbRoutingPolicy.Options kbPolicy;
     private final String token;
     private final String role;
@@ -67,7 +72,8 @@ public class InternalTurnController {
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry,
             ActiveTeamService activeTeam,
-            SemanticRouteClassifier semantic,
+            @Qualifier("routeSemanticClassifier") SemanticRouteClassifier semantic,
+            @Qualifier("payrollRouteAdvisor") PayrollRouteAdvisor payrollRouteAdvisor,
             @Value("${payroll.chat.kb-policy.enabled:false}") boolean kbPolicyEnabled,
             @Value("${payroll.chat.kb-policy.follow-up:true}") boolean kbPolicyFollowUp,
             @Value("${payroll.chat.kb-policy.bound-candidate:false}")
@@ -86,6 +92,10 @@ public class InternalTurnController {
         this.activeTeam = activeTeam == null ? ActiveTeamService.disabled() : activeTeam;
         this.semantic =
                 semantic == null ? SemanticRouteClassifier.disabled("未配置") : semantic;
+        this.payrollRouteAdvisor =
+                payrollRouteAdvisor == null
+                        ? PayrollRouteAdvisor.disabled()
+                        : payrollRouteAdvisor;
         this.kbPolicy =
                 new KbRoutingPolicy.Options(
                         kbPolicyEnabled,
@@ -196,13 +206,23 @@ public class InternalTurnController {
             teamAvailable = false;
         }
         boolean payroll = KbChatIntent.isPayroll(request.message());
-        RouteDecision decision =
-                router.decide(
-                        request.message(),
-                        candidates,
-                        teamAvailable,
-                        request.sessionId() + ":" + request.userId(),
-                        payroll);
+        List<AgentDefinition> routeCandidates = candidates;
+        boolean teamOn = teamAvailable;
+        Supplier<RouteDecision> llm =
+                () ->
+                        router.decide(
+                                request.message(),
+                                routeCandidates,
+                                teamOn,
+                                request.sessionId() + ":" + request.userId(),
+                                payroll);
+        // 规格 7：薪酬预览与真实链路共用同一顾问，off 档行为与改造前一致。
+        PayrollRouteAdvisor.Outcome routeOutcome =
+                payroll && payrollRouteAdvisor.mode().semanticEnabled()
+                        ? payrollRouteAdvisor.decide(
+                                request.message(), routeCandidates, teamOn, "", "", llm)
+                        : null;
+        RouteDecision decision = routeOutcome == null ? llm.get() : routeOutcome.decision();
         // 预览不读会话状态：按未绑定、无引用上下文计算 L0，与真实链路同一条合并规则。
         KbRoutingPolicy.Result l0 =
                 KbRoutingPolicy.decide(request.message(), false, false, kbPolicy);
@@ -249,6 +269,22 @@ public class InternalTurnController {
                 "confident", semanticDecision != null && semanticDecision.confident());
         semanticInfo.put("reason", semanticDecision == null ? "未执行" : semanticDecision.reason());
         result.put("semantic", semanticInfo);
+        Map<String, Object> routerCache = new LinkedHashMap<>();
+        routerCache.put("mode", payrollRouteAdvisor.mode().name().toLowerCase(Locale.ROOT));
+        routerCache.put("enabled", payrollRouteAdvisor.mode().cacheEnabled());
+        routerCache.put("bucket", routeOutcome == null ? "" : routeOutcome.bucket());
+        routerCache.put("hit", routeOutcome != null && routeOutcome.cacheHit());
+        result.put("router_cache", routerCache);
+        Map<String, Object> routerShadow = new LinkedHashMap<>();
+        routerShadow.put(
+                "mode", payrollRouteAdvisor.mode().name().toLowerCase(Locale.ROOT));
+        routerShadow.put(
+                "ran",
+                routeOutcome != null
+                        && payrollRouteAdvisor.mode() == PayrollRouteMode.SHADOW
+                        && !routeOutcome.bucket().isBlank());
+        routerShadow.put("diff", routeOutcome != null && routeOutcome.shadowDiff());
+        result.put("router_shadow", routerShadow);
         String flowId = flowActiveId();
         result.put("flow_active", flowId != null);
         result.put("flow_id", flowId);

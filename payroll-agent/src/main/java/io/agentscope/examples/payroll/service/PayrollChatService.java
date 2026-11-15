@@ -45,6 +45,7 @@ import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
+import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.router.RouteDecision;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -109,6 +110,7 @@ public final class PayrollChatService implements PayrollChat {
     private final AgentRouter router;
     private final KbRoutingPolicy.Options kbPolicy;
     private final SemanticRouteClassifier semantic;
+    private final PayrollRouteAdvisor routeAdvisor;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final KbCitationCollector citationCollector = new KbCitationCollector();
@@ -377,7 +379,8 @@ public final class PayrollChatService implements PayrollChat {
                 router,
                 alwaysConfirmTools,
                 KbRoutingPolicy.Options.disabled(),
-                null);
+                null,
+                PayrollRouteAdvisor.disabled());
     }
 
     /**
@@ -423,7 +426,8 @@ public final class PayrollChatService implements PayrollChat {
                 router,
                 alwaysConfirmTools,
                 kbPolicy,
-                null);
+                null,
+                PayrollRouteAdvisor.disabled());
     }
 
     /**
@@ -450,7 +454,8 @@ public final class PayrollChatService implements PayrollChat {
             AgentRouter router,
             Set<String> alwaysConfirmTools,
             KbRoutingPolicy.Options kbPolicy,
-            SemanticRouteClassifier semantic) {
+            SemanticRouteClassifier semantic,
+            PayrollRouteAdvisor routeAdvisor) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -471,6 +476,8 @@ public final class PayrollChatService implements PayrollChat {
         this.router = router == null ? AgentRouter.disabled() : router;
         this.kbPolicy = kbPolicy == null ? KbRoutingPolicy.Options.disabled() : kbPolicy;
         this.semantic = semantic == null ? SemanticRouteClassifier.disabled("未配置") : semantic;
+        this.routeAdvisor =
+                routeAdvisor == null ? PayrollRouteAdvisor.disabled() : routeAdvisor;
         this.sessionContext =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
@@ -2278,8 +2285,30 @@ public final class PayrollChatService implements PayrollChat {
             teamAvailable = false;
         }
         try {
-            return router.decide(
-                    question, candidates, teamAvailable, sessionId + ":" + userId, payroll);
+            boolean teamOn = teamAvailable;
+            Supplier<RouteDecision> llm =
+                    () ->
+                            router.decide(
+                                    question,
+                                    candidates,
+                                    teamOn,
+                                    sessionId + ":" + userId,
+                                    payroll);
+            // 规格 7：薪酬轮次先过语义桶；off 档直接调用 LLM，与改造前完全一致。
+            if (payroll && routeAdvisor.mode().semanticEnabled()) {
+                String personaBinding = "";
+                try {
+                    AgentDefinition bound =
+                            activeAgentSupplier == null ? null : activeAgentSupplier.get();
+                    personaBinding = bound == null ? "" : bound.id();
+                } catch (RuntimeException e) {
+                    log.debug("[薪酬语义] 读取角色绑定失败，按无绑定处理：{}", rootMessage(e));
+                }
+                return routeAdvisor
+                        .decide(question, candidates, teamOn, "", personaBinding, llm)
+                        .decision();
+            }
+            return llm.get();
         } catch (RuntimeException e) {
             log.warn("[智能体路由] 决策异常，沿用默认链路：{}", rootMessage(e));
             return RouteDecision.fallback(rootMessage(e));

@@ -128,6 +128,19 @@ public final class KbRoutingPolicy {
                 Decision.NONE, guard ? Source.ACTION_GUARD : Source.DEFAULT, guard);
     }
 
+    /**
+     * 规格 7.3：含追问指代特征（4.1.1）或长度 ≤ maxChars 的问句语义依赖上一轮上下文，
+     * 既不读也不写薪酬路由决策缓存。
+     */
+    public static boolean routeCacheUnsafe(String question, int maxChars) {
+        String text = question == null ? "" : question.trim().toLowerCase(Locale.ROOT);
+        if (text.isEmpty()) {
+            return true;
+        }
+        int limit = maxChars <= 0 ? 20 : maxChars;
+        return text.length() <= limit || containsAny(text, FOLLOW_UP_MARKERS);
+    }
+
     /** 追问延续或短问句（且无强 OTHER 特征）才视为延续上一轮话题。 */
     private static boolean isFollowUp(String text, int maxChars) {
         if (containsAny(text, FOLLOW_UP_MARKERS)) {

@@ -31,10 +31,11 @@ public record RouteDecision(
     public static final String KB_ADMIN = "admin";
     public static final String KB_NONE = "none";
 
-    /** 判定来源：模型输出、L0 强制覆盖、路由未生效时的回退。 */
+    /** 判定来源：模型输出、L0 强制覆盖、路由未生效时的回退、薪酬语义缓存复用。 */
     public static final String KB_SOURCE_ROUTER = "router";
     public static final String KB_SOURCE_FORCE = "force";
     public static final String KB_SOURCE_FALLBACK = "fallback";
+    public static final String KB_SOURCE_CACHE = "cache";
 
     public RouteDecision {
         reason = reason == null ? "" : reason.trim();

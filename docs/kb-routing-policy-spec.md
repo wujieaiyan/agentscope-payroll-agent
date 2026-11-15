@@ -456,6 +456,24 @@ node scripts/route-intents-eval.mjs --model qwen3-embedding:0.6b --gate confiden
 - 回滚：`payroll-mode=shadow` 或 `off` 并重启 runtime（与现有开关一致）；缓存数据可直接丢弃，
   不参与任何落库业务字段。
 
+### 7.7 实施记录（2026-11-16，默认 off）
+
+| 项 | 落地位置 |
+| --- | --- |
+| 三档开关 | `PayrollRouteMode`（off/shadow/cache），`payroll.router.semantic.payroll-mode` |
+| 桶定义 | `PayrollRouteBucket`（calc/query/policy/action；action 永不缓存） |
+| 种子 | `routing/payroll-route-intents.json` 版本 2026-11-16.1，20/15/15/10 共 60 条 |
+| 独立索引 | `SemanticRouteClassifier.start(settings, resource, index, requiredLabels)`；薪酬索引 `payroll-route-intents-payroll`，与 KB 语义索引互不影响启停 |
+| 决策缓存 | `PayrollRouteCache`：键 `payroll:router:cache:<bucket>:<sha256(键元组)>`，Redis 唯一介质，TTL 7 天；暂存键 `payroll:router:cache:pending:*` 负责"连续两次一致"门槛；`peek` 只读不写 |
+| 失效指标 | `payroll.router.cache.invalid{reason=catalog|flow|persona|team|model}`，按签名首个变化维度归因 |
+| 顾问层 | `PayrollRouteAdvisor`：off 直调 LLM；shadow 调 LLM 并比对 `peek` 结果；cache 命中即复用（`kbSource=cache`），未命中调 LLM，`routed()` 后按写入门槛记录 |
+| 接线 | `PayrollChatService.route()` 仅对薪酬轮次过顾问；`InternalTurnController` 预览同样走顾问并返回 `router_cache`/`router_shadow` |
+| 问句门槛 | `KbRoutingPolicy.routeCacheUnsafe` 复用 4.1.1 追问特征与 `follow-up-max-chars`（默认 20） |
+| 测试 | `PayrollRouteCacheTest`、`PayrollRouteAdvisorTest`、`PayrollRouteSeedsTest` |
+
+上线顺序不变：先把 `payroll-mode=shadow` 观察 ≥500 轮次（或 14 天），决策类差异为 0 后切 `cache`；
+`cache` 档命中率 <70% 时回 `shadow` 调桶，不放大误判风险。
+
 ## 八、P3：评测与回归门槛（预计 2.5 天）
 
 ### 8.1 评测集
@@ -527,8 +545,8 @@ node scripts/route-intents-eval.mjs --model qwen3-embedding:0.6b --gate confiden
 | `payroll.router.semantic.embedding-model` | qwen3-embedding:0.6b | P2 | 独立于知识库检索模型；nomic 已实测不达标 |
 | `payroll.router.semantic.embedding-dim` | 1024 | P2 | 必须与模型输出维度一致，否则种子写入失败 |
 | `payroll.router.semantic.payroll-mode` | off | P2.5 | 薪酬语义三档：off/shadow/cache |
-| `payroll.router.semantic.shadow-sample` | 1.0 | P2.5 | 影子采样率 |
-| `payroll.router.semantic.cache-ttl-days` | 7 | P2.5 | 薪酬决策缓存有效期 |
+| `payroll.router.semantic.payroll-index` | payroll-route-intents-payroll | P2.5 | 薪酬桶独立索引，与 KB 语义索引隔离 |
+| `payroll.router.semantic.payroll-cache-ttl-days` | 7 | P2.5 | 薪酬决策有效期（Redis） |
 | `payroll.kb.chat.team-enabled` | true | 现状 | 团队节点检索开关，保持不变 |
 
 ## 十、可观测性

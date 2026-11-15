@@ -16,7 +16,7 @@ import org.slf4j.LoggerFactory;
  * <p>薪酬问题不进入本类（L0 一票终止）；种子索引按内容版本与模型幂等自举。嵌入或 ES 任一异常、
  * 超时、低置信都回退 L2 模型路由，绝不阻断对话。
  */
-public final class SemanticRouteClassifier implements AutoCloseable {
+public final class SemanticRouteClassifier implements RouteIntentClassifier, AutoCloseable {
 
     public static final String LABEL_KB_READ = "kb_read";
     public static final String LABEL_KB_ADMIN = "kb_admin";
@@ -55,13 +55,32 @@ public final class SemanticRouteClassifier implements AutoCloseable {
     }
 
     public static SemanticRouteClassifier start(SemanticRouteSettings settings) {
+        return start(
+                settings,
+                RouteIntentSeeds.RESOURCE,
+                settings == null ? "payroll-route-intents" : settings.index(),
+                RouteIntentSeeds.KB_LABELS);
+    }
+
+    /**
+     * 通用入口：同一套嵌入/ES 配置可承载多个独立索引（如薪酬语义桶）。
+     *
+     * @param resource 种子资源路径
+     * @param index ES 索引；与 KB 语义索引隔离，互不影响启停
+     * @param requiredLabels 种子必须包含的标签，防止误用其它资源的种子文件
+     */
+    public static SemanticRouteClassifier start(
+            SemanticRouteSettings settings,
+            String resource,
+            String index,
+            List<String> requiredLabels) {
         if (settings == null || !settings.enabled()) {
             log.info("[知识库][语义] 未启用（payroll.router.semantic.enabled=false）");
             return disabled("未启用");
         }
         RouteIntentSeeds.Catalog catalog;
         try {
-            catalog = RouteIntentSeeds.loadClasspath();
+            catalog = RouteIntentSeeds.loadClasspath(resource, requiredLabels);
         } catch (RuntimeException e) {
             log.warn("[知识库][语义] 种子加载失败，语义路由关闭：{}", rootMessage(e));
             return disabled("种子加载失败");
@@ -90,7 +109,7 @@ public final class SemanticRouteClassifier implements AutoCloseable {
                         settings.esUrl(),
                         settings.esUsername(),
                         settings.esPassword(),
-                        settings.index(),
+                        index,
                         settings.embeddingDim());
         try {
             if (!store.ping()) {
@@ -105,7 +124,7 @@ public final class SemanticRouteClassifier implements AutoCloseable {
                 seed(store, seeder, catalog, settings);
                 log.info(
                         "[知识库][语义] 已重建意图索引 {}：版本 {}，模型 {}，样本 {} 条，耗时 {}ms",
-                        settings.index(),
+                        index,
                         catalog.version(),
                         settings.embeddingModel(),
                         expected,
@@ -113,7 +132,7 @@ public final class SemanticRouteClassifier implements AutoCloseable {
             }
             log.info(
                     "[知识库][语义] 已启用：index={}，model={}，minScore={}，margin={}，版本={}",
-                    settings.index(),
+                    index,
                     settings.embeddingModel(),
                     settings.minScore(),
                     settings.margin(),

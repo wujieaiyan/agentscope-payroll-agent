@@ -112,6 +112,10 @@ payroll:
       embedding-base-url: "${OLLAMA_BASE_URL:http://localhost:11434}"
       embedding-model: "${PAYROLL_ROUTER_SEMANTIC_EMBEDDING_MODEL:qwen3-embedding:0.6b}"
       embedding-dim: "${PAYROLL_ROUTER_SEMANTIC_EMBEDDING_DIM:1024}"
+      # 薪酬语义桶（规格 7）：off 不启用；shadow 只比对；cache 才复用决策。
+      payroll-mode: "${PAYROLL_ROUTER_SEMANTIC_PAYROLL_MODE:off}"
+      payroll-index: "${PAYROLL_ROUTER_SEMANTIC_PAYROLL_INDEX:payroll-route-intents-payroll}"
+      payroll-cache-ttl-days: "${PAYROLL_ROUTER_SEMANTIC_PAYROLL_CACHE_TTL_DAYS:7}"
   mcp:
     # 是否采纳外部服务的 readOnlyHint；false 时所有 MCP 工具一律视为写，逐个确认。
     trust-read-only-hints: "${PAYROLL_MCP_TRUST_READ_ONLY_HINTS:true}"

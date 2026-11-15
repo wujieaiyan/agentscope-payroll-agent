@@ -2,6 +2,10 @@ package io.agentscope.payroll.runtime;
 
 import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
 import io.agentscope.examples.payroll.agent.McpServerConfig;
+import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.PayrollRouteBucket;
+import io.agentscope.examples.payroll.agent.PayrollRouteCache;
+import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.agent.SemanticRouteSettings;
 import io.agentscope.examples.payroll.agent.ToolSafety;
@@ -10,6 +14,7 @@ import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.router.AgentRouter;
+import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
@@ -30,6 +35,8 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -37,6 +44,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * 智能体运行期的装配：模型编排、工具安全、动态团队与内部接口入口限制。
@@ -181,9 +189,9 @@ public class PayrollAgentConfiguration {
         return router;
     }
 
-    /** L1 语义路由：关闭或初始化失败时返回禁用实例，调用方按 L0 + L2 继续。 */
-    @Bean(destroyMethod = "close")
-    public SemanticRouteClassifier routeSemanticClassifier(
+    /** 语义路由设置：KB 语义与薪酬语义共用嵌入/ES 配置，仅索引与种子不同。 */
+    @Bean
+    public SemanticRouteSettings routeSemanticSettings(
             @Value("${payroll.router.semantic.enabled:false}") boolean enabled,
             @Value("${payroll.router.semantic.min-score:0.55}") double minScore,
             @Value("${payroll.router.semantic.margin:0.05}") double margin,
@@ -198,20 +206,92 @@ public class PayrollAgentConfiguration {
             @Value("${payroll.router.semantic.embedding-model:qwen3-embedding:0.6b}")
                     String embeddingModel,
             @Value("${payroll.router.semantic.embedding-dim:1024}") int embeddingDim) {
-        return SemanticRouteClassifier.start(
+        return new SemanticRouteSettings(
+                enabled,
+                minScore,
+                margin,
+                index,
+                timeoutMs,
+                seedTimeoutSeconds,
+                esUrl,
+                esUsername,
+                esPassword,
+                embeddingBaseUrl,
+                embeddingModel,
+                embeddingDim);
+    }
+
+    /** L1 语义路由：关闭或初始化失败时返回禁用实例，调用方按 L0 + L2 继续。 */
+    @Bean(destroyMethod = "close")
+    public SemanticRouteClassifier routeSemanticClassifier(SemanticRouteSettings settings) {
+        return SemanticRouteClassifier.start(settings);
+    }
+
+    /** 规格 7：薪酬语义桶独立索引；off 档不初始化，避免无谓的嵌入与 ES 连接。 */
+    @Bean(destroyMethod = "close")
+    public SemanticRouteClassifier payrollRouteSemanticClassifier(
+            SemanticRouteSettings settings,
+            @Value("${payroll.router.semantic.payroll-mode:off}") String payrollMode,
+            @Value("${payroll.router.semantic.payroll-index:payroll-route-intents-payroll}")
+                    String payrollIndex) {
+        PayrollRouteMode mode = PayrollRouteMode.parse(payrollMode);
+        if (!mode.semanticEnabled()) {
+            log.info("[薪酬语义] 未启用（payroll.router.semantic.payroll-mode=off）");
+            return SemanticRouteClassifier.disabled("薪酬语义未启用");
+        }
+        SemanticRouteSettings payrollSettings =
                 new SemanticRouteSettings(
-                        enabled,
-                        minScore,
-                        margin,
-                        index,
-                        timeoutMs,
-                        seedTimeoutSeconds,
-                        esUrl,
-                        esUsername,
-                        esPassword,
-                        embeddingBaseUrl,
-                        embeddingModel,
-                        embeddingDim));
+                        settings.enabled(),
+                        settings.minScore(),
+                        settings.margin(),
+                        payrollIndex,
+                        settings.timeoutMs(),
+                        settings.seedTimeoutSeconds(),
+                        settings.esUrl(),
+                        settings.esUsername(),
+                        settings.esPassword(),
+                        settings.embeddingBaseUrl(),
+                        settings.embeddingModel(),
+                        settings.embeddingDim());
+        return SemanticRouteClassifier.start(
+                payrollSettings,
+                "/routing/payroll-route-intents.json",
+                payrollIndex,
+                PayrollRouteBucket.ALL);
+    }
+
+    /** 规格 7.3：多实例部署必须共享 Redis；无 Redis 时 cache 档自动退化为每次调用模型。 */
+    @Bean
+    public PayrollRouteCache payrollRouteCache(
+            @Value("${payroll.router.semantic.payroll-cache-ttl-days:7}") int ttlDays,
+            ObjectProvider<StringRedisTemplate> redisProvider) {
+        StringRedisTemplate redis = redisProvider.getIfAvailable();
+        if (redis == null) {
+            log.warn("[薪酬语义] 未启用 Redis，决策缓存不可用；cache 档将始终调用模型路由");
+            return PayrollRouteCache.disabled();
+        }
+        return PayrollRouteCache.redis(redis, java.time.Duration.ofDays(Math.max(1, ttlDays)));
+    }
+
+    @Bean
+    public PayrollRouteAdvisor payrollRouteAdvisor(
+            @Value("${payroll.router.semantic.payroll-mode:off}") String payrollMode,
+            @Value("${payroll.chat.kb-policy.follow-up-max-chars:20}") int cacheUnsafeMaxChars,
+            @Qualifier("payrollRouteSemanticClassifier") SemanticRouteClassifier payrollSemantic,
+            PayrollRouteCache payrollRouteCache) {
+        PayrollRouteMode mode = PayrollRouteMode.parse(payrollMode);
+        log.info(
+                "[薪酬语义] 档位={}，索引已就绪={}，缓存={}，不缓存问句上限={}字",
+                mode,
+                payrollSemantic != null && payrollSemantic.ready(),
+                payrollRouteCache == null ? "未配置" : "Redis",
+                Math.max(1, cacheUnsafeMaxChars));
+        return new PayrollRouteAdvisor(
+                mode,
+                payrollSemantic,
+                payrollRouteCache,
+                PayrollAgentFactory.modelId(),
+                cacheUnsafeMaxChars);
     }
 
     /** 每个对话窗口独立实例：模型上下文、路由与团队执行都按会话隔离。 */
@@ -226,7 +306,8 @@ public class PayrollAgentConfiguration {
             ActiveTeamService activeTeamService,
             ToolSafety toolSafety,
             AgentRouter router,
-            SemanticRouteClassifier semantic,
+            @Qualifier("routeSemanticClassifier") SemanticRouteClassifier semantic,
+            @Qualifier("payrollRouteAdvisor") PayrollRouteAdvisor payrollRouteAdvisor,
             @Value("${payroll.orchestrator:legacy}") String orchestrator,
             @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
             @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
@@ -290,7 +371,8 @@ public class PayrollAgentConfiguration {
                         router,
                         alwaysConfirmTools,
                         kbPolicy,
-                        semantic);
+                        semantic,
+                        payrollRouteAdvisor);
     }
 
     /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */

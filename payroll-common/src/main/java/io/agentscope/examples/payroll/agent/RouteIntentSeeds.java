@@ -18,6 +18,13 @@ public final class RouteIntentSeeds {
 
     public static final String RESOURCE = "/routing/route-intents.json";
 
+    /** 非薪酬语义层固定要求的三个标签；薪酬桶使用独立资源与标签集。 */
+    public static final List<String> KB_LABELS =
+            List.of(
+                    SemanticRouteClassifier.LABEL_KB_READ,
+                    SemanticRouteClassifier.LABEL_KB_ADMIN,
+                    SemanticRouteClassifier.LABEL_OTHER);
+
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private RouteIntentSeeds() {
@@ -39,17 +46,25 @@ public final class RouteIntentSeeds {
     }
 
     public static Catalog loadClasspath() {
-        try (InputStream in = RouteIntentSeeds.class.getResourceAsStream(RESOURCE)) {
+        return loadClasspath(RESOURCE, KB_LABELS);
+    }
+
+    public static Catalog loadClasspath(String resource, List<String> requiredLabels) {
+        try (InputStream in = RouteIntentSeeds.class.getResourceAsStream(resource)) {
             if (in == null) {
-                throw new IllegalStateException("缺少语义路由种子文件 " + RESOURCE);
+                throw new IllegalStateException("缺少语义路由种子文件 " + resource);
             }
-            return parse(in);
+            return parse(in, requiredLabels);
         } catch (IOException e) {
             throw new IllegalStateException("读取语义路由种子失败：" + e.getMessage(), e);
         }
     }
 
     static Catalog parse(InputStream in) throws IOException {
+        return parse(in, KB_LABELS);
+    }
+
+    static Catalog parse(InputStream in, List<String> requiredLabels) throws IOException {
         JsonNode root = JSON.readTree(in);
         String version = root.path("version").asText("").trim();
         if (version.isEmpty()) {
@@ -63,11 +78,7 @@ public final class RouteIntentSeeds {
             }
         }
         Set<String> known = new LinkedHashSet<>(labels);
-        for (String required :
-                List.of(
-                        SemanticRouteClassifier.LABEL_KB_READ,
-                        SemanticRouteClassifier.LABEL_KB_ADMIN,
-                        SemanticRouteClassifier.LABEL_OTHER)) {
+        for (String required : requiredLabels) {
             if (!known.contains(required)) {
                 throw new IllegalStateException("语义路由种子缺少标签 " + required);
             }
