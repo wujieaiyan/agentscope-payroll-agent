@@ -523,6 +523,27 @@ node scripts/route-intents-eval.mjs --model qwen3-embedding:0.6b --gate confiden
 
 指标比上次基线下降超过 2 个百分点即阻断合入；薪酬项零容忍。
 
+### 8.4 实施记录（2026-11-16）
+
+| 项 | 落地方式 |
+| --- | --- |
+| 评测集 | `payroll-tests/src/test/resources/routing/kb-routing-cases.json`，150 条，六类结构与 8.1 一致 |
+| 单测门控 | `KbRoutingEvalTest`（tag `eval`）：`-Dpayroll.eval.routing=true` 才执行，校验逐条期望与分类门槛 |
+| 全链路脚本 | `scripts/route-eval.sh` → `scripts/route-eval.mjs`，支持 `--gate-only`（只校验评测集结构）、`--limit`、`--web`；逐题调用 `/api/agents/route-preview` 并比对 |
+| 预览夹具 | 预览请求新增可选 `kb_bound` / `kb_last_cited`，覆盖"上一轮带引用"的追问场景；不传时按未绑定、无引用计算 |
+| 薪酬基线 | 与 `routing-baseline.json` 逐条比对 `target/agent_id`，任何差异计失败 |
+| P2.5 指标 | 预览返回 `router_cache{mode,enabled,bucket,hit}` 与 `router_shadow{mode,ran,diff}`；脚本据此校验命中率 ≥70%、shadow diff 为 0；off/shadow 档未启用时跳过对应门槛 |
+| 平均 `kb_search` | 预览不触发检索，脚本只提示该项需用对话回归（turn 模式）统计 |
+
+运行示例（runtime 已启动）：
+
+```bash
+scripts/route-eval.sh --gate-only
+scripts/route-eval.sh --web http://localhost:8080 --limit 20
+# 校验 cache 档命中率：先以 PAYROLL_ROUTER_SEMANTIC_PAYROLL_MODE=cache 重启 runtime，再跑
+scripts/route-eval.sh --web http://localhost:8080
+```
+
 ## 九、配置项
 
 | 配置 | 默认 | 阶段 | 说明 |
@@ -546,7 +567,7 @@ node scripts/route-intents-eval.mjs --model qwen3-embedding:0.6b --gate confiden
 | `payroll.router.semantic.embedding-dim` | 1024 | P2 | 必须与模型输出维度一致，否则种子写入失败 |
 | `payroll.router.semantic.payroll-mode` | off | P2.5 | 薪酬语义三档：off/shadow/cache |
 | `payroll.router.semantic.payroll-index` | payroll-route-intents-payroll | P2.5 | 薪酬桶独立索引，与 KB 语义索引隔离 |
-| `payroll.router.semantic.payroll-cache-ttl-days` | 7 | P2.5 | 薪酬决策有效期（Redis） |
+| `payroll.router.semantic.payroll-cache-ttl-days` | 7 | P2.5 | 薪酬决策缓存有效期（Redis） |
 | `payroll.kb.chat.team-enabled` | true | 现状 | 团队节点检索开关，保持不变 |
 
 ## 十、可观测性

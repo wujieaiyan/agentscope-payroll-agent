@@ -41,6 +41,12 @@ public class AgentRouteController {
         body.put("message", request.message());
         body.put("session_id", request.sessionId());
         body.put("user_id", user.id());
+        if (request.kbBound() != null) {
+            body.put("kb_bound", request.kbBound());
+        }
+        if (request.kbLastCited() != null) {
+            body.put("kb_last_cited", request.kbLastCited());
+        }
         String json;
         try {
             json = runtimeClient.routePreview(JsonSupport.toJson(body));
@@ -63,7 +69,10 @@ public class AgentRouteController {
     }
 
     public record RoutePreviewRequest(
-            String message, @JsonProperty("session_id") Long sessionId) {
+            String message,
+            @JsonProperty("session_id") Long sessionId,
+            @JsonProperty("kb_bound") Boolean kbBound,
+            @JsonProperty("kb_last_cited") Boolean kbLastCited) {
         public RoutePreviewRequest {
             sessionId = sessionId == null ? 0L : sessionId;
         }

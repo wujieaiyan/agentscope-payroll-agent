@@ -223,9 +223,14 @@ public class InternalTurnController {
                                 request.message(), routeCandidates, teamOn, "", "", llm)
                         : null;
         RouteDecision decision = routeOutcome == null ? llm.get() : routeOutcome.decision();
-        // 预览不读会话状态：按未绑定、无引用上下文计算 L0，与真实链路同一条合并规则。
+        // 预览默认不读会话状态：按未绑定、无引用上下文计算 L0，与真实链路同一条合并规则；
+        // 评测脚本可显式传入夹具（kb_bound / kb_last_cited）以覆盖追问类场景。
         KbRoutingPolicy.Result l0 =
-                KbRoutingPolicy.decide(request.message(), false, false, kbPolicy);
+                KbRoutingPolicy.decide(
+                        request.message(),
+                        Boolean.TRUE.equals(request.kbBound()),
+                        Boolean.TRUE.equals(request.kbLastCited()),
+                        kbPolicy);
         SemanticRouteClassifier.Decision semanticDecision =
                 KbRoutePlanner.semanticEligible(l0, payroll)
                         ? semantic.classify(request.message())
@@ -409,6 +414,9 @@ public class InternalTurnController {
     public record RoutePreviewRequest(
             @JsonProperty("message") String message,
             @JsonProperty("session_id") long sessionId,
-            @JsonProperty("user_id") long userId) {
+            @JsonProperty("user_id") long userId,
+            /** 评测用会话夹具：预览默认按未绑定、无引用计算，脚本可显式覆盖。 */
+            @JsonProperty("kb_bound") Boolean kbBound,
+            @JsonProperty("kb_last_cited") Boolean kbLastCited) {
     }
 }

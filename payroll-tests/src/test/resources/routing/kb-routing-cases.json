@@ -1,0 +1,2266 @@
+{
+  "version": "2026-11-16.1",
+  "description": "P3 路由回归评测集：payroll 金标 50 + kb 五类 100；L0 断言 policy/need_kb，semantic_label 为可选的确定性语义桩。",
+  "cases": [
+    {
+      "id": "payroll-01",
+      "category": "payroll",
+      "question": "核算 EMP001 2026-10 的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-02",
+      "category": "payroll",
+      "question": "帮我核算 2026-10 上海研发部所有员工的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-03",
+      "category": "payroll",
+      "question": "试算 EMP002 2026-10 的应发工资和实发工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-04",
+      "category": "payroll",
+      "question": "EMP003 2026-10 的薪资明细包含哪些项目",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-05",
+      "category": "payroll",
+      "question": "算一下张伟 2026-10 的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-06",
+      "category": "payroll",
+      "question": "重新核算 EMP004 2026-10 的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-07",
+      "category": "payroll",
+      "question": "按当前政策核算 2026-10 全体员工的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-08",
+      "category": "payroll",
+      "question": "EMP005 上个月的个税是多少",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-09",
+      "category": "payroll",
+      "question": "核算杭州分部 2026-10 的工资总额",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-10",
+      "category": "payroll",
+      "question": "试算一下北京地区 2026-10 的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-11",
+      "category": "payroll",
+      "question": "个税起征点是多少",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-12",
+      "category": "payroll",
+      "question": "专项附加扣除如何影响个税",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-13",
+      "category": "payroll",
+      "question": "社保缴费基数怎么确定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-14",
+      "category": "payroll",
+      "question": "公积金缴存比例是多少",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-15",
+      "category": "payroll",
+      "question": "个税税率表是怎样的",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-16",
+      "category": "payroll",
+      "question": "年终奖的个税怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-17",
+      "category": "payroll",
+      "question": "五险一金的扣款明细怎么看",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-18",
+      "category": "payroll",
+      "question": "社保公积金扣款明细",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-19",
+      "category": "payroll",
+      "question": "个税累计预扣法怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-20",
+      "category": "payroll",
+      "question": "补充公积金是否计入个税",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-21",
+      "category": "payroll",
+      "question": "上海 2026 年社保基数上限是多少",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-22",
+      "category": "payroll",
+      "question": "深圳社保政策有什么变化",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-23",
+      "category": "payroll",
+      "question": "不同城市的个税政策有区别吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-24",
+      "category": "payroll",
+      "question": "杭州公积金缴存比例",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-25",
+      "category": "payroll",
+      "question": "北京社保最低缴费基数",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-26",
+      "category": "payroll",
+      "question": "广州 2026 年公积金政策",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-27",
+      "category": "payroll",
+      "question": "成都社保缴费比例",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-28",
+      "category": "payroll",
+      "question": "试用期工资怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-29",
+      "category": "payroll",
+      "question": "迟到扣款怎么算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-30",
+      "category": "payroll",
+      "question": "事假扣款规则",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-31",
+      "category": "payroll",
+      "question": "病假工资怎么发放",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-32",
+      "category": "payroll",
+      "question": "加班费怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-33",
+      "category": "payroll",
+      "question": "年假未休补偿是否计入工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-34",
+      "category": "payroll",
+      "question": "绩效系数 0.8 时工资怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-35",
+      "category": "payroll",
+      "question": "绩效考核结果如何影响应发工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-36",
+      "category": "payroll",
+      "question": "调休和加班费能否同时计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-37",
+      "category": "payroll",
+      "question": "如何创建工资批次",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-38",
+      "category": "payroll",
+      "question": "工资批次的审批流程是怎样的",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-39",
+      "category": "payroll",
+      "question": "工资批次怎么回退",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-40",
+      "category": "payroll",
+      "question": "导出 2026-10 工资表",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-41",
+      "category": "payroll",
+      "question": "生成 2026-10 工资发放报表",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-42",
+      "category": "payroll",
+      "question": "工资发放失败如何处理",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-43",
+      "category": "payroll",
+      "question": "审批被驳回后如何修改工资批次",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-44",
+      "category": "payroll",
+      "question": "查询员工 EMP001 的薪资信息",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-45",
+      "category": "payroll",
+      "question": "导入员工花名册后如何开始工资核算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-46",
+      "category": "payroll",
+      "question": "员工转正后薪资如何调整",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-47",
+      "category": "payroll",
+      "question": "怎么查看工资条",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-48",
+      "category": "payroll",
+      "question": "离职员工最后一个月工资怎么计算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-49",
+      "category": "payroll",
+      "question": "工资什么时候发放",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "payroll-50",
+      "category": "payroll",
+      "question": "我的工资为什么变少了",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-direct-01",
+      "category": "kb_direct",
+      "question": "年假政策是怎么规定的",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-02",
+      "category": "kb_direct",
+      "question": "请假流程是什么",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-03",
+      "category": "kb_direct",
+      "question": "报销需要哪些材料",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-04",
+      "category": "kb_direct",
+      "question": "差旅费标准是多少",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-05",
+      "category": "kb_direct",
+      "question": "加班审批流程",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-06",
+      "category": "kb_direct",
+      "question": "入职需要准备什么材料",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-07",
+      "category": "kb_direct",
+      "question": "离职手续怎么办理",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-08",
+      "category": "kb_direct",
+      "question": "转正流程是怎样的",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-09",
+      "category": "kb_direct",
+      "question": "培训制度有哪些规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-10",
+      "category": "kb_direct",
+      "question": "考勤制度怎么规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-11",
+      "category": "kb_direct",
+      "question": "调休规则是什么",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-12",
+      "category": "kb_direct",
+      "question": "福利有哪些",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-13",
+      "category": "kb_direct",
+      "question": "手册里怎么写病假规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-14",
+      "category": "kb_direct",
+      "question": "公司制度中关于产假的规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-15",
+      "category": "kb_direct",
+      "question": "婚假规定是几天",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-16",
+      "category": "kb_direct",
+      "question": "丧假规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-17",
+      "category": "kb_direct",
+      "question": "工伤认定流程",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-18",
+      "category": "kb_direct",
+      "question": "补充医疗保险政策",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-19",
+      "category": "kb_direct",
+      "question": "员工手册在哪里查看",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-20",
+      "category": "kb_direct",
+      "question": "制度文件如何检索",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-21",
+      "category": "kb_direct",
+      "question": "知识库里有报销制度吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_EXPLICIT",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-22",
+      "category": "kb_direct",
+      "question": "出差住宿费报销标准",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-23",
+      "category": "kb_direct",
+      "question": "市内交通费报销规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-24",
+      "category": "kb_direct",
+      "question": "通讯补贴规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-25",
+      "category": "kb_direct",
+      "question": "餐补福利规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-26",
+      "category": "kb_direct",
+      "question": "体检福利政策",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-27",
+      "category": "kb_direct",
+      "question": "节日福利规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-28",
+      "category": "kb_direct",
+      "question": "员工关怀政策",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-29",
+      "category": "kb_direct",
+      "question": "竞业限制条款",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-direct-30",
+      "category": "kb_direct",
+      "question": "保密制度规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-01",
+      "category": "kb_followup",
+      "question": "那试用期呢",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-02",
+      "category": "kb_followup",
+      "question": "还有吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-03",
+      "category": "kb_followup",
+      "question": "继续",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-04",
+      "category": "kb_followup",
+      "question": "它适用于哪些人",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-05",
+      "category": "kb_followup",
+      "question": "这个制度什么时候生效",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-06",
+      "category": "kb_followup",
+      "question": "上述规定有例外吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-07",
+      "category": "kb_followup",
+      "question": "再说说报销",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-08",
+      "category": "kb_followup",
+      "question": "那病假呢",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-09",
+      "category": "kb_followup",
+      "question": "刚才那条怎么理解",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-10",
+      "category": "kb_followup",
+      "question": "它的适用范围",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-11",
+      "category": "kb_followup",
+      "question": "还有别的条款吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-12",
+      "category": "kb_followup",
+      "question": "接着讲",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-13",
+      "category": "kb_followup",
+      "question": "这个流程要几天",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-14",
+      "category": "kb_followup",
+      "question": "前者和后者有什么区别",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-15",
+      "category": "kb_followup",
+      "question": "那入职材料呢",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-16",
+      "category": "kb_followup",
+      "question": "继续讲流程",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-17",
+      "category": "kb_followup",
+      "question": "这个条款怎么解释",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-18",
+      "category": "kb_followup",
+      "question": "还有补充吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-19",
+      "category": "kb_followup",
+      "question": "它能线上办理吗",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-followup-20",
+      "category": "kb_followup",
+      "question": "那培训呢",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_FOLLOW_UP",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-01",
+      "category": "kb_synonym",
+      "question": "公司关于年休假的说明",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-02",
+      "category": "kb_synonym",
+      "question": "想问下请假日的手续",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-03",
+      "category": "kb_synonym",
+      "question": "差旅报销要准备什么",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-04",
+      "category": "kb_synonym",
+      "question": "出差费用如何报销",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-05",
+      "category": "kb_synonym",
+      "question": "病假请假需要什么材料",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-06",
+      "category": "kb_synonym",
+      "question": "加班审批找谁",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-07",
+      "category": "kb_synonym",
+      "question": "转正的时间要求",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-08",
+      "category": "kb_synonym",
+      "question": "离职交接清单",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-09",
+      "category": "kb_synonym",
+      "question": "公司培训安排",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-10",
+      "category": "kb_synonym",
+      "question": "考勤打卡规则",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-11",
+      "category": "kb_synonym",
+      "question": "调休怎么申请",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-12",
+      "category": "kb_synonym",
+      "question": "员工福利清单",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-13",
+      "category": "kb_synonym",
+      "question": "手册中关于住宿费的规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-14",
+      "category": "kb_synonym",
+      "question": "制度文件在哪",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-15",
+      "category": "kb_synonym",
+      "question": "公司政策查询方式",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-16",
+      "category": "kb_synonym",
+      "question": "知识库怎么用",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-17",
+      "category": "kb_synonym",
+      "question": "内部规定汇编",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-18",
+      "category": "kb_synonym",
+      "question": "办事指南在哪里",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-19",
+      "category": "kb_synonym",
+      "question": "员工手册目录",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-synonym-20",
+      "category": "kb_synonym",
+      "question": "检索制度的入口",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": true
+      }
+    },
+    {
+      "id": "kb-negative-01",
+      "category": "kb_negative",
+      "question": "帮我生成一段视频",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-02",
+      "category": "kb_negative",
+      "question": "写一篇产品文案",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-03",
+      "category": "kb_negative",
+      "question": "翻译这句话",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-04",
+      "category": "kb_negative",
+      "question": "今天天气怎么样",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-05",
+      "category": "kb_negative",
+      "question": "讲个笑话",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-06",
+      "category": "kb_negative",
+      "question": "你好",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-07",
+      "category": "kb_negative",
+      "question": "谢谢",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-08",
+      "category": "kb_negative",
+      "question": "帮我画一张图",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-09",
+      "category": "kb_negative",
+      "question": "写一段 Python 代码",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-10",
+      "category": "kb_negative",
+      "question": "推荐一部电影",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-11",
+      "category": "kb_negative",
+      "question": "帮我生成一个视频",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-12",
+      "category": "kb_negative",
+      "question": "写一段代码",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-13",
+      "category": "kb_negative",
+      "question": "今天天气如何",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-14",
+      "category": "kb_negative",
+      "question": "讲个笑话吧",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "kb-negative-15",
+      "category": "kb_negative",
+      "question": "你好呀",
+      "fixture": {
+        "bound": false,
+        "last_cited": true,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "NONE",
+        "target": null,
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-01",
+      "category": "mixed",
+      "question": "按制度核算 2026-10 工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-02",
+      "category": "mixed",
+      "question": "根据公司政策核对张伟的工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-03",
+      "category": "mixed",
+      "question": "个税专项附加扣除政策怎么影响工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-04",
+      "category": "mixed",
+      "question": "社保基数政策变化对实发工资的影响",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-05",
+      "category": "mixed",
+      "question": "年假工资补偿的计算规定",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-06",
+      "category": "mixed",
+      "question": "病假期间工资发放政策",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-07",
+      "category": "mixed",
+      "question": "加班费政策如何核算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-08",
+      "category": "mixed",
+      "question": "出差报销是否影响工资",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-09",
+      "category": "mixed",
+      "question": "绩效政策与工资核算的关系",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-10",
+      "category": "mixed",
+      "question": "公积金政策调整后工资怎么算",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null
+      },
+      "expect": {
+        "policy": "SKIP_PAYROLL",
+        "target": "pipeline",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-11",
+      "category": "mixed",
+      "question": "保存知识库的分块配置",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null,
+        "semantic_label": "kb_admin",
+        "semantic_confident": true
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-12",
+      "category": "mixed",
+      "question": "删除这个知识库文档",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null,
+        "semantic_label": "kb_admin",
+        "semantic_confident": true
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-13",
+      "category": "mixed",
+      "question": "重建知识库索引",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null,
+        "semantic_label": "kb_admin",
+        "semantic_confident": true
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-14",
+      "category": "mixed",
+      "question": "把员工手册文档移入新目录",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null,
+        "semantic_label": "kb_admin",
+        "semantic_confident": true
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": false
+      }
+    },
+    {
+      "id": "mixed-15",
+      "category": "mixed",
+      "question": "修改知识库成员权限",
+      "fixture": {
+        "bound": false,
+        "last_cited": false,
+        "flow_id": null,
+        "semantic_label": "kb_admin",
+        "semantic_confident": true
+      },
+      "expect": {
+        "policy": "FORCE_KEYWORD",
+        "target": "agent",
+        "need_kb": false
+      }
+    }
+  ]
+}
