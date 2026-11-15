@@ -12,6 +12,7 @@ import io.agentscope.examples.payroll.kb.KbModels.Chunk;
 import io.agentscope.examples.payroll.kb.KbModels.ConfigVersion;
 import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbRetrievalSettings.Route;
+import io.agentscope.examples.payroll.support.LexicalTokens;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -34,6 +35,8 @@ public class KbRetrievalService {
 
     private static final double ADJACENT_OVERLAP = 0.6;
     private static final int MAX_PARENT_CONTENT = 1200;
+    /** 主题词在语料中至少出现这么多次才视为“收录”，避免书单页/命令列表里的一次顺带提及。 */
+    private static final int MIN_TOPIC_MENTIONS = 3;
 
     private final KbChunkStore chunkStore;
     private final KbDocumentStore documentStore;
@@ -231,6 +234,19 @@ public class KbRetrievalService {
             double threshold,
             int recallLimit) {
         String engine = "LOCAL";
+        List<String> topics = LexicalTokens.asciiTerms(query);
+        if (!topics.isEmpty()) {
+            List<Chunk> candidates = new ArrayList<>();
+            for (Chunk chunk : chunkStore.findActiveBySeries(seriesId)) {
+                if (valid(chunk, readyDocuments)) {
+                    candidates.add(chunk);
+                }
+            }
+            if (!mentionsAnyTopic(topics, candidates, readyDocuments)) {
+                log.info("[知识库] 检索主题不在库内：series={}，terms={}", seriesId, topics);
+                return new LegacyOutcome(List.of(), engine);
+            }
+        }
         List<ScoredHit> hits = new ArrayList<>();
         if (elasticsearchService.available()) {
             List<KbElasticsearchService.SearchHit> esHits =
@@ -276,6 +292,15 @@ public class KbRetrievalService {
         }
         if (candidates.isEmpty() || routes.isEmpty()) {
             Map<String, Object> emptyDiagnostics = diagnostics(true, 0, 0, Map.of());
+            return new FusionOutcome(List.of(), "LOCAL", emptyDiagnostics);
+        }
+        // 问题点名了具体主题（如 Kafka）但库内语料完全没有该词时，任何命中都只是字面噪声。
+        List<String> topics = LexicalTokens.asciiTerms(query);
+        if (!topics.isEmpty() && !mentionsAnyTopic(topics, candidates, readyDocuments)) {
+            Map<String, Object> emptyDiagnostics = diagnostics(true, 0, 0, Map.of());
+            emptyDiagnostics.put("reason", "QUERY_TERM_NOT_IN_CORPUS");
+            emptyDiagnostics.put("topicTerms", topics);
+            log.info("[知识库] 检索主题不在库内：series={}，terms={}", seriesId, topics);
             return new FusionOutcome(List.of(), "LOCAL", emptyDiagnostics);
         }
 
@@ -334,6 +359,42 @@ public class KbRetrievalService {
         String engine = vector.elasticsearch() ? "ELASTICSEARCH" : "LOCAL";
         Map<String, Object> diagnostics = diagnostics(true, fusedCount, removed, routeStats);
         return new FusionOutcome(capped, engine, diagnostics);
+    }
+
+    /**
+     * 主题词必须出现在文档名/标题路径，或在语料中反复出现（≥3 次）才算库内覆盖；单次顺带提及多为无关页面噪声。
+     */
+    private static boolean mentionsAnyTopic(
+            List<String> topics, List<Chunk> candidates, Map<Long, Document> documents) {
+        Map<String, Integer> mentions = new HashMap<>();
+        for (Chunk chunk : candidates) {
+            Document document = documents.get(chunk.documentId());
+            String title =
+                    ((chunk.titlePath() == null ? "" : chunk.titlePath())
+                                    + "\n"
+                                    + (document == null || document.name() == null
+                                            ? ""
+                                            : document.name()))
+                            .toLowerCase(Locale.ROOT);
+            String content = (chunk.content() == null ? "" : chunk.content()).toLowerCase(Locale.ROOT);
+            for (String topic : topics) {
+                if (title.contains(topic)) {
+                    return true;
+                }
+                mentions.merge(topic, countOccurrences(content, topic), Integer::sum);
+            }
+        }
+        return mentions.values().stream().anyMatch(count -> count >= MIN_TOPIC_MENTIONS);
+    }
+
+    private static int countOccurrences(String text, String term) {
+        int count = 0;
+        int from = 0;
+        while ((from = text.indexOf(term, from)) >= 0) {
+            count++;
+            from += term.length();
+        }
+        return count;
     }
 
     private Map<String, Object> diagnostics(

@@ -133,6 +133,57 @@ class KbRetrievalFusionTest {
     }
 
     @Test
+    @DisplayName("问题点名的主题词不在库内时不返回命中")
+    void topicTermMissingFromCorpusReturnsNothing() {
+        List<Chunk> chunks =
+                List.of(
+                        chunk(70, 60, 1, "写入期间会发生很多错误，需要处理写故障。", "第六章/写入"),
+                        chunk(71, 60, 2, "副本同步依赖提交列表。", "第六章/副本"));
+
+        RetrievalResult result =
+                search(chunks, List.of(document(60)), "Kafka 消息不丢失机制", settings(3), 5);
+
+        assertTrue(result.hits().isEmpty());
+        assertEquals("QUERY_TERM_NOT_IN_CORPUS", result.diagnostics().get("reason"));
+        assertEquals(List.of("kafka"), result.diagnostics().get("topicTerms"));
+    }
+
+    @Test
+    @DisplayName("主题词出现在库内时保留正常召回")
+    void topicTermPresentKeepsHits() {
+        List<Chunk> chunks =
+                List.of(
+                        chunk(
+                                72,
+                                61,
+                                1,
+                                "Kafka 使用副本机制保证消息不丢失。Kafka 通过 acks=all 与 min.insync.replicas 配合避免 Kafka 丢消息。",
+                                "第二章/Kafka 副本"),
+                        chunk(73, 61, 2, "写入期间需要处理写故障。", "第六章/写入"));
+
+        RetrievalResult result =
+                search(chunks, List.of(document(61)), "Kafka 消息不丢失机制", settings(3), 5);
+
+        assertFalse(result.hits().isEmpty());
+        assertTrue(result.hits().stream().anyMatch(hit -> hit.content().contains("Kafka")));
+    }
+
+    @Test
+    @DisplayName("语料里只有顺带一次提及不算收录该主题")
+    void singleIncidentalMentionDoesNotCoverTopic() {
+        List<Chunk> chunks =
+                List.of(
+                        chunk(74, 62, 1, "写入期间会发生很多错误，需要处理写故障。", "第六章/写入"),
+                        chunk(75, 62, 2, "好书力荐：Apache Kafka 源码剖析。", "封底/荐书"));
+
+        RetrievalResult result =
+                search(chunks, List.of(document(62)), "Kafka 如何保证消息不丢失", settings(3), 5);
+
+        assertTrue(result.hits().isEmpty());
+        assertEquals("QUERY_TERM_NOT_IN_CORPUS", result.diagnostics().get("reason"));
+    }
+
+    @Test
     @DisplayName("关闭融合时退回旧路径并标记 fusion=false")
     void legacyPathRemainsAvailable() {
         List<Chunk> chunks =
