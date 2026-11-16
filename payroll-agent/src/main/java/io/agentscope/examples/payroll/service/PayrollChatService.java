@@ -85,6 +85,10 @@ public final class PayrollChatService implements PayrollChat {
             Set.of("calculate_payroll", "calculate_department_payroll", "generate_payslip");
     private static final int BATCH_VALIDATION_LIMIT = 3;
     private static final int LOG_PREVIEW_LIMIT = 400;
+    /** 空回复重试时追加的指令：3B 模型偶发直接 EOS，需要显式要求输出正文。 */
+    private static final String RETRY_NUDGE =
+            "\n\n上一轮没有产生任何可见内容。请直接输出完整的答复正文，"
+                    + "不要只输出思考过程、工具调用说明或空内容。";
     /** 小模型会把“应加载技能/应调用工具”当成正文输出，甚至触发技能重试话术。 */
     private static final Pattern PSEUDO_TOOL_CALL = Pattern.compile(
             "(?is)(load_skill_through_path\\s*\\(|\"tool_calls\"\\s*:|<tool_call>|<function_call>"
@@ -1201,20 +1205,26 @@ public final class PayrollChatService implements PayrollChat {
         StageResult result;
         try {
             result =
-                    runStage(
+                    runAnswerStage(
                             "active",
                             label,
                             current.calculator(),
                             input,
                             events,
-                            true,
                             tools);
         } catch (RuntimeException e) {
             throw chatFailure(e);
         }
         String reply = result.text().trim();
         if (reply.isBlank()) {
-            throw new PayrollException("核算智能体未返回内容，请重试或检查模型服务状态。");
+            throw new PayrollException(
+                    agent == null
+                            ? "核算智能体未返回内容，请重试或检查模型服务状态。"
+                            : "智能体「"
+                                    + agent.name()
+                                    + "」未返回内容，请重试或更换模型（当前 "
+                                    + modelId()
+                                    + "）。");
         }
         return reply;
     }
@@ -1225,13 +1235,12 @@ public final class PayrollChatService implements PayrollChat {
         StageResult result;
         try {
             result =
-                    runStage(
+                    runAnswerStage(
                             "knowledge",
                             "知识库问答智能体",
                             agent,
                             input,
                             events,
-                            true,
                             tools);
         } catch (RuntimeException e) {
             throw chatFailure(e);
@@ -1241,6 +1250,41 @@ public final class PayrollChatService implements PayrollChat {
             throw new PayrollException("知识库问答智能体未返回内容，请重试或检查模型服务状态。");
         }
         return reply;
+    }
+
+    /**
+     * 直接作答阶段：模型偶发 0 token 空回复（qwen2.5:3b 会立即 EOS）时追加明确指令重试一次。
+     *
+     * <p>仅在没有工具调用时重试；有工具调用的空答复可能已产生副作用，重复执行反而危险。
+     */
+    private StageResult runAnswerStage(
+            String stageKey,
+            String stageLabel,
+            HarnessAgent agent,
+            String input,
+            ChatStreamListener events,
+            Set<String> tools) {
+        int recorded = stageRuns.size();
+        StageResult result = runStage(stageKey, stageLabel, agent, input, events, true, tools);
+        if (!result.text().isBlank() || calledTools(recorded)) {
+            return result;
+        }
+        log.warn("[多智能体][{}] 空回复且未调用工具，追加指令后重试一次", stageKey);
+        // 空尝试不留在追溯里，否则阶段列表会出现同名空阶段。
+        while (stageRuns.size() > recorded) {
+            stageRuns.remove(stageRuns.size() - 1);
+        }
+        return runStage(stageKey, stageLabel, agent, input + RETRY_NUDGE, events, true, tools);
+    }
+
+    /** 从第 fromIndex 条阶段记录起是否发生过工具调用。 */
+    private boolean calledTools(int fromIndex) {
+        for (int i = Math.min(fromIndex, stageRuns.size()); i < stageRuns.size(); i++) {
+            if (stageRuns.get(i).toolCalls() > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
