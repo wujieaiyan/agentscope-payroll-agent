@@ -23,6 +23,8 @@ class AgentRouterTest {
             agent("offline-001", "下架专家", AgentDefinition.STATUS_OFFLINE, "policy");
     private static final AgentDefinition CALCULATOR_AGENT =
             agent("calc-001", "计算专家", AgentDefinition.STATUS_ONLINE, RoleSkills.CALCULATOR);
+    private static final AgentDefinition POETRY_AGENT =
+            agent("poetry-001", "诗词专家", AgentDefinition.STATUS_ONLINE, "poetry");
 
     @Test
     void candidatesExcludeOfflineAndPipelineAgents() {
@@ -160,6 +162,17 @@ class AgentRouterTest {
     }
 
     @Test
+    void treatsCandidateIdPlacedInTargetAsAgent() {
+        RouteDecision decision =
+                routerReturning(
+                                "{\"target\":\"poetry-001\",\"agent_id\":\"\",\"reason\":\"创作\","
+                                        + "\"confidence\":0.9}")
+                        .decide("写一首成长的诗", List.of(POLICY_AGENT, POETRY_AGENT), false, "1:1");
+        assertTrue(decision.routed());
+        assertEquals("poetry-001", decision.agent().id());
+    }
+
+    @Test
     void parsesKbDecision() {
         AgentRouter router = routerReturning(
                 "{\"target\":\"agent\",\"agent_id\":\"policy-001\",\"need_kb\":true,"
@@ -245,6 +258,61 @@ class AgentRouterTest {
         assertEquals(expected, AgentRouter.instruction(List.of(), true, true));
         assertTrue(AgentRouter.instruction(List.of(), true, false).contains("need_kb"));
         assertTrue(AgentRouter.instruction(List.of(), true, false).contains("kb_kind"));
+    }
+
+    @Test
+    void nonPayrollInstructionCoversCreativeWriting() {
+        String prompt = AgentRouter.instruction(List.of(POLICY_AGENT), false, false);
+        assertTrue(prompt.contains("创作类判定"));
+        assertTrue(prompt.contains("不要因为句中出现“写”“创作”等字样就选办公文书专家"));
+    }
+
+    @Test
+    void activeAgentIsPreferredInNonPayrollInstruction() {
+        String prompt =
+                AgentRouter.instruction(
+                        List.of(POLICY_AGENT, POETRY_AGENT), false, false, POETRY_AGENT);
+        assertTrue(prompt.contains("当前活跃智能体（默认首选）：poetry-001 | 诗词专家"));
+        assertTrue(prompt.contains("默认保留当前活跃智能体"));
+    }
+
+    @Test
+    void instructionOmitsPreferenceWithoutActiveAgent() {
+        String prompt = AgentRouter.instruction(List.of(POLICY_AGENT), false, false);
+        assertFalse(prompt.contains("当前活跃智能体（默认首选）"));
+    }
+
+    @Test
+    void payrollInstructionIgnoresActiveAgentPreference() {
+        String plain = AgentRouter.instruction(List.of(POLICY_AGENT), true, true);
+        String withPreference =
+                AgentRouter.instruction(List.of(POLICY_AGENT), true, true, POETRY_AGENT);
+        assertEquals(plain, withPreference);
+    }
+
+    @Test
+    void decidePassesPreferredAgentToModel() {
+        AtomicReference<String> prompt = new AtomicReference<>();
+        AgentRouter router =
+                new AgentRouter(
+                        (instruction, question, key) -> {
+                            prompt.set(instruction);
+                            return "{\"target\":\"agent\",\"agent_id\":\"poetry-001\","
+                                    + "\"reason\":\"文学创作\",\"confidence\":0.92}";
+                        },
+                        true,
+                        0.55D);
+        RouteDecision decision =
+                router.decide(
+                        "写一首成长的诗",
+                        List.of(POLICY_AGENT, POETRY_AGENT),
+                        false,
+                        "1:1",
+                        false,
+                        POETRY_AGENT);
+        assertTrue(decision.routed());
+        assertEquals("poetry-001", decision.agent().id());
+        assertTrue(prompt.get().contains("当前活跃智能体（默认首选）：poetry-001"));
     }
 
     private static AgentRouter routerReturning(String json) {

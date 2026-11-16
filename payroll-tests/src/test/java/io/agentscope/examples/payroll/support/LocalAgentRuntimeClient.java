@@ -20,19 +20,22 @@ public class LocalAgentRuntimeClient extends AgentRuntimeClient {
     }
 
     @Override
-    public void submit(ChatSessionManager.TurnContext turn, String message) {
+    public void submit(
+            ChatSessionManager.TurnContext turn, String message, String attachmentText) {
         if (turn.chat() == null) {
             throw new IllegalStateException("测试替身需要在会话管理器上配置对话工厂");
         }
-        executor.execute(() -> execute(turn, message));
+        executor.execute(() -> execute(turn, message, attachmentText));
     }
 
-    private void execute(ChatSessionManager.TurnContext turn, String message) {
+    private void execute(
+            ChatSessionManager.TurnContext turn, String message, String attachmentText) {
         AtomicBoolean finished = new AtomicBoolean(false);
         try {
             turn.chat()
                     .stream(
                             message,
+                            attachmentText,
                             ChatSse.busOnly(
                                     manager,
                                     turn,

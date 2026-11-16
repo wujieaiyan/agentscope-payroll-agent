@@ -63,6 +63,28 @@ class KbNodeRoutingTest {
         assertTrue(legacy.citations().isEmpty());
     }
 
+    @Test
+    @DisplayName("自定义智能体默认不注册知识库管理/写工具")
+    void customAgentHasNoKbConfigTools() {
+        assertFalse(PayrollAgentFactory.kbConfigAgent(agent(List.of("诗词", "文学", "创作"))));
+        assertFalse(PayrollAgentFactory.kbConfigAgent(agent(List.of("KB"))));
+        assertFalse(
+                PayrollAgentFactory.kbConfigAgent(
+                        agent(List.of(), List.of(AgentDefinition.CAPABILITY_KB_READ))));
+        assertFalse(PayrollAgentFactory.kbConfigAgent(null));
+    }
+
+    @Test
+    @DisplayName("显式声明 kb:config 才获得知识库管理/写工具")
+    void declaredKbConfigEnablesManagement() {
+        assertTrue(
+                PayrollAgentFactory.kbConfigAgent(
+                        agent(List.of(), List.of(AgentDefinition.CAPABILITY_KB_CONFIG))));
+        assertFalse(
+                PayrollAgentFactory.kbSearchNode(
+                        "", agent(List.of(), List.of(AgentDefinition.CAPABILITY_KB_CONFIG))));
+    }
+
     private static AgentDefinition agent(List<String> tags) {
         return agent(tags, List.of());
     }

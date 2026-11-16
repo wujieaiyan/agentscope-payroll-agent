@@ -32,6 +32,14 @@ public interface PayrollChat extends AutoCloseable {
         listener.onDone(reply);
     }
 
+    /**
+     * 带附件的流式对话：attachmentText 已由发送侧拼装（多个附件分段），
+     * 默认实现忽略附件，便于测试替身保持兼容。
+     */
+    default void stream(String message, String attachmentText, ChatStreamListener listener) {
+        stream(message, listener);
+    }
+
     default String modelId() {
         return ModelEnv.modelId();
     }

@@ -28,6 +28,7 @@ public record AgentDefinition(
     public static final String STATUS_OFFLINE = "OFFLINE";
 
     public static final String CAPABILITY_KB_READ = "kb:read";
+    public static final String CAPABILITY_KB_CONFIG = "kb:config";
     public static final String CAPABILITY_CALC = "calc";
     public static final String CAPABILITY_VIDEO = "video";
 

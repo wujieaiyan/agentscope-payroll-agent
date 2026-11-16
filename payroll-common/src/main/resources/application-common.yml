@@ -64,6 +64,11 @@ payroll:
   chat:
     # 单个用户同时进行的流式生成数，超出返回 429。
     max-concurrent-per-user: "${PAYROLL_CHAT_MAX_CONCURRENT:2}"
+    # 对话附件：只支持 Word/Excel/图片，原文件与提取文本落在独立目录。
+    attachment:
+      dir: "${PAYROLL_CHAT_ATTACHMENT_DIR:./data/chat-uploads}"
+      max-files: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILES:5}"
+      max-file-bytes: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILE_BYTES:20971520}"
     # 同一会话跨实例互斥锁的过期时间；需大于单轮回答的最长耗时（SSE 超时 10 分钟）。
     session-lock-minutes: "${PAYROLL_CHAT_SESSION_LOCK_MINUTES:15}"
     # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。

@@ -525,14 +525,19 @@ public final class PayrollChatService implements PayrollChat {
 
     @Override
     public Reply chat(String message) {
-        return run(message, ChatStreamListener.NOOP);
+        return run(message, null, ChatStreamListener.NOOP);
     }
 
     @Override
     public void stream(String message, ChatStreamListener listener) {
+        stream(message, null, listener);
+    }
+
+    @Override
+    public void stream(String message, String attachmentText, ChatStreamListener listener) {
         Objects.requireNonNull(listener, "listener");
         listener.onStart(modelId());
-        Reply reply = run(message, listener);
+        Reply reply = run(message, attachmentText, listener);
         listener.onCitations(reply.citations());
         listener.onDone(reply);
     }
@@ -547,13 +552,14 @@ public final class PayrollChatService implements PayrollChat {
      *
      * <p>同一时间只允许一轮对话，避免共享的 HarnessAgent 上下文交错。
      */
-    private Reply run(String message, ChatStreamListener listener) {
+    private Reply run(String message, String attachmentText, ChatStreamListener listener) {
         if (message == null || message.isBlank()) {
             throw new PayrollException("请输入要咨询的问题");
         }
         ChatStreamListener events = listener == null ? ChatStreamListener.NOOP : listener;
         synchronized (lock) {
             String question = message.trim();
+            boolean hasAttachments = attachmentText != null && !attachmentText.isBlank();
             long startedAt = System.currentTimeMillis();
             KbSearchScope kbScope = kbSearchScope();
             boolean payroll = KbChatIntent.isPayroll(question);
@@ -682,8 +688,11 @@ public final class PayrollChatService implements PayrollChat {
                                     ? "内置三段流水线"
                                     : "单个智能体");
 
+            // 附件内容只进入执行输入，路由、缓存与历史仍按原始问题判断。
             String cacheScope =
-                    ChatRouting.AGENT.equals(plannedPath) && answerCache.enabled()
+                    ChatRouting.AGENT.equals(plannedPath)
+                                    && answerCache.enabled()
+                                    && !hasAttachments
                             ? "v1|"
                                     + persona
                                     + "|"
@@ -751,7 +760,9 @@ public final class PayrollChatService implements PayrollChat {
                 if (!memoryBlock.isBlank()) {
                     log.info("[向量] 已注入历史线索：{} 字", memoryBlock.length());
                 }
-                String calculatorInput = context.augment(question, memoryBlock);
+                String calculatorInput =
+                        context.augment(
+                                AttachmentContext.compose(question, attachmentText), memoryBlock);
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
                 // 规格 6.4：不再按“制度类”硬编码绕过团队；仅当当前智能体已具备 kb:read，
@@ -2310,6 +2321,14 @@ public final class PayrollChatService implements PayrollChat {
         }
         try {
             boolean teamOn = teamAvailable;
+            // 活跃智能体作为路由默认首选：避免小模型按单字把请求判给其他专家。
+            AgentDefinition activeHint = null;
+            try {
+                activeHint = activeAgentSupplier == null ? null : activeAgentSupplier.get();
+            } catch (RuntimeException e) {
+                log.debug("[智能体路由] 读取活跃智能体失败，按无偏好处理：{}", rootMessage(e));
+            }
+            AgentDefinition preferred = activeHint;
             Supplier<RouteDecision> llm =
                     () ->
                             router.decide(
@@ -2317,17 +2336,11 @@ public final class PayrollChatService implements PayrollChat {
                                     candidates,
                                     teamOn,
                                     sessionId + ":" + userId,
-                                    payroll);
+                                    payroll,
+                                    preferred);
             // 规格 7：薪酬轮次先过语义桶；off 档直接调用 LLM，与改造前完全一致。
             if (payroll && routeAdvisor.mode().semanticEnabled()) {
-                String personaBinding = "";
-                try {
-                    AgentDefinition bound =
-                            activeAgentSupplier == null ? null : activeAgentSupplier.get();
-                    personaBinding = bound == null ? "" : bound.id();
-                } catch (RuntimeException e) {
-                    log.debug("[薪酬语义] 读取角色绑定失败，按无绑定处理：{}", rootMessage(e));
-                }
+                String personaBinding = activeHint == null ? "" : activeHint.id();
                 return routeAdvisor
                         .decide(question, candidates, teamOn, "", personaBinding, llm)
                         .decision();

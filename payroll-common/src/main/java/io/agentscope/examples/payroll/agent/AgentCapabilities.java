@@ -13,6 +13,7 @@ import java.util.Map;
 public final class AgentCapabilities {
 
     public static final String KB_READ = AgentDefinition.CAPABILITY_KB_READ;
+    public static final String KB_CONFIG = AgentDefinition.CAPABILITY_KB_CONFIG;
     public static final String KB_ADMIN_ROLE = "KB_CONFIG";
 
     private AgentCapabilities() {
@@ -35,6 +36,14 @@ public final class AgentCapabilities {
             return true;
         }
         return supportsKbRead(agent);
+    }
+
+    /**
+     * 知识库管理/写工具只给显式声明 {@code kb:config} 的智能体：管理工具含 6 类写操作，
+     * 不做标签推断，避免自定义智能体（如诗词专家）意外获得知识库写入口，也避免工具集膨胀拖垮小模型。
+     */
+    public static boolean supportsKbConfig(AgentDefinition agent) {
+        return agent != null && agent.declares(KB_CONFIG);
     }
 
     /**

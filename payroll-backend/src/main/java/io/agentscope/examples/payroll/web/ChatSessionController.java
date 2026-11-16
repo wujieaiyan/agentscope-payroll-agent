@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.web;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.chat.ChatAttachmentService;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.ChatFeedback;
 import io.agentscope.examples.payroll.domain.ChatMessage;
@@ -79,6 +80,7 @@ public class ChatSessionController {
     private final Executor chatStreamExecutor;
     private final KbPermissionService kbPermissionService;
     private final KbSeriesStore kbSeriesStore;
+    private final ChatAttachmentService attachmentService;
     private final int maxKbSeries;
 
     public ChatSessionController(
@@ -91,6 +93,7 @@ public class ChatSessionController {
             AgentRuntimeClient runtimeClient,
             KbPermissionService kbPermissionService,
             KbSeriesStore kbSeriesStore,
+            ChatAttachmentService attachmentService,
             @Value("${payroll.kb.chat.max-series:3}") int maxKbSeries,
             @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
         this.manager = manager;
@@ -103,6 +106,7 @@ public class ChatSessionController {
         this.chatStreamExecutor = chatStreamExecutor;
         this.kbPermissionService = kbPermissionService;
         this.kbSeriesStore = kbSeriesStore;
+        this.attachmentService = attachmentService;
         this.maxKbSeries = Math.max(1, maxKbSeries);
     }
 
@@ -129,7 +133,9 @@ public class ChatSessionController {
 
     @DeleteMapping("/{sessionId}")
     public ApiResponse delete(@PathVariable long sessionId, HttpServletRequest request) {
-        manager.delete(userId(request), sessionId);
+        long userId = userId(request);
+        manager.delete(userId, sessionId);
+        attachmentService.deleteSessionFiles(sessionId);
         return ApiResponse.ok(Map.of("deleted", true));
     }
 
@@ -285,6 +291,7 @@ public class ChatSessionController {
             HttpServletRequest request) {
         long userId = userId(request);
         String message = requireMessage(body == null ? null : body.message());
+        List<Long> attachmentIds = attachmentIds(body);
         requireRuntime();
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
@@ -292,9 +299,12 @@ public class ChatSessionController {
         ChatSessionManager.TurnContext turn = null;
         try {
             SemanticCacheContext.set(cacheScope(request));
+            ChatAttachmentService.PreparedAttachments attachments =
+                    attachmentService.prepare(userId, sessionId, attachmentIds);
             turn = manager.beginTurn(userId, sessionId, message);
+            attachmentService.bind(userId, sessionId, attachments.ids(), turn.userMessageId());
             try {
-                runtimeClient.submit(turn, message);
+                runtimeClient.submit(turn, message, attachments.text());
             } catch (RuntimeException e) {
                 if (manager.turnEvents(userId, sessionId, turn.turnId(), 0L, 1).isEmpty()) {
                     manager.failTurn(turn, rootMessage(e));
@@ -370,7 +380,9 @@ public class ChatSessionController {
 
     @PostMapping("/{sessionId}/reset")
     public ApiResponse reset(@PathVariable long sessionId, HttpServletRequest request) {
-        manager.reset(userId(request), sessionId);
+        long userId = userId(request);
+        manager.reset(userId, sessionId);
+        attachmentService.deleteSessionFiles(sessionId);
         return ApiResponse.ok(Map.of("reset", true));
     }
 
@@ -383,8 +395,10 @@ public class ChatSessionController {
         ChatSse.Channel channel = ChatSse.attach(emitter);
         long userId = userId(request);
         String message;
+        List<Long> attachmentIds;
         try {
             message = requireMessage(body == null ? null : body.message());
+            attachmentIds = attachmentIds(body);
         } catch (PayrollException e) {
             channel.send("error", ChatSse.payload("message", e.getMessage()));
             channel.complete();
@@ -396,7 +410,14 @@ public class ChatSessionController {
         try {
             String cacheScope = cacheScope(request);
             chatStreamExecutor.execute(
-                    () -> stream(userId, sessionId, message, cacheScope, channel));
+                    () ->
+                            stream(
+                                    userId,
+                                    sessionId,
+                                    message,
+                                    attachmentIds,
+                                    cacheScope,
+                                    channel));
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;
@@ -418,13 +439,17 @@ public class ChatSessionController {
             long userId,
             long sessionId,
             String message,
+            List<Long> attachmentIds,
             String cacheScope,
             ChatSse.Channel channel) {
         ChatSessionManager.TurnContext turn = null;
         AtomicBoolean finished = new AtomicBoolean(false);
         try {
             SemanticCacheContext.set(cacheScope);
+            ChatAttachmentService.PreparedAttachments attachments =
+                    attachmentService.prepare(userId, sessionId, attachmentIds);
             turn = manager.beginTurn(userId, sessionId, message);
+            attachmentService.bind(userId, sessionId, attachments.ids(), turn.userMessageId());
             channel.send(
                     "turn",
                     ChatSse.payload(
@@ -441,7 +466,7 @@ public class ChatSessionController {
                 return;
             }
             try {
-                runtimeClient.submit(turn, message);
+                runtimeClient.submit(turn, message, attachments.text());
                 finished.set(true);
                 log.info(
                         "[运行期] 轮次已提交：sessionId={}，turnId={}",
@@ -765,6 +790,21 @@ public class ChatSessionController {
         return value;
     }
 
+    /** 附件 ID 允许为空；只接受正数，具体归属由附件服务复核。 */
+    private static List<Long> attachmentIds(ChatMessageRequest body) {
+        if (body == null || body.attachmentIds() == null || body.attachmentIds().isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        for (Long id : body.attachmentIds()) {
+            if (id == null || id <= 0) {
+                throw new PayrollException("附件 ID 不合法");
+            }
+            ids.add(id);
+        }
+        return List.copyOf(ids);
+    }
+
     private static String rootMessage(Throwable error) {
         Throwable current = error;
         while (current.getCause() != null && current.getCause() != current) {
@@ -776,7 +816,9 @@ public class ChatSessionController {
     public record SessionRequest(String title) {
     }
 
-    public record ChatMessageRequest(String message) {
+    public record ChatMessageRequest(
+            String message,
+            @JsonProperty("attachment_ids") List<Long> attachmentIds) {
     }
 
     public record ChatFeedbackRequest(String rating, List<String> tags, String comment) {

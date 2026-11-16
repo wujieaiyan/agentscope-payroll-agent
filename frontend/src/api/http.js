@@ -50,6 +50,25 @@ export async function upload(path, file) {
     body: file,
     credentials: 'same-origin',
   });
+  return unwrap(response, '导入失败');
+}
+
+/** multipart 上传：对话附件接口接收 files 多文件字段。 */
+export async function uploadForm(path, formData) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    body: formData,
+    credentials: 'same-origin',
+  });
+  return unwrap(response, '上传失败');
+}
+
+async function unwrap(response, fallback) {
+  if (response.status === 401) {
+    window.location.href = '/login';
+    throw new ApiError('未登录或会话已过期', 401);
+  }
   const text = await response.text();
   let payload = null;
   if (text) {
@@ -60,7 +79,7 @@ export async function upload(path, file) {
     }
   }
   if (!response.ok || (payload && payload.status === 'ERROR')) {
-    throw new ApiError((payload && payload.message) || `导入失败：HTTP ${response.status}`, response.status);
+    throw new ApiError((payload && payload.message) || `${fallback}：HTTP ${response.status}`, response.status);
   }
   return payload ? payload.data : null;
 }

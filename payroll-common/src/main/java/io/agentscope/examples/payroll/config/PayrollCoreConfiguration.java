@@ -6,6 +6,7 @@ import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ApprovalStore;
 import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.H2ChatFeedbackStore;
+import io.agentscope.examples.payroll.db.ChatAttachmentStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2ChatTurnStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
@@ -319,6 +320,11 @@ public class PayrollCoreConfiguration {
     @Bean
     public H2ChatStore chatStore(PayrollDatabase database) {
         return new H2ChatStore(database);
+    }
+
+    @Bean
+    public ChatAttachmentStore chatAttachmentStore(PayrollDatabase database) {
+        return new ChatAttachmentStore(database);
     }
 
     @Bean

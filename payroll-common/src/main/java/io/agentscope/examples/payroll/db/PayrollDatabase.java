@@ -188,6 +188,30 @@ public final class PayrollDatabase {
                 ON chat_messages (turn_id)
             """,
             """
+            CREATE TABLE IF NOT EXISTS chat_attachments (
+                attachment_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                session_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                message_id BIGINT,
+                name VARCHAR(255) NOT NULL,
+                ext VARCHAR(16) NOT NULL,
+                size_bytes BIGINT NOT NULL,
+                storage_key VARCHAR(255) NOT NULL,
+                text_chars INT NOT NULL DEFAULT 0,
+                status VARCHAR(16) NOT NULL,
+                error VARCHAR(500),
+                created_at TIMESTAMP NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_attachments_message
+                ON chat_attachments (session_id, message_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_attachments_user
+                ON chat_attachments (user_id, created_at)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS chat_tool_traces (
                 trace_id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 message_id BIGINT NOT NULL,

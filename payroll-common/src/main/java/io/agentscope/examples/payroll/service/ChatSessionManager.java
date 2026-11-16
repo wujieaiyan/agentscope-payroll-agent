@@ -320,6 +320,11 @@ public final class ChatSessionManager implements AutoCloseable {
         return store.messages(sessionId);
     }
 
+    /** 校验会话归属并返回会话；附件的上传与删除都先走这一步。 */
+    public ChatSession session(long userId, long sessionId) {
+        return store.requireOwned(sessionId, userId);
+    }
+
     public List<Long> kbSeriesIds(long userId, long sessionId) {
         store.requireOwned(sessionId, userId);
         return store.kbSeriesIds(sessionId);

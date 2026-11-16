@@ -147,7 +147,13 @@ public class InternalTurnController {
                 request.turnId(),
                 request.sessionId(),
                 request.ownerNode());
-        chatStreamExecutor.execute(() -> execute(turn.get(), request.message(), request.cacheScope()));
+        chatStreamExecutor.execute(
+                () ->
+                        execute(
+                                turn.get(),
+                                request.message(),
+                                request.attachmentText(),
+                                request.cacheScope()));
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(Map.of("accepted", true, "turn_id", request.turnId()));
     }
@@ -341,13 +347,17 @@ public class InternalTurnController {
     }
 
     private void execute(
-            ChatSessionManager.TurnContext turn, String message, String cacheScope) {
+            ChatSessionManager.TurnContext turn,
+            String message,
+            String attachmentText,
+            String cacheScope) {
         AtomicBoolean finished = new AtomicBoolean(false);
         try {
             SemanticCacheContext.set(cacheScope);
             turn.chat()
                     .stream(
                             message,
+                            attachmentText,
                             ChatSse.busOnly(
                                     manager,
                                     turn,
@@ -408,6 +418,7 @@ public class InternalTurnController {
             @JsonProperty("message") String message,
             @JsonProperty("fencing") long fencing,
             @JsonProperty("owner_node") String ownerNode,
+            @JsonProperty("attachment_text") String attachmentText,
             @JsonProperty("cache_scope") String cacheScope) {
     }
 

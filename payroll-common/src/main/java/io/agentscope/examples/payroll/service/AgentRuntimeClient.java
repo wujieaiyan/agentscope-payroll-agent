@@ -55,6 +55,11 @@ public class AgentRuntimeClient {
 
     /** 提交轮次；任一 runtime 接受即返回，全部失败时抛出异常。 */
     public void submit(ChatSessionManager.TurnContext turn, String message) {
+        submit(turn, message, null);
+    }
+
+    /** 带附件上下文的提交：附件文本只在运行期拼入模型输入，不参与路由与缓存。 */
+    public void submit(ChatSessionManager.TurnContext turn, String message, String attachmentText) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("turn_id", turn.turnId());
         body.put("session_id", turn.sessionId());
@@ -63,6 +68,9 @@ public class AgentRuntimeClient {
         body.put("fencing", turn.fencingToken());
         body.put("owner_node", turn.ownerNode());
         body.put("cache_scope", SemanticCacheContext.scope());
+        if (attachmentText != null && !attachmentText.isBlank()) {
+            body.put("attachment_text", attachmentText);
+        }
         post("/internal/turns", JsonSupport.toJson(body), false);
     }
 

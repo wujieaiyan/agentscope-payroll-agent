@@ -778,6 +778,85 @@ table.table tbody tr:hover { background: var(--primary-tint); }
   gap: 8px;
 }
 .kb-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.composer.dragging { outline: 2px dashed var(--primary); outline-offset: -6px; background: #f7fbff; }
+.attachment-input { display: none; }
+.attach-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attach-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.attachment-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  background: #f7f8fa;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.attachment-chip:hover { border-color: var(--primary); }
+.attachment-chip.pending { cursor: default; }
+.attachment-chip.pending:hover { border-color: var(--border); }
+.attachment-chip.parsing { color: var(--text-soft); }
+.attachment-chip.failed { border-color: #ffb8ad; background: #fff9f8; color: #b23c26; }
+.attachment-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 11px;
+}
+.attachment-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-meta { flex: none; font-size: 11px; color: var(--faint); }
+.attachment-status { font-size: 11px; color: var(--text-soft); }
+.attachment-chip.failed .attachment-status { color: #c0392b; }
+.attachment-action {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--primary);
+  cursor: pointer;
+}
+.attachment-action.remove { color: var(--faint); }
+.attachment-action:disabled { opacity: 0.5; cursor: not-allowed; }
+.attachment-uploading { font-size: 11.5px; color: var(--faint); }
+.bubble-attachments { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin-top: 6px; }
+.attachment-preview {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .kb-options { display: flex; flex-direction: column; gap: 8px; }
 .kb-option {
   display: flex;

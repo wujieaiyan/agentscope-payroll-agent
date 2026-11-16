@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.imageio.ImageIO;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -47,6 +48,10 @@ public class KbParserService {
     private static final int MIN_PAGE_TEXT_CHARS = 10;
 
     public static final List<String> SUPPORTED = List.of("pdf", "docx", "xlsx", "xls", "md", "markdown");
+
+    /** 对话附件支持的格式：Word / Excel / 图片（图片走 Tesseract OCR）。 */
+    public static final List<String> CHAT_SUPPORTED =
+            List.of("docx", "xlsx", "xls", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff");
 
     /** 解析进度回调，仅扫描页 OCR 阶段触发；抛出的异常会原样向上传递。 */
     @FunctionalInterface
@@ -91,6 +96,48 @@ public class KbParserService {
             log.warn("[知识库] 解析失败：file={}，原因={}", file, e.getMessage());
             throw new PayrollException("解析文档失败：" + e.getMessage());
         }
+    }
+
+    /** 对话附件解析：只接受 Word/Excel/图片，返回纯文本；失败原因直接面向用户。 */
+    public String parseChatAttachment(Path file, String ext) {
+        String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
+        try {
+            return switch (normalized) {
+                case "docx" -> parseDocx(file).text();
+                case "xlsx", "xls" -> parseExcel(file).text();
+                case "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff" -> parseImage(file);
+                default -> throw new PayrollException("暂不支持该附件格式，请上传 docx/xlsx 或图片");
+            };
+        } catch (PayrollException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new PayrollException("附件解析被中断，请重试");
+        } catch (IOException e) {
+            throw new PayrollException("解析附件失败：" + e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("[附件] 解析失败：file={}，原因={}", file, e.getMessage());
+            throw new PayrollException("解析附件失败：" + e.getMessage());
+        }
+    }
+
+    private String parseImage(Path file) throws IOException, InterruptedException {
+        if (!ocrService.enabled() || !ocrService.available()) {
+            throw new PayrollException("图片识别不可用：未找到 OCR 引擎 tesseract");
+        }
+        BufferedImage image = ImageIO.read(file.toFile());
+        if (image == null) {
+            throw new PayrollException("无法解码图片，请上传 PNG/JPG 等常见格式");
+        }
+        ParseConfig config = KbConfigModels.defaultParse();
+        OcrConfig ocr = config.ocr == null ? new OcrConfig() : config.ocr;
+        String text =
+                ocrService.recognize(
+                        image, ocrService.resolveLanguages(ocr.languages), ocr.minConfidence);
+        if (text == null || text.isBlank()) {
+            throw new PayrollException("图片未识别出文字，请上传更清晰的截图");
+        }
+        return text;
     }
 
     private KbParsedDocument parsePdf(Path file, ParseConfig config, PageListener listener)

@@ -2,11 +2,13 @@
  * 对话事件流：优先 POST /stream，断线后用轮次事件补偿续流。
  * 事件字段与后端 ChatSse 保持一致（snake_case）。
  */
-export async function streamChat(sessionId, message, onEvent, signal) {
+export async function streamChat(sessionId, message, onEvent, signal, attachmentIds = []) {
+  const body = { message };
+  if (attachmentIds && attachmentIds.length) body.attachment_ids = attachmentIds;
   const response = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
     signal,
   });
   await consume(response, onEvent);

@@ -57,6 +57,16 @@ public final class AgentRouter {
               {"target":"agent|team|pipeline","agent_id":"候选 id 或空串","need_kb":false,"kb_kind":"none","reason":"一句话中文理由","confidence":0.0}
             """;
 
+    /** 非薪酬问题的创作类判定：小模型容易把带“写”字的请求一律当办公文书。 */
+    private static final String CREATIVE_SECTION =
+            """
+
+            创作类判定（仅非薪酬问题）：
+            - 诗词、歌词、小说、散文、剧本等文学创作，选名称、描述或 tags 最贴近该领域的创作类智能体；
+            - 只有通知、报告、会议纪要、邮件等办公文书才选办公文书类智能体；
+              不要因为句中出现“写”“创作”等字样就选办公文书专家。
+            """;
+
     /** 模型调用抽象，便于单测注入固定输出。 */
     @FunctionalInterface
     public interface RouteModel {
@@ -127,6 +137,20 @@ public final class AgentRouter {
             boolean teamAvailable,
             String sessionKey,
             boolean payroll) {
+        return decide(question, candidates, teamAvailable, sessionKey, payroll, null);
+    }
+
+    /**
+     * @param preferred 管理员配置的当前活跃智能体，作为默认首选写进提示词；
+     *     只有问题明显属于其他候选的专长时才允许模型切换，避免小模型按单字误判换人。
+     */
+    public RouteDecision decide(
+            String question,
+            List<AgentDefinition> candidates,
+            boolean teamAvailable,
+            String sessionKey,
+            boolean payroll,
+            AgentDefinition preferred) {
         if (!enabled) {
             return null;
         }
@@ -136,7 +160,9 @@ public final class AgentRouter {
         try {
             raw =
                     model.complete(
-                            instruction(agents, teamAvailable, payroll), question, sessionKey);
+                            instruction(agents, teamAvailable, payroll, preferred),
+                            question,
+                            sessionKey);
         } catch (RuntimeException e) {
             return logFallback("轻量模型调用失败：" + rootMessage(e), agents, teamAvailable, startedAt);
         }
@@ -179,8 +205,15 @@ public final class AgentRouter {
         if (node == null || !node.isObject()) {
             return RouteDecision.fallback("路由输出不是 JSON 对象");
         }
-        String target = text(node, "target").toLowerCase(Locale.ROOT);
-        String agentId = text(node, "agent_id");
+        String rawTarget = text(node, "target").toLowerCase(Locale.ROOT);
+        String rawAgentId = text(node, "agent_id");
+        // 小模型偶发把 agent_id 填进 target；能精确命中候选 id 时按单智能体处理。
+        boolean idInTarget =
+                rawAgentId.isBlank()
+                        && !isTarget(rawTarget)
+                        && agents.stream().anyMatch(item -> item.id().equals(rawTarget));
+        String target = idInTarget ? RouteDecision.TARGET_AGENT : rawTarget;
+        String agentId = idInTarget ? rawTarget : rawAgentId;
         String reason = limit(text(node, "reason"), REASON_LIMIT);
         double confidence = node.path("confidence").asDouble(0D);
         if (confidence > 1D) {
@@ -277,9 +310,18 @@ public final class AgentRouter {
 
     static String instruction(
             List<AgentDefinition> agents, boolean teamAvailable, boolean payroll) {
+        return instruction(agents, teamAvailable, payroll, null);
+    }
+
+    static String instruction(
+            List<AgentDefinition> agents,
+            boolean teamAvailable,
+            boolean payroll,
+            AgentDefinition preferred) {
         StringBuilder text = new StringBuilder(INSTRUCTION);
         if (!payroll) {
             text.append(KB_SECTION);
+            text.append(CREATIVE_SECTION);
         }
         text.append("\n候选智能体：\n");
         if (agents.isEmpty()) {
@@ -298,7 +340,27 @@ public final class AgentRouter {
             }
         }
         text.append("团队可用：").append(teamAvailable ? "是" : "否").append('\n');
+        // 薪酬问题必须优先走核算链路，不注入活跃智能体偏好，保持 prompt 与改造前一致。
+        if (!payroll && preferred != null) {
+            text.append("当前活跃智能体（默认首选）：")
+                    .append(preferred.id())
+                    .append(" | ")
+                    .append(nullSafe(preferred.name()))
+                    .append(" | ")
+                    .append(limit(nullSafe(preferred.description()), DESCRIPTION_LIMIT))
+                    .append(" | tags=")
+                    .append(preferred.tags())
+                    .append('\n');
+            text.append("默认保留当前活跃智能体；只有用户问题明显属于其他候选的专长")
+                    .append("（工资核算、政策制度、数据查询、知识库管理等）时才切换。\n");
+        }
         return text.toString();
+    }
+
+    private static boolean isTarget(String value) {
+        return RouteDecision.TARGET_AGENT.equals(value)
+                || RouteDecision.TARGET_TEAM.equals(value)
+                || RouteDecision.TARGET_PIPELINE.equals(value);
     }
 
     private static String text(JsonNode node, String field) {

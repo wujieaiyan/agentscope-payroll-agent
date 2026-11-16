@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { api } from '../api/http';
+import { api, uploadForm } from '../api/http';
 import { resumeTurn, streamChat } from '../api/sse';
 import { clearActiveTurn, loadActiveTurn, saveActiveTurn } from '../stores/activeTurn';
 import { createTabSync } from '../stores/tabSync';
@@ -31,6 +31,13 @@ const kbOptions = ref([]);
 const kbSelection = ref([]);
 const sourceListModal = ref(null);
 const citationModal = ref(null);
+const attachments = ref([]);
+const attachmentInput = ref(null);
+const attachmentBusy = ref(false);
+const draggingFiles = ref(false);
+const attachmentPreview = ref(null);
+const ATTACHMENT_ACCEPT = '.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
+const ATTACHMENT_EXT = ['docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
 
 let controller = null;
 let turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
@@ -52,7 +59,10 @@ const TYPE_FLUSH_TIMEOUT_MS = 15000;
 let typeTimer = null;
 
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value) || null);
-const canSend = computed(() => !busy.value && draft.value.trim().length > 0);
+const attachmentsReady = computed(() => attachments.value.every((item) => item.status === 'READY'));
+const canSend = computed(
+  () => !busy.value && !attachmentBusy.value && attachmentsReady.value && draft.value.trim().length > 0
+);
 
 /** 流式阶段只统计已完成的 skill_read 次数，用于提示本轮读了多少个技能文件。 */
 const streamingFileCount = computed(() => {
@@ -116,6 +126,160 @@ function formatBytes(value) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function attachmentExtOf(name) {
+  const dot = String(name || '').lastIndexOf('.');
+  return dot < 0 ? '' : String(name).slice(dot + 1).toLowerCase();
+}
+
+function attachmentIcon(name) {
+  const ext = attachmentExtOf(name);
+  if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'].includes(ext)) return '图';
+  if (['xlsx', 'xls'].includes(ext)) return '表';
+  if (ext === 'docx') return '文';
+  return '件';
+}
+
+function attachmentStatusText(item) {
+  if (item.status === 'PARSING') return '解析中…';
+  if (item.status === 'FAILED') return item.error || '解析失败';
+  return item.text_chars ? `已识别 ${item.text_chars} 字` : '已就绪';
+}
+
+async function loadAttachments() {
+  if (!activeId.value) {
+    attachments.value = [];
+    return;
+  }
+  try {
+    attachments.value = (await api(`/api/chat/sessions/${activeId.value}/attachments`)) || [];
+  } catch (error) {
+    attachments.value = [];
+  }
+}
+
+function pickAttachments() {
+  if (!activeId.value) {
+    toast('请先新建会话', 'warning');
+    return;
+  }
+  attachmentInput.value?.click();
+}
+
+async function onAttachmentPicked(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = '';
+  await addFiles(files);
+}
+
+async function addFiles(files) {
+  if (!files.length || attachmentBusy.value) return;
+  if (!activeId.value) {
+    toast('请先新建会话', 'warning');
+    return;
+  }
+  const accepted = [];
+  for (const file of files) {
+    const ext = attachmentExtOf(file.name);
+    if (!ATTACHMENT_EXT.includes(ext)) {
+      toast(`暂不支持「${file.name}」，请上传 docx/xlsx 或图片`, 'warning');
+      continue;
+    }
+    accepted.push(file);
+  }
+  if (!accepted.length) return;
+  attachmentBusy.value = true;
+  const form = new FormData();
+  accepted.forEach((file) => form.append('files', file));
+  try {
+    const uploaded =
+      (await uploadForm(`/api/chat/sessions/${activeId.value}/attachments`, form)) || [];
+    attachments.value = [...attachments.value, ...uploaded];
+    const failed = uploaded.filter((item) => item.status === 'FAILED');
+    if (failed.length) {
+      toast(failed.map((item) => `${item.name}：${item.error || '解析失败'}`).join('；'), 'error');
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    attachmentBusy.value = false;
+    await loadAttachments();
+  }
+}
+
+async function removeAttachment(item) {
+  if (attachmentBusy.value) return;
+  try {
+    await api(`/api/chat/sessions/${activeId.value}/attachments/${item.id}`, {
+      method: 'DELETE',
+    });
+    attachments.value = attachments.value.filter((entry) => entry.id !== item.id);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function openAttachmentPreview(item) {
+  if (item.status !== 'READY') return;
+  attachmentPreview.value = { name: item.name, text: '', truncated: false, chars: 0, loading: true };
+  try {
+    const preview = await api(
+      `/api/chat/sessions/${activeId.value}/attachments/${item.id}/text`
+    );
+    attachmentPreview.value = {
+      name: item.name,
+      text: preview?.text || '',
+      truncated: Boolean(preview?.truncated),
+      chars: preview?.chars || 0,
+      loading: false,
+    };
+  } catch (error) {
+    attachmentPreview.value = null;
+    toast(error.message, 'error');
+  }
+}
+
+function downloadAttachment(item) {
+  if (!activeId.value || !item.id) return;
+  const link = document.createElement('a');
+  link.href = `/api/chat/sessions/${activeId.value}/attachments/${item.id}/file`;
+  link.download = item.name || 'attachment';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function onComposerPaste(event) {
+  if (busy.value) return;
+  const files = Array.from(event.clipboardData?.files || []);
+  if (!files.length) return;
+  event.preventDefault();
+  addFiles(files);
+}
+
+function onComposerDragOver(event) {
+  if (!event.dataTransfer?.types?.includes('Files')) return;
+  event.preventDefault();
+  draggingFiles.value = true;
+}
+
+function onComposerDragLeave(event) {
+  if (event.currentTarget?.contains(event.relatedTarget)) return;
+  draggingFiles.value = false;
+}
+
+function onComposerDrop(event) {
+  draggingFiles.value = false;
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length || busy.value) return;
+  event.preventDefault();
+  addFiles(files);
+}
+
+function clearAttachments() {
+  attachments.value = [];
+  attachmentPreview.value = null;
 }
 
 function roleLabel(role) {
@@ -368,6 +532,16 @@ function exportMarkdown() {
     }
     if (message.tools?.length) lines.push('', `> 工具调用 ${message.tools.length} 次`);
     lines.push('', message.content || '（空）', '');
+    if (message.attachments?.length) {
+      lines.push('### 附件');
+      message.attachments.forEach((item) => {
+        const meta = [item.ext || attachmentExtOf(item.name), formatBytes(item.size_bytes)]
+          .filter(Boolean)
+          .join('，');
+        lines.push(`- ${item.name}${meta ? `（${meta}）` : ''}`);
+      });
+      lines.push('');
+    }
     if (message.role === 'ASSISTANT' && message.citations?.length) {
       lines.push('### 参考来源');
       message.citations.forEach((cite) => {
@@ -559,6 +733,7 @@ async function selectSession(id) {
   gapNotice.value = '';
   await loadKnowledge(id);
   await loadMessages();
+  await loadAttachments();
   // 刷新或切回会话时接上仍在执行的轮次
   await resumeActiveTurn(id, { rebuild: true });
 }
@@ -575,6 +750,7 @@ async function createSession() {
     gapNotice.value = '';
     kbBound.value = [];
     kbMode.value = 'ALL';
+    clearAttachments();
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -616,6 +792,7 @@ async function deleteSession(session) {
       messages.value = [];
       kbBound.value = [];
       kbMode.value = 'ALL';
+      clearAttachments();
       if (next) await selectSession(next);
     }
   } catch (error) {
@@ -633,6 +810,7 @@ async function resetSession() {
     streaming.value = null;
     gapNotice.value = '';
     clearTurnMarker(activeId.value);
+    clearAttachments();
     await loadMessages();
     toast('会话已重置', 'success');
   } catch (error) {
@@ -695,6 +873,7 @@ function newStreamingState() {
     error: '',
     finished: false,
     cancelled: false,
+    paused: false,
     recovering: false,
     resumable: false,
     gap: false,
@@ -971,6 +1150,7 @@ function applyMirrorState(sessionId, turnId, snapshot) {
     stopTyping();
     Object.assign(streaming.value, snapshot.state, {
       pendingText: '',
+      paused: false,
       recovering: false,
       resumable: false,
     });
@@ -1061,6 +1241,7 @@ async function resumeLoop(sessionId, fromSeq) {
     return;
   }
   streaming.value.recovering = true;
+  streaming.value.paused = false;
   streaming.value.error = '';
   streaming.value.resumable = false;
   toast('连接中断，正在尝试续流…', 'warning');
@@ -1087,9 +1268,8 @@ async function resumeLoop(sessionId, fromSeq) {
         streamFailed(turn.error_message || '本轮回答已中断');
         return;
       }
-      if (turn && Number.isFinite(turn.last_seq)) {
-        cursor = Math.max(cursor, turn.last_seq);
-      }
+      // chat_turns.last_seq 只随结构性事件推进，比真实文本游标更粗；
+      // 用它抬高游标会跳过中间 text 事件，因此始终以客户端已收序号续传。
       controller = new AbortController();
       await resumeTurn(sessionId, turnId, cursor, streamHandler(sessionId), controller.signal);
       if (streamInterrupted()) return;
@@ -1128,7 +1308,8 @@ async function findActiveTurn(sessionId) {
   try {
     const turn = await api(`/api/chat/sessions/${sessionId}/turns/${stored.turnId}`);
     if (turn && turn.status === 'RUNNING') {
-      return { ...stored, lastSeq: Math.max(stored.lastSeq, Number(turn.last_seq) || 0) };
+      // 本地标记记录的是精确游标，服务端 last_seq 只到结构性事件，不能取大。
+      return { ...stored };
     }
     if (turn && turn.status === 'SUCCEEDED') return { ...stored, done: true };
     clearTurnMarker(sessionId, stored.turnId);
@@ -1165,6 +1346,7 @@ async function resumeActiveTurn(sessionId, { rebuild = false } = {}) {
       streaming.value = newStreamingState();
     }
     streaming.value.recovering = true;
+    streaming.value.paused = false;
     streaming.value.resumable = false;
     streaming.value.error = '';
     busy.value = true;
@@ -1232,6 +1414,7 @@ async function retryResume() {
   if (!state || state.finished || state.cancelled || !turnState.turnId || busy.value) return;
   state.error = '';
   state.resumable = false;
+  state.paused = false;
   busy.value = true;
   let mirrored = false;
   try {
@@ -1263,9 +1446,17 @@ function onVisibilityChange() {
 async function send() {
   const text = draft.value.trim();
   if (!text || busy.value) return;
+  if (attachmentBusy.value) {
+    toast('附件还在上传，请稍候', 'warning');
+    return;
+  }
+  if (!attachmentsReady.value) {
+    toast('有附件未解析成功，请移除或重新上传', 'warning');
+    return;
+  }
   const pending = streaming.value;
   if (pending && pending.resumable && !pending.finished && !pending.cancelled) {
-    toast('上一轮回答仍未完成，请先重试续传或放弃本轮', 'warning');
+    toast('上一轮已暂停，请先点“继续生成”续传或放弃本轮', 'warning');
     return;
   }
   if (!activeId.value) {
@@ -1281,9 +1472,14 @@ async function send() {
       return;
     }
   }
+  const sendingAttachments = attachments.value
+    .filter((item) => item.status === 'READY')
+    .map((item) => ({ ...item }));
+  const attachmentIds = sendingAttachments.map((item) => item.id);
   tabSync?.claim(sessionId, null);
   busy.value = true;
   draft.value = '';
+  attachments.value = [];
   turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
   stopTyping();
   streaming.value = newStreamingState();
@@ -1293,13 +1489,14 @@ async function send() {
     role: 'USER',
     content: text,
     tools: [],
+    attachments: sendingAttachments,
     created_at: new Date().toISOString(),
   });
   scrollBottom(true);
 
   controller = new AbortController();
   try {
-    await streamChat(sessionId, text, streamHandler(sessionId), controller.signal);
+    await streamChat(sessionId, text, streamHandler(sessionId), controller.signal, attachmentIds);
     const state = streaming.value;
     // 服务端正常收流但轮次仍未结束（如网关超时）：继续续传而不是当作完成
     if (state && !state.finished && !state.cancelled && !state.error && turnState.turnId) {
@@ -1317,6 +1514,7 @@ async function send() {
   } finally {
     controller = null;
     await finalizeStream();
+    await loadAttachments();
   }
 }
 
@@ -1330,30 +1528,32 @@ async function stop() {
   const state = streaming.value;
   if (state && state.finished) {
     // 回答已经完成，只是打印机还在吐字：立即收尾，不再向服务端发取消。
-    stopTyping();
-    state.pendingText = '';
+    flushTyping();
     return;
   }
-  if (state) {
-    state.cancelled = true;
-    state.resumable = false;
-    state.recovering = false;
-    state.pendingText = '';
-  }
-  stopTyping();
-  clearTurnMarker(activeId.value, turnId);
   if (!turnId) {
+    // 还没有拿到轮次 id，无法续传：按本地停止处理。
+    flushTyping();
+    if (state) {
+      state.cancelled = true;
+      state.resumable = false;
+      state.recovering = false;
+    }
     busy.value = false;
     return;
   }
-  try {
-    await api(`/api/chat/sessions/${activeId.value}/turns/${turnId}/cancel`, {
-      method: 'POST',
-    });
-    toast('已请求取消本轮回答', 'warning');
-  } catch (error) {
-    toast(error.message, 'error');
+  // 暂停而非取消：只断开本页事件流，服务端轮次继续执行；保留游标供“继续生成”续传。
+  // 已收到的文本立即吐完，保证气泡内容与游标一致，续传不会重发也不会漏段。
+  flushTyping();
+  if (state) {
+    state.paused = true;
+    state.resumable = true;
+    state.recovering = false;
+    state.error = '';
   }
+  persistTurn(true);
+  busy.value = false;
+  toast('已暂停本轮输出，可点“继续生成”续传', 'warning');
 }
 
 /** 放弃无法续传的轮次：清掉本地标记，并尽力通知服务端取消。 */
@@ -1647,7 +1847,7 @@ onBeforeUnmount(() => {
             {{ routeBusy ? '路由中…' : '路由预览' }}
           </button>
           <button class="ghost sm" :disabled="busy || !activeId" @click="resetSession">重置</button>
-          <button v-if="busy" class="danger sm" @click="stop">停止</button>
+          <button v-if="busy" class="danger sm" @click="stop">暂停</button>
         </div>
       </header>
 
@@ -1701,6 +1901,25 @@ onBeforeUnmount(() => {
                     @click="focusCitation(message.citations, message.id, part.index)"
                   >[{{ part.index }}]</button>
                 </template>
+              </div>
+
+              <div
+                v-if="message.role === 'USER' && message.attachments?.length"
+                class="bubble-attachments"
+              >
+                <button
+                  v-for="item in message.attachments"
+                  :key="item.id"
+                  type="button"
+                  class="attachment-chip"
+                  :class="{ failed: item.status === 'FAILED' }"
+                  :title="`${item.name} · ${attachmentStatusText(item)}（点击下载原文件）`"
+                  @click="downloadAttachment(item)"
+                >
+                  <span class="attachment-icon">{{ attachmentIcon(item.name) }}</span>
+                  <span class="attachment-name">{{ item.name }}</span>
+                  <span class="attachment-meta">{{ formatBytes(item.size_bytes) }}</span>
+                </button>
               </div>
 
               <button
@@ -2033,6 +2252,7 @@ onBeforeUnmount(() => {
             <div class="msg-meta">
               <span>协同智能体</span>
               <span v-if="streaming.recovering">正在恢复连接…</span>
+              <span v-else-if="streaming.paused">已暂停</span>
               <span v-else-if="streaming.gap">部分过程已跳过</span>
               <span v-else-if="streaming.text">正在输出</span>
               <span v-else-if="busy">正在思考</span>
@@ -2054,7 +2274,7 @@ onBeforeUnmount(() => {
                   >[{{ part.index }}]</button>
                 </template>
               </template>
-              <span v-else-if="!streaming.error && !streaming.gap" class="typing"><i></i><i></i><i></i></span>
+              <span v-else-if="!streaming.error && !streaming.gap && !streaming.paused" class="typing"><i></i><i></i><i></i></span>
               <template v-if="streaming.error">{{ streaming.error }}</template>
               <template v-else-if="streaming.cancelled">（本轮回答已取消）</template>
               <template v-else-if="streaming.gap">{{ streaming.gapMessage }}</template>
@@ -2078,7 +2298,9 @@ onBeforeUnmount(() => {
             </button>
 
             <div v-if="streaming.resumable && !busy" class="msg-tools">
-              <button class="primary sm" @click="retryResume">重试续传</button>
+              <button class="primary sm" @click="retryResume">
+                {{ streaming.paused ? '继续生成' : '重试续传' }}
+              </button>
               <button class="ghost sm" @click="discardStream">放弃本轮</button>
             </div>
 
@@ -2166,7 +2388,13 @@ onBeforeUnmount(() => {
         </div>
       </nav>
 
-      <footer class="composer">
+      <footer
+        class="composer"
+        :class="{ dragging: draggingFiles }"
+        @dragover="onComposerDragOver"
+        @dragleave="onComposerDragLeave"
+        @drop="onComposerDrop"
+      >
         <div class="kb-bar">
           <button class="chip" :disabled="!activeId" @click="openKbPanel">
             知识库{{ kbMode === 'SELECTED' ? ` ${kbBound.length}/${kbMax}` : '：全部可读' }}
@@ -2181,23 +2409,86 @@ onBeforeUnmount(() => {
             已收窄检索范围
           </span>
         </div>
+        <div v-if="attachments.length || attachmentBusy" class="attachment-bar">
+          <div
+            v-for="item in attachments"
+            :key="item.id"
+            class="attachment-chip pending"
+            :class="{ failed: item.status === 'FAILED', parsing: item.status === 'PARSING' }"
+          >
+            <span class="attachment-icon">{{ attachmentIcon(item.name) }}</span>
+            <span class="attachment-name">{{ item.name }}</span>
+            <span class="attachment-meta">{{ formatBytes(item.size_bytes) }}</span>
+            <span class="attachment-status">{{ attachmentStatusText(item) }}</span>
+            <button
+              v-if="item.status === 'READY'"
+              type="button"
+              class="attachment-action"
+              title="预览识别文本"
+              @click.stop="openAttachmentPreview(item)"
+            >预览</button>
+            <button
+              type="button"
+              class="attachment-action remove"
+              title="移除附件"
+              :disabled="attachmentBusy"
+              @click.stop="removeAttachment(item)"
+            >✕</button>
+          </div>
+          <span v-if="attachmentBusy" class="attachment-uploading">上传解析中…</span>
+        </div>
         <div class="composer-box">
+          <input
+            ref="attachmentInput"
+            type="file"
+            class="attachment-input"
+            multiple
+            :accept="ATTACHMENT_ACCEPT"
+            @change="onAttachmentPicked"
+          />
+          <button
+            type="button"
+            class="attach-btn"
+            :disabled="!activeId || attachmentBusy"
+            title="上传附件（docx/xlsx/图片）"
+            @click="pickAttachments"
+          >＋</button>
           <textarea
             v-model="draft"
             rows="1"
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+            placeholder="输入问题，Enter 发送，Shift+Enter 换行；可上传 docx/xlsx/图片"
             @keydown="onKeydown"
+            @paste="onComposerPaste"
           ></textarea>
-          <button v-if="busy" class="danger" @click="stop">停止</button>
+          <button v-if="busy" class="danger" @click="stop">暂停</button>
           <button v-else class="primary" :disabled="!canSend" @click="send">发送</button>
         </div>
         <div class="composer-foot">
           <span class="left">
-            <span>问题会按路由规则交给单个智能体或动态团队处理</span>
+            <span>问题会按路由规则交给单个智能体或动态团队处理；附件内容仅作为资料引用</span>
           </span>
           <span>{{ draft.length }} / 2000</span>
         </div>
       </footer>
+
+      <div v-if="attachmentPreview" class="modal-mask" @click.self="attachmentPreview = null">
+        <div class="modal" style="width: min(720px, 96vw)">
+          <div class="modal-head">
+            <h3>{{ attachmentPreview.name }}</h3>
+            <button class="subtle sm" @click="attachmentPreview = null">关闭</button>
+          </div>
+          <div class="modal-body">
+            <div v-if="attachmentPreview.loading" class="muted">加载中…</div>
+            <template v-else>
+              <div class="muted" style="font-size: 12px; margin-bottom: 8px">
+                已识别 {{ attachmentPreview.chars }} 字，以下为本轮发送给模型的文本预览
+                <template v-if="attachmentPreview.truncated">（前 4000 字）</template>
+              </div>
+              <pre class="attachment-preview">{{ attachmentPreview.text }}</pre>
+            </template>
+          </div>
+        </div>
+      </div>
 
       <div v-if="kbPanel" class="modal-mask" @click.self="kbPanel = false">
         <div class="modal" style="width: min(520px, 96vw)">

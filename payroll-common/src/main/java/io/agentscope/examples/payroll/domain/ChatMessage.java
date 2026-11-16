@@ -14,12 +14,14 @@ public record ChatMessage(
         ChatRouting routing,
         List<ActionProposal> proposals,
         LocalDateTime createdAt,
-        List<Citation> citations) {
+        List<Citation> citations,
+        List<ChatAttachmentRef> attachments) {
 
     public ChatMessage {
         tools = tools == null ? List.of() : List.copyOf(tools);
         proposals = proposals == null ? List.of() : List.copyOf(proposals);
         citations = citations == null ? List.of() : List.copyOf(citations);
+        attachments = attachments == null ? List.of() : List.copyOf(attachments);
     }
 
     /** 升级前或普通消息：没有路由快照、提案与引用。 */
@@ -46,5 +48,31 @@ public record ChatMessage(
             List<ActionProposal> proposals,
             LocalDateTime createdAt) {
         this(id, sessionId, role, content, tools, model, routing, proposals, createdAt, List.of());
+    }
+
+    /** 未携带附件的消息：历史调用方保持兼容。 */
+    public ChatMessage(
+            long id,
+            long sessionId,
+            String role,
+            String content,
+            List<String> tools,
+            String model,
+            ChatRouting routing,
+            List<ActionProposal> proposals,
+            LocalDateTime createdAt,
+            List<Citation> citations) {
+        this(
+                id,
+                sessionId,
+                role,
+                content,
+                tools,
+                model,
+                routing,
+                proposals,
+                createdAt,
+                citations,
+                List.of());
     }
 }
