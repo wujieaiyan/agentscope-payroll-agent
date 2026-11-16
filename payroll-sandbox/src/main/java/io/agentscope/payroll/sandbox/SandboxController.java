@@ -66,6 +66,7 @@ public class SandboxController {
             case SandboxResult.BUSY -> HttpStatus.TOO_MANY_REQUESTS;
             case SandboxResult.UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
             case SandboxResult.INVALID -> HttpStatus.BAD_REQUEST;
+            case SandboxResult.DATA_NOT_READY -> HttpStatus.CONFLICT;
             default -> HttpStatus.OK;
         };
     }

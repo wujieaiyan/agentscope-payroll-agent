@@ -39,6 +39,21 @@ class SkillRunToolsTest {
                     executions.incrementAndGet();
                     throw new AssertionError("工具侧不应直接执行脚本");
                 }
+
+                @Override
+                public SkillData initSkill(InitRequest request) {
+                    throw new AssertionError("工具侧不应初始化技能");
+                }
+
+                @Override
+                public SkillData skillData(String skillId) {
+                    throw new AssertionError("工具侧不应查询技能数据");
+                }
+
+                @Override
+                public SkillData deleteSkillData(String skillId) {
+                    throw new AssertionError("工具侧不应删除技能数据");
+                }
             };
 
     @Test
@@ -74,6 +89,21 @@ class SkillRunToolsTest {
                                     int timeoutMs,
                                     List<Script> scripts) {
                                 throw new AssertionError("未启用不应执行");
+                            }
+
+                            @Override
+                            public SkillData initSkill(InitRequest request) {
+                                throw new AssertionError("未启用不应初始化");
+                            }
+
+                            @Override
+                            public SkillData skillData(String skillId) {
+                                throw new AssertionError("未启用不应查询数据");
+                            }
+
+                            @Override
+                            public SkillData deleteSkillData(String skillId) {
+                                throw new AssertionError("未启用不应删除数据");
                             }
                         }));
 
@@ -160,8 +190,71 @@ class SkillRunToolsTest {
         assertEquals(0, executions.get());
     }
 
+    @Test
+    @DisplayName("声明 setup 的技能在数据未就绪时直接报错，READY 后才生成提案")
+    void rejectsWhenSkillDataNotReady() {
+        AgentSkill runnable =
+                skill(
+                        "payroll-auditor",
+                        true,
+                        Map.of("setup.sh", "sh setup.sh", "scripts/check.py", "x"));
+
+        SkillRunTools missing =
+                new SkillRunTools(List.of(runnable), dataGateway("UNKNOWN", null), 5000);
+        String missingResult = missing.run("scripts/check.py", null, null, context());
+        assertTrue(missingResult.contains("未初始化"), missingResult);
+        assertTrue(missingResult.contains("技能管理台"), missingResult);
+
+        SkillRunTools failed =
+                new SkillRunTools(List.of(runnable), dataGateway("FAILED", "网络不可用"), 5000);
+        String failedResult = failed.run("scripts/check.py", null, null, context());
+        assertTrue(failedResult.contains("重新初始化"), failedResult);
+        assertTrue(failedResult.contains("网络不可用"), failedResult);
+
+        SkillRunTools ready =
+                new SkillRunTools(List.of(runnable), dataGateway("READY", null), 5000);
+        String readyResult = ready.run("scripts/check.py", null, null, context());
+        assertTrue(readyResult.contains("PENDING_CONFIRM"), readyResult);
+        assertEquals(0, executions.get());
+    }
+
     private SkillRunTools tools(AgentSkill... skills) {
         return new SkillRunTools(List.of(skills), gateway, 5000);
+    }
+
+    private static SandboxGateway dataGateway(String status, String message) {
+        return new SandboxGateway() {
+            @Override
+            public boolean enabled() {
+                return true;
+            }
+
+            @Override
+            public Execution execute(
+                    long userId,
+                    String skillId,
+                    String scriptPath,
+                    List<String> args,
+                    int timeoutMs,
+                    List<Script> scripts) {
+                throw new AssertionError("工具侧不应直接执行脚本");
+            }
+
+            @Override
+            public SkillData initSkill(InitRequest request) {
+                throw new AssertionError("工具侧不应初始化技能");
+            }
+
+            @Override
+            public SkillData skillData(String skillId) {
+                return new SkillData(status, skillId, null, 0, 0, 0, "", message);
+            }
+
+            @Override
+            public SkillData deleteSkillData(String skillId) {
+                throw new AssertionError("工具侧不应删除技能数据");
+            }
+        };
     }
 
     private static RuntimeContext context() {

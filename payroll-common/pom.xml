@@ -123,5 +123,12 @@
             <artifactId>commonmark</artifactId>
             <version>0.22.0</version>
         </dependency>
+
+        <!-- 技能项目 Git 导入：浅克隆不依赖宿主机 git。 -->
+        <dependency>
+            <groupId>org.eclipse.jgit</groupId>
+            <artifactId>org.eclipse.jgit</artifactId>
+            <version>7.5.0.202512021534-r</version>
+        </dependency>
     </dependencies>
 </project>

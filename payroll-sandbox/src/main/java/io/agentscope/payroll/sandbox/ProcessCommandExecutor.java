@@ -4,7 +4,9 @@ import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -47,6 +49,45 @@ public class ProcessCommandExecutor implements CommandExecutor {
                 false,
                 stdout.truncated(),
                 stderr.truncated());
+    }
+
+    @Override
+    public Outcome exec(List<String> command, Duration timeout, Path logFile)
+            throws IOException, InterruptedException {
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.redirectErrorStream(true);
+        builder.redirectOutput(logFile.toFile());
+        Process process = builder.start();
+        process.getOutputStream().close();
+        boolean finished = process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+        }
+        String tail = tail(logFile, CAPTURE_LIMIT);
+        return new Outcome(
+                finished ? process.exitValue() : -1,
+                tail,
+                "",
+                !finished,
+                tail.getBytes(StandardCharsets.UTF_8).length >= CAPTURE_LIMIT,
+                false);
+    }
+
+    /** 只读文件末尾，避免把整段初始化输出读进内存。 */
+    private static String tail(Path file, int limit) throws IOException {
+        try (RandomAccessFile reader = new RandomAccessFile(file.toFile(), "r")) {
+            long length = reader.length();
+            int size = (int) Math.min(length, limit);
+            byte[] bytes = new byte[size];
+            reader.seek(length - size);
+            reader.readFully(bytes);
+            int offset = 0;
+            while (offset < size && (bytes[offset] & 0xC0) == 0x80) {
+                offset++;
+            }
+            return new String(bytes, offset, size - offset, StandardCharsets.UTF_8);
+        }
     }
 
     private static final class Capture implements Runnable {

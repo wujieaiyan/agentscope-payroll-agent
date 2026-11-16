@@ -26,6 +26,8 @@ public record SandboxResult(
     public static final String BUSY = "BUSY";
     public static final String UNAVAILABLE = "UNAVAILABLE";
     public static final String INVALID = "INVALID";
+    /** 技能声明了初始化脚本，但数据尚未就绪；由调用方提示先在管理台初始化。 */
+    public static final String DATA_NOT_READY = "DATA_NOT_READY";
 
     public static SandboxResult ok(
             int exitCode,
@@ -57,5 +59,9 @@ public record SandboxResult(
 
     public static SandboxResult invalid(String message) {
         return new SandboxResult(INVALID, -1, "", "", 0, "", false, message);
+    }
+
+    public static SandboxResult dataNotReady(String message) {
+        return new SandboxResult(DATA_NOT_READY, -1, "", "", 0, "", false, message);
     }
 }

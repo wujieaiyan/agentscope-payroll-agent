@@ -1659,4 +1659,58 @@ P2 在 P1 的共享组队流水线上实现 ACTIVE 灰度：白名单内先尝�
 - `DefaultActionExecutor` 默认没有本地写动作，需显式注册本地 handler 或配置 MCP 服务；
   未注册时确认会落 `FAILED` 并记录原因，不静默成功。
 - 提案确认链路不经过模型，因此结果消息只含工具结果摘要；需要解释时由用户再次提问。
-- `PAYROLL_ACTION_CONFIRM_ENABLED` 默认关闭，用于灰度；关闭时写工具仍按旧行为直接执行。
+- `PAYROLL_ACTION_CONFIRM_ENABLED` 默认关闭，用于灰度；关闭时写工具仍按旧行为执行。
+
+## 33. 技能项目导入与数据初始化（2026-11-16）
+
+规格与验收记录见 [`skill-project-package-design.md`](skill-project-package-design.md)；
+沙箱基线见 [`skill-resources-and-sandbox-design.md`](skill-resources-and-sandbox-design.md)。
+支持目录式技能（`SKILL.md` + `PROMPT.md` + `scripts/**` + `setup.sh` + 大数据 `data/`）。
+当前工作区未提交，改动集见 `git status`。
+
+### 33.1 关键实现
+
+- 包格式 v2：`<id>.files.json` 增加 `meta`（完整 frontmatter），根文件白名单
+  `SKILL.md/PROMPT.md/README.md/LICENSE/setup.sh` + `references/scripts/assets`；
+  上限 200 文件 / 512KB 单文件 / 4MB 总量。v1 兼容读取，写入统一升 v2。
+- 解析器 `SkillProjectParser`：目录 → `ParsedProject`；`SKILL.md` 必需，丢弃二进制/白名单外文件并告警，
+  `data/.git/node_modules` 忽略；CRLF 统一归一化为 LF 后入库。
+- 导入 `SkillImportService`：Git（JGit `depth=1`，仅 https + `PAYROLL_SKILL_IMPORT_HOSTS`）
+  与 ZIP（≤20MB、≤2000 条目、防穿越/符号链接/加密）；`dryRun` 预览，冲突 409，覆盖不删数据；
+  审计 `skill.import`（含 commit SHA）。
+- 沙箱工作区 `SkillWorkspaceService`：`PAYROLL_SANDBOX_SKILL_ROOT/<id>/{data,pkg,.init.json}`；
+  状态文件 snake_case（`skill_id/setup_path/exit_code/started_at/finished_at/size_bytes/log_tail/message`）。
+- 初始化 `DockerSkillInitRunner`：`--network bridge`、只读根盘、`/work` tmpfs、非 root 65534、
+  cap-drop ALL、no-new-privileges、1 CPU/1GB/128 PID；`/skill` 包副本、`/skill/data` 工作区 rw；
+  默认 600s、data 2GB（硬 5GB）、全局并发 2、同技能互斥；解释器按 shebang 选择
+  （`.sh` 声明 bash → `/bin/bash`，否则 `/bin/sh`）。
+- 运行期 `DockerSandboxRunner` 增加 `<root>/<id>/data → /data:ro`，仍 `--network none`；
+  数据未 READY 直接报“技能数据未初始化”。
+- 管理台技能页支持 Git/ZIP 导入（含预览）与“数据”页签（状态、大小、日志尾、初始化/重建/删除）。
+
+### 33.2 踩坑与修正
+
+- **CRLF**：Windows 检出把 `#!/bin/sh` 脚本转成 CRLF，沙箱报 `bad interpreter`；
+  在解析阶段归一化 LF 后修复（见 `SkillProjectParser.readText`）。
+- **bash 语法**：poetry-skills 的 `setup.sh` 声明 `#!/bin/bash` 并使用 `BASH_SOURCE`，
+  用 `/bin/sh` 执行报 `bad substitution`；改为按 shebang 选解释器。
+- **Jackson 命名**：管理端响应全局 snake_case，但导入/初始化请求记录用
+  `@JsonNaming(LowerCamelCaseStrategy)`；前端必须发 camelCase（`dryRun`、`overwrite`）。
+- **文件读取路由**是 `/api/admin/skills/{id}/files/{*path}`，不是 `?path=`。
+
+### 33.3 验证
+
+- `mvn -pl payroll-tests -am test`：668 tests 通过。
+- 真实仓库 `Wscats/poetry-skills`（commit `5bcb37e`）：导入 → 初始化 READY，data 约 291MB / 1909 个 JSON。
+- 带脚本 fixture：ZIP 导入 → 初始化 READY → 签名内部请求执行 `query.py 明月` 返回 2 条诗句（337ms）。
+
+### 33.4 部署
+
+`docker/docker-compose.yml` 的 sandbox 服务新增 `PAYROLL_SANDBOX_SKILL_ROOT`、
+`PAYROLL_SANDBOX_INIT_IMAGE` 与技能工作区卷；启动前构建 init 镜像：
+
+```bash
+docker build -f docker/sandbox-init.Dockerfile -t payroll-sandbox-init:local .
+```
+
+多沙箱节点时各节点独立初始化数据（工作区不共享），首期按单沙箱部署。

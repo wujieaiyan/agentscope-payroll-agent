@@ -15,7 +15,65 @@ public interface SandboxGateway {
             int timeoutMs,
             List<Script> scripts);
 
+    /**
+     * 携带“是否依赖初始化数据”的执行入口；实现方需把该标志传给沙箱，
+     * 未实现 7 参重载时回落到 6 参版本（不检查数据状态）。
+     */
+    default Execution execute(
+            long userId,
+            String skillId,
+            String scriptPath,
+            List<String> args,
+            int timeoutMs,
+            List<Script> scripts,
+            boolean requireData) {
+        return execute(userId, skillId, scriptPath, args, timeoutMs, scripts);
+    }
+
+    /** 异步启动技能初始化；返回提交后的工作区状态（通常为 INITIALIZING）。 */
+    SkillData initSkill(InitRequest request);
+
+    SkillData skillData(String skillId);
+
+    SkillData deleteSkillData(String skillId);
+
     record Script(String path, String content) {
+    }
+
+    record InitRequest(
+            String skillId,
+            String setupPath,
+            String setupContent,
+            List<Script> files,
+            Integer timeoutMs,
+            Long maxBytes) {
+    }
+
+    record SkillData(
+            String status,
+            String skillId,
+            Integer exitCode,
+            long startedAt,
+            long finishedAt,
+            long sizeBytes,
+            String logTail,
+            String message) {
+
+        public static final String INITIALIZING = "INITIALIZING";
+        public static final String READY = "READY";
+        public static final String FAILED = "FAILED";
+        public static final String UNKNOWN = "UNKNOWN";
+        public static final String BUSY = "BUSY";
+        public static final String UNAVAILABLE = "UNAVAILABLE";
+        public static final String INVALID = "INVALID";
+
+        public boolean ready() {
+            return READY.equals(status);
+        }
+
+        public boolean initialized() {
+            return READY.equals(status) || INITIALIZING.equals(status);
+        }
     }
 
     record Execution(
@@ -34,6 +92,8 @@ public interface SandboxGateway {
         public static final String BUSY = "BUSY";
         public static final String UNAVAILABLE = "UNAVAILABLE";
         public static final String INVALID = "INVALID";
+        /** 技能声明了 setup，但数据未初始化或初始化失败。 */
+        public static final String DATA_NOT_READY = "DATA_NOT_READY";
 
         public boolean succeeded() {
             return OK.equals(status) && exitCode == 0;

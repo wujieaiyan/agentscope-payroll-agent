@@ -8,6 +8,7 @@ import io.agentscope.examples.payroll.service.SandboxClient;
 import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.skill.SkillExecutions;
+import io.agentscope.examples.payroll.skill.SkillInitRequirements;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.examples.payroll.support.Permissions;
 import java.util.ArrayList;
@@ -94,7 +95,8 @@ public class SkillRunActionContributor implements ActionContributor {
                         scriptPath,
                         strings(params.get("args")),
                         settings.timeoutMs(),
-                        scripts);
+                        scripts,
+                        SkillInitRequirements.requiresData(skill));
         if (!execution.succeeded()) {
             throw new IllegalStateException(failureMessage(execution));
         }
@@ -121,6 +123,7 @@ public class SkillRunActionContributor implements ActionContributor {
             case SandboxGateway.Execution.BUSY -> "沙箱繁忙：" + detail;
             case SandboxGateway.Execution.UNAVAILABLE -> "沙箱不可用：" + detail;
             case SandboxGateway.Execution.INVALID -> "沙箱拒绝请求：" + detail;
+            case SandboxGateway.Execution.DATA_NOT_READY -> "技能数据未就绪：" + detail;
             default ->
                     execution.exitCode() == 0
                             ? detail

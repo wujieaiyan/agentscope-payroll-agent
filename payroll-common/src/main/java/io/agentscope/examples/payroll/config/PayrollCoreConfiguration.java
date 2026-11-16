@@ -44,6 +44,9 @@ import io.agentscope.examples.payroll.service.TurnLeaseService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
+import io.agentscope.examples.payroll.skill.SkillFileSettings;
+import io.agentscope.examples.payroll.skill.SkillImportService;
+import io.agentscope.examples.payroll.skill.SkillImportSettings;
 import io.agentscope.examples.payroll.team.ActiveTeamCoordinator;
 import io.agentscope.examples.payroll.team.ShadowEvaluator;
 import io.agentscope.examples.payroll.team.ShadowReportService;
@@ -246,6 +249,15 @@ public class PayrollCoreConfiguration {
     @Bean
     public NacosSkillRegistry skillRegistry() {
         return new NacosSkillRegistry();
+    }
+
+    /** 技能项目导入：Git 浅克隆或 ZIP 解压后解析并整体发布到 Nacos。 */
+    @Bean
+    public SkillImportService skillImportService(NacosSkillRegistry skillRegistry) {
+        return new SkillImportService(
+                skillRegistry,
+                SkillFileSettings.fromEnvironment(),
+                SkillImportSettings.fromEnvironment());
     }
 
     @Bean(destroyMethod = "close")

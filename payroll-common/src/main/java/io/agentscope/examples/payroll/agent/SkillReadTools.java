@@ -40,7 +40,11 @@ public final class SkillReadTools {
     public static boolean hasResources(List<AgentSkill> skills) {
         return skills != null
                 && skills.stream()
-                        .anyMatch(skill -> skill != null && !skill.getResourcePaths().isEmpty());
+                        .anyMatch(
+                                skill ->
+                                        skill != null
+                                                && skill.getResourcePaths().stream()
+                                                        .anyMatch(SkillFilePackage::isReadable));
     }
 
     /** 含参考文件时追加的固定提示词；没有文件时返回空串。 */
@@ -51,7 +55,10 @@ public final class SkillReadTools {
                 if (skill == null) {
                     continue;
                 }
-                skill.getResourcePaths().stream().sorted().forEach(paths::add);
+                skill.getResourcePaths().stream()
+                        .filter(SkillFilePackage::isReadable)
+                        .sorted()
+                        .forEach(paths::add);
             }
         }
         if (paths.isEmpty()) {
@@ -89,7 +96,7 @@ public final class SkillReadTools {
     private String doRead(String path, String skillId, RuntimeContext context) {
         String normalized;
         try {
-            normalized = SkillFilePackage.normalizePath(path);
+            normalized = SkillFilePackage.normalizeReadPath(path);
         } catch (PayrollException e) {
             return error(e.getMessage());
         }

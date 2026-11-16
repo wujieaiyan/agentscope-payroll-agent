@@ -21,6 +21,7 @@ class SkillRunActionContributorTest {
 
     private final List<SandboxGateway.Script> sent = new ArrayList<>();
     private final AtomicReference<Integer> sentTimeout = new AtomicReference<>();
+    private final AtomicReference<Boolean> sentRequireData = new AtomicReference<>();
 
     private SandboxGateway gateway(SandboxGateway.Execution execution) {
         return new SandboxGateway() {
@@ -45,6 +46,34 @@ class SkillRunActionContributorTest {
                 assertEquals("scripts/check.py", scriptPath);
                 assertEquals(List.of("--month", "2026-11"), args);
                 return execution;
+            }
+
+            @Override
+            public Execution execute(
+                    long userId,
+                    String skillId,
+                    String scriptPath,
+                    List<String> args,
+                    int timeoutMs,
+                    List<Script> scripts,
+                    boolean requireData) {
+                sentRequireData.set(requireData);
+                return execute(userId, skillId, scriptPath, args, timeoutMs, scripts);
+            }
+
+            @Override
+            public SkillData initSkill(InitRequest request) {
+                throw new AssertionError("执行器不应初始化技能");
+            }
+
+            @Override
+            public SkillData skillData(String skillId) {
+                throw new AssertionError("执行器不应查询技能数据");
+            }
+
+            @Override
+            public SkillData deleteSkillData(String skillId) {
+                throw new AssertionError("执行器不应删除技能数据");
             }
         };
     }
@@ -126,9 +155,42 @@ class SkillRunActionContributorTest {
         assertEquals(1_001, preview.length());
         assertTrue(preview.endsWith("…"));
         assertEquals(Integer.valueOf(5_000), sentTimeout.get());
+        assertEquals(Boolean.FALSE, sentRequireData.get(), "未声明 setup 时不要求初始化数据");
         assertEquals(
                 List.of("scripts/a.py", "scripts/check.py"),
                 sent.stream().map(SandboxGateway.Script::path).toList());
+    }
+
+    @Test
+    @DisplayName("声明 setup 时传 requireData=true，数据未就绪转成明确错误")
+    void passesRequireDataAndReportsNotReady() {
+        AgentSkill withSetup =
+                skill(
+                        "payroll-auditor",
+                        true,
+                        Map.of("setup.sh", "echo hi", "scripts/check.py", "print('ok')"));
+        SkillRunActionContributor ready = contributor(settings(true), success(), withSetup);
+
+        run(ready);
+        assertEquals(Boolean.TRUE, sentRequireData.get());
+
+        SkillRunActionContributor notReady =
+                contributor(
+                        settings(true),
+                        new SandboxGateway.Execution(
+                                SandboxGateway.Execution.DATA_NOT_READY,
+                                -1,
+                                "",
+                                "",
+                                0,
+                                "",
+                                false,
+                                "技能数据未初始化，请先在技能管理台执行初始化"),
+                        withSetup);
+        String message =
+                assertThrows(IllegalStateException.class, () -> run(notReady)).getMessage();
+        assertTrue(message.contains("技能数据未就绪"), message);
+        assertTrue(message.contains("初始化"), message);
     }
 
     @Test

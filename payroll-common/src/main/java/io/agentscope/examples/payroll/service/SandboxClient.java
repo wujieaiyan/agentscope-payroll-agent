@@ -1,9 +1,10 @@
 package io.agentscope.examples.payroll.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
+import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.support.JsonSupport;
-import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -28,6 +29,7 @@ public final class SandboxClient implements SandboxGateway {
     private static final Logger log = LoggerFactory.getLogger(SandboxClient.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final Duration EXTRA_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration CONTROL_TIMEOUT = Duration.ofSeconds(30);
     private static final HttpClient HTTP =
             HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
@@ -65,9 +67,19 @@ public final class SandboxClient implements SandboxGateway {
             List<String> args,
             int timeoutMs,
             List<Script> scripts) {
-        if (!enabled) {
-            throw new IllegalStateException("技能脚本执行未启用（检查 PAYROLL_SKILL_EXEC_ENABLED 与沙箱地址/令牌）");
-        }
+        return execute(userId, skillId, scriptPath, args, timeoutMs, scripts, false);
+    }
+
+    @Override
+    public Execution execute(
+            long userId,
+            String skillId,
+            String scriptPath,
+            List<String> args,
+            int timeoutMs,
+            List<Script> scripts,
+            boolean requireData) {
+        requireEnabled("技能脚本执行");
         int timeout = SandboxProtocol.requireTimeout(timeoutMs <= 0 ? this.timeoutMs : timeoutMs);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("user_id", userId);
@@ -75,6 +87,7 @@ public final class SandboxClient implements SandboxGateway {
         payload.put("script_path", scriptPath);
         payload.put("args", args == null ? List.of() : args);
         payload.put("timeout_ms", timeout);
+        payload.put("require_data", requireData);
         List<Map<String, Object>> files = new ArrayList<>();
         if (scripts != null) {
             for (Script script : scripts) {
@@ -85,32 +98,15 @@ public final class SandboxClient implements SandboxGateway {
             }
         }
         payload.put("scripts", files);
-        String body = JsonSupport.toJson(payload);
-        String timestamp = String.valueOf(Instant.now().getEpochSecond());
-        HttpRequest request =
-                HttpRequest.newBuilder(URI.create(baseUrl + SandboxProtocol.PATH))
-                        .timeout(Duration.ofMillis(timeout).plus(EXTRA_TIMEOUT))
-                        .header("Content-Type", "application/json")
-                        .header("X-Payroll-Timestamp", timestamp)
-                        .header(
-                                "X-Payroll-Internal",
-                                InternalAuth.sign(
-                                        token, "POST", SandboxProtocol.PATH, timestamp, body))
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build();
-        HttpResponse<String> response;
-        try {
-            response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("沙箱调用被中断", e);
-        } catch (Exception e) {
-            log.warn("[技能脚本] 沙箱调用失败：{}", rootMessage(e));
-            throw new IllegalStateException("沙箱服务不可用：" + rootMessage(e), e);
-        }
+        HttpResponse<String> response =
+                send(
+                        "POST",
+                        SandboxProtocol.PATH,
+                        JsonSupport.toJson(payload),
+                        Duration.ofMillis(timeout).plus(EXTRA_TIMEOUT));
         int status = response.statusCode();
         if (status == 401 || status == 403) {
-            throw new IllegalStateException("沙箱内部签名校验失败，请核对 PAYROLL_SANDBOX_TOKEN");
+            throw signatureFailure();
         }
         if (status >= 500) {
             return new Execution(
@@ -124,22 +120,138 @@ public final class SandboxClient implements SandboxGateway {
             return new Execution(
                     Execution.INVALID, -1, "", "", 0, "", false, messageOf(response.body(), "沙箱拒绝了该请求"));
         }
+        if (status == 409) {
+            return new Execution(
+                    Execution.DATA_NOT_READY,
+                    -1,
+                    "",
+                    "",
+                    0,
+                    "",
+                    false,
+                    messageOf(response.body(), "技能数据未就绪，请先在技能管理台初始化"));
+        }
         if (status < 200 || status >= 300) {
             throw new IllegalStateException("沙箱返回 HTTP " + status + "：" + messageOf(response.body(), ""));
         }
         return parse(response.body());
     }
 
-    private static Execution parse(String body) {
-        Map<String, Object> raw;
+    @Override
+    public SkillData initSkill(InitRequest request) {
+        requireEnabled("技能初始化");
+        if (request == null) {
+            return new SkillData(
+                    SkillData.INVALID, null, null, 0, 0, 0, null, "初始化请求为空");
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("skill_id", request.skillId());
+        payload.put("setup_path", request.setupPath());
+        payload.put("setup_content", request.setupContent());
+        List<Map<String, Object>> files = new ArrayList<>();
+        if (request.files() != null) {
+            for (Script script : request.files()) {
+                Map<String, Object> file = new LinkedHashMap<>();
+                file.put("path", script.path());
+                file.put("content", script.content());
+                files.add(file);
+            }
+        }
+        payload.put("files", files);
+        if (request.timeoutMs() != null) {
+            payload.put("timeout_ms", request.timeoutMs());
+        }
+        if (request.maxBytes() != null) {
+            payload.put("max_bytes", request.maxBytes());
+        }
+        HttpResponse<String> response =
+                send(
+                        "POST",
+                        SkillInitProtocol.INIT_PATH,
+                        JsonSupport.toJson(payload),
+                        CONTROL_TIMEOUT);
+        return skillDataOf(response);
+    }
+
+    @Override
+    public SkillData skillData(String skillId) {
+        requireEnabled("技能数据查询");
+        return skillDataOf(
+                send("GET", SkillInitProtocol.statusPath(skillId), "", CONTROL_TIMEOUT));
+    }
+
+    @Override
+    public SkillData deleteSkillData(String skillId) {
+        requireEnabled("技能数据删除");
+        return skillDataOf(
+                send("DELETE", SkillInitProtocol.statusPath(skillId), "", CONTROL_TIMEOUT));
+    }
+
+    private SkillData skillDataOf(HttpResponse<String> response) {
+        int status = response.statusCode();
+        if (status == 401 || status == 403) {
+            throw signatureFailure();
+        }
+        String fallback = "沙箱拒绝了该请求";
+        String level = SkillData.INVALID;
+        if (status >= 500) {
+            level = SkillData.UNAVAILABLE;
+            fallback = "沙箱服务暂不可用";
+        } else if (status == 429) {
+            level = SkillData.BUSY;
+            fallback = "沙箱繁忙，请稍后重试";
+        } else if (status == 400) {
+            level = SkillData.INVALID;
+        } else if (status < 200 || status >= 300) {
+            throw new IllegalStateException(
+                    "沙箱返回 HTTP " + status + "：" + messageOf(response.body(), ""));
+        } else {
+            return parseSkillData(response.body());
+        }
+        return new SkillData(level, null, null, 0, 0, 0, null, messageOf(response.body(), fallback));
+    }
+
+    private HttpResponse<String> send(String method, String path, String body, Duration timeout) {
+        String payload = body == null ? "" : body;
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        HttpRequest request =
+                HttpRequest.newBuilder(URI.create(baseUrl + path))
+                        .timeout(timeout)
+                        .header("Content-Type", "application/json")
+                        .header("X-Payroll-Timestamp", timestamp)
+                        .header(
+                                "X-Payroll-Internal",
+                                InternalAuth.sign(token, method, path, timestamp, payload))
+                        .method(
+                                method,
+                                "POST".equals(method)
+                                        ? HttpRequest.BodyPublishers.ofString(payload)
+                                        : HttpRequest.BodyPublishers.noBody())
+                        .build();
         try {
-            raw = JsonSupport.fromJson(body == null ? "" : body, MAP_TYPE);
-        } catch (RuntimeException e) {
-            throw new IllegalStateException("沙箱响应无法解析：" + rootMessage(e), e);
+            return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("沙箱调用被中断", e);
+        } catch (Exception e) {
+            log.warn("[技能沙箱] 调用失败：{}", rootMessage(e));
+            throw new IllegalStateException("沙箱服务不可用：" + rootMessage(e), e);
         }
-        if (raw == null) {
-            throw new IllegalStateException("沙箱响应为空");
+    }
+
+    private void requireEnabled(String action) {
+        if (!enabled) {
+            throw new IllegalStateException(
+                    action + "未启用（检查 PAYROLL_SKILL_EXEC_ENABLED 与沙箱地址/令牌）");
         }
+    }
+
+    private static IllegalStateException signatureFailure() {
+        return new IllegalStateException("沙箱内部签名校验失败，请核对 PAYROLL_SANDBOX_TOKEN");
+    }
+
+    private static Execution parse(String body) {
+        Map<String, Object> raw = parseMap(body);
         return new Execution(
                 text(raw.get("status"), Execution.OK),
                 integer(raw.get("exit_code"), -1),
@@ -149,6 +261,32 @@ public final class SandboxClient implements SandboxGateway {
                 text(raw.get("script_sha256"), ""),
                 truthy(raw.get("truncated")),
                 raw.get("message") == null ? null : String.valueOf(raw.get("message")));
+    }
+
+    private static SkillData parseSkillData(String body) {
+        Map<String, Object> raw = parseMap(body);
+        return new SkillData(
+                text(raw.get("status"), SkillData.UNKNOWN),
+                raw.get("skill_id") == null ? null : String.valueOf(raw.get("skill_id")),
+                raw.get("exit_code") == null ? null : integer(raw.get("exit_code"), -1),
+                longValue(raw.get("started_at"), 0),
+                longValue(raw.get("finished_at"), 0),
+                longValue(raw.get("size_bytes"), 0),
+                raw.get("log_tail") == null ? "" : String.valueOf(raw.get("log_tail")),
+                raw.get("message") == null ? null : String.valueOf(raw.get("message")));
+    }
+
+    private static Map<String, Object> parseMap(String body) {
+        Map<String, Object> raw;
+        try {
+            raw = JsonSupport.fromJson(body == null ? "" : body, MAP_TYPE);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("沙箱响应无法解析：" + rootMessage(e), e);
+        }
+        if (raw == null) {
+            throw new IllegalStateException("沙箱响应为空");
+        }
+        return raw;
     }
 
     private static String messageOf(String body, String fallback) {
@@ -173,6 +311,17 @@ public final class SandboxClient implements SandboxGateway {
         }
         try {
             return value == null ? fallback : Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static long longValue(Object value, long fallback) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return value == null ? fallback : Long.parseLong(String.valueOf(value));
         } catch (NumberFormatException e) {
             return fallback;
         }

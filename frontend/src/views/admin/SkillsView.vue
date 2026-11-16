@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { api } from '../../api/http';
 import { toast } from '../../stores/toast';
 
@@ -21,6 +21,49 @@ const fileEditing = ref(false);
 const fileSaving = ref(false);
 const executionSaving = ref(false);
 const fileForm = reactive({ path: '', originalPath: '', content: '' });
+
+const showImport = ref(false);
+const importMode = ref('git');
+const importing = ref(false);
+const previewing = ref(false);
+const importPreview = ref(null);
+const importForm = reactive({
+  url: '',
+  ref: '',
+  id: '',
+  overwrite: false,
+  file: null,
+  fileName: '',
+});
+
+const dataState = ref(null);
+const dataLoading = ref(false);
+const dataBusy = ref(false);
+let dataTimer = null;
+
+const dataStatusLabel = computed(() => {
+  const status = dataState.value?.status;
+  const labels = {
+    READY: '已就绪',
+    INITIALIZING: '初始化中',
+    FAILED: '初始化失败',
+    UNKNOWN: '未初始化',
+    BUSY: '沙箱繁忙',
+    UNAVAILABLE: '沙箱不可用',
+    INVALID: '请求无效',
+  };
+  return labels[status] || '未知';
+});
+
+const dataStatusClass = computed(() => {
+  const status = dataState.value?.status;
+  if (status === 'READY') return 'green';
+  if (status === 'FAILED') return 'red';
+  if (status === 'INITIALIZING' || status === 'UNKNOWN') return 'orange';
+  return 'blue';
+});
+
+const metadataEntries = computed(() => Object.entries(detail.value?.metadata || {}));
 
 const skills = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
@@ -54,7 +97,9 @@ function formatTimestamp(value) {
 
 function formatSize(bytes) {
   if (!Number.isFinite(bytes)) return '—';
-  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function fileUrl(id, path) {
@@ -74,9 +119,11 @@ async function load() {
 }
 
 async function openSkill(skill) {
+  stopDataPolling();
   detailLoading.value = true;
   tab.value = 'body';
   files.value = [];
+  dataState.value = null;
   detail.value = { ...skill, content: '', loaded: false };
   try {
     detail.value = await api(`/api/admin/skills/${encodeURIComponent(skill.id)}`);
@@ -87,6 +134,183 @@ async function openSkill(skill) {
     toast(error.message, 'error');
   } finally {
     detailLoading.value = false;
+  }
+}
+
+function closeDetail() {
+  stopDataPolling();
+  detail.value = null;
+}
+
+function setTab(value) {
+  tab.value = value;
+  if (value === 'data') loadData(false);
+}
+
+function formatMetaValue(value) {
+  if (value === null || value === undefined) return '—';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+}
+
+function stopDataPolling() {
+  if (dataTimer) {
+    clearInterval(dataTimer);
+    dataTimer = null;
+  }
+}
+
+function startDataPolling() {
+  stopDataPolling();
+  dataTimer = setInterval(() => loadData(true), 2500);
+}
+
+async function loadData(silent) {
+  const id = detail.value?.id;
+  if (!id) return;
+  if (!silent) dataLoading.value = true;
+  try {
+    const payload = await api(`/api/admin/skills/${encodeURIComponent(id)}/data`);
+    if (detail.value?.id !== id) return;
+    dataState.value = payload;
+    if (payload?.status === 'INITIALIZING') startDataPolling();
+    else stopDataPolling();
+  } catch (error) {
+    if (!silent) toast(error.message, 'error');
+  } finally {
+    if (!silent) dataLoading.value = false;
+  }
+}
+
+async function initData() {
+  const id = detail.value?.id;
+  if (!id || dataBusy.value) return;
+  const overwrite = dataState.value?.status === 'READY';
+  if (
+    overwrite &&
+    !window.confirm('重建会清空当前技能数据并重新执行 setup，确认继续？')
+  ) {
+    return;
+  }
+  dataBusy.value = true;
+  try {
+    const payload = await api(`/api/admin/skills/${encodeURIComponent(id)}/data/init`, {
+      method: 'POST',
+      body: { overwrite },
+    });
+    dataState.value = payload;
+    toast('已提交初始化，完成后可刷新状态', 'success');
+    if (payload?.status === 'INITIALIZING') startDataPolling();
+    else await loadData(true);
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    dataBusy.value = false;
+  }
+}
+
+async function removeData() {
+  const id = detail.value?.id;
+  if (!id || dataBusy.value) return;
+  if (!window.confirm('删除技能数据？data/ 目录会被清空，之后需要重新初始化。')) return;
+  dataBusy.value = true;
+  try {
+    dataState.value = await api(`/api/admin/skills/${encodeURIComponent(id)}/data`, {
+      method: 'DELETE',
+    });
+    stopDataPolling();
+    toast('技能数据已删除', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    dataBusy.value = false;
+  }
+}
+
+function startImport() {
+  importMode.value = 'git';
+  Object.assign(importForm, {
+    url: '',
+    ref: '',
+    id: '',
+    overwrite: false,
+    file: null,
+    fileName: '',
+  });
+  importPreview.value = null;
+  showImport.value = true;
+}
+
+function pickImportFile(event) {
+  const file = (event.target.files || [])[0] || null;
+  importForm.file = file;
+  importForm.fileName = file ? file.name : '';
+}
+
+async function postZipImport(dryRun) {
+  const body = new FormData();
+  body.append('file', importForm.file);
+  if (importForm.id.trim()) body.append('id', importForm.id.trim());
+  body.append('overwrite', String(Boolean(importForm.overwrite)));
+  body.append('dryRun', String(Boolean(dryRun)));
+  const response = await fetch('/api/admin/skills/import/zip', {
+    method: 'POST',
+    body,
+    credentials: 'same-origin',
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || (payload && payload.status === 'ERROR')) {
+    throw new Error((payload && payload.message) || `导入失败：HTTP ${response.status}`);
+  }
+  return payload ? payload.data : null;
+}
+
+function normalizeImportPreview(payload) {
+  if (!payload) return payload;
+  return {
+    ...payload,
+    setupCommand: payload.setupCommand ?? payload.setup_command ?? null,
+    dataMaxBytes: payload.dataMaxBytes ?? payload.data_max_bytes ?? null,
+  };
+}
+
+async function submitImport(dryRun) {
+  const busy = dryRun ? previewing : importing;
+  if (busy.value) return;
+  if (importMode.value === 'git' && !importForm.url.trim()) {
+    toast('请填写 Git 地址', 'error');
+    return;
+  }
+  if (importMode.value === 'zip' && !importForm.file) {
+    toast('请选择 ZIP 文件', 'error');
+    return;
+  }
+  busy.value = true;
+  try {
+    const payload =
+      importMode.value === 'git'
+        ? await api('/api/admin/skills/import/git', {
+            method: 'POST',
+            body: {
+              url: importForm.url.trim(),
+              ref: importForm.ref.trim() || null,
+              id: importForm.id.trim() || null,
+              overwrite: Boolean(importForm.overwrite),
+              dryRun: Boolean(dryRun),
+            },
+          })
+        : await postZipImport(dryRun);
+    importPreview.value = normalizeImportPreview(payload);
+    if (!dryRun) {
+      toast(`技能「${payload?.id}」已导入`, 'success');
+      showImport.value = false;
+      await load();
+      const saved = (data.value.skills || []).find((item) => item.id === payload?.id);
+      if (saved) await openSkill(saved);
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -252,6 +476,7 @@ async function removeFile(file) {
 }
 
 onMounted(load);
+onUnmounted(stopDataPolling);
 </script>
 
 <template>
@@ -266,6 +491,7 @@ onMounted(load);
           {{ data.writable ? '可写' : '只读（Nacos 未启用）' }}
         </span>
         <input v-model="keyword" placeholder="搜索技能" style="width: 220px" />
+        <button class="ghost" :disabled="!data.writable" @click="startImport">导入技能</button>
         <button class="primary" :disabled="!data.writable" @click="createSkill">新增技能</button>
       </div>
     </div>
@@ -314,26 +540,27 @@ onMounted(load);
       </table>
     </div>
 
-    <div v-if="detail" class="drawer-mask" @click.self="detail = null">
+    <div v-if="detail" class="drawer-mask" @click.self="closeDetail">
       <aside class="drawer">
         <div class="drawer-head">
           <h3>{{ detail.id }}</h3>
-          <button class="subtle sm" @click="detail = null">关闭</button>
+          <button class="subtle sm" @click="closeDetail">关闭</button>
         </div>
         <div class="drawer-body">
           <div v-if="detailLoading" class="empty">加载中…</div>
           <template v-else>
             <div class="tabs">
-              <button :class="{ active: tab === 'body' }" @click="tab = 'body'">正文</button>
+              <button :class="{ active: tab === 'body' }" @click="setTab('body')">正文</button>
               <button
                 :class="{ active: tab === 'files-references' }"
-                @click="tab = 'files-references'"
+                @click="setTab('files-references')"
               >
                 参考文件 <span class="badge blue">{{ referenceFiles.length }}</span>
               </button>
-              <button :class="{ active: tab === 'files-scripts' }" @click="tab = 'files-scripts'">
+              <button :class="{ active: tab === 'files-scripts' }" @click="setTab('files-scripts')">
                 脚本文件 <span class="badge blue">{{ scriptFiles.length }}</span>
               </button>
+              <button :class="{ active: tab === 'data' }" @click="setTab('data')">数据</button>
             </div>
 
             <template v-if="tab === 'body'">
@@ -346,7 +573,84 @@ onMounted(load);
                   <span v-if="detail.overridden">· 已覆盖</span>
                 </span>
               </div>
+              <div v-if="metadataEntries.length" class="panel-row">
+                <span class="k">元信息</span>
+                <div class="v meta-list">
+                  <div v-for="[key, value] in metadataEntries" :key="key" class="meta-item">
+                    <span class="mono">{{ key }}</span>
+                    <span class="muted">{{ formatMetaValue(value) }}</span>
+                  </div>
+                </div>
+              </div>
               <pre class="trace-pre" style="max-height: none">{{ detail.content || '（空）' }}</pre>
+            </template>
+
+            <template v-else-if="tab === 'data'">
+              <div v-if="dataLoading" class="empty">加载中…</div>
+              <template v-else-if="dataState">
+                <div class="panel-row">
+                  <span class="k">状态</span>
+                  <span class="v">
+                    <span class="badge" :class="dataStatusClass">{{ dataStatusLabel }}</span>
+                    <span v-if="dataState.message" class="muted"> · {{ dataState.message }}</span>
+                  </span>
+                </div>
+                <div class="panel-row">
+                  <span class="k">初始化脚本</span>
+                  <span class="v mono">{{ dataState.setupPath || '—' }}</span>
+                </div>
+                <div class="panel-row">
+                  <span class="k">数据大小</span>
+                  <span class="v">{{ formatSize(dataState.sizeBytes) }}</span>
+                </div>
+                <div class="panel-row">
+                  <span class="k">最后初始化</span>
+                  <span class="v">
+                    {{ formatTimestamp(dataState.finishedAt || dataState.startedAt) }}
+                  </span>
+                </div>
+                <p v-if="!dataState.requiresData" class="file-hint warn">
+                  该技能未声明 <code>setup</code> 或 <code>setup.sh</code>，无需初始化数据。
+                </p>
+                <p class="file-hint">
+                  setup 在独立初始化容器中执行（允许联网）；生成的 <code>data/</code>
+                  会持久保留，并在脚本运行时只读挂载到容器内 <code>/data</code>。
+                </p>
+                <div class="data-actions">
+                  <button
+                    class="primary"
+                    :disabled="dataBusy || !dataState.requiresData || dataState.status === 'INITIALIZING'"
+                    @click="initData"
+                  >
+                    {{
+                      dataBusy
+                        ? '提交中…'
+                        : dataState.status === 'READY'
+                          ? '重建数据'
+                          : dataState.status === 'FAILED'
+                            ? '重新初始化'
+                            : '初始化数据'
+                    }}
+                  </button>
+                  <button
+                    class="subtle"
+                    :disabled="dataBusy || dataState.status === 'UNKNOWN' || dataState.status === 'INITIALIZING'"
+                    @click="removeData"
+                  >
+                    删除数据
+                  </button>
+                  <button class="subtle" :disabled="dataLoading" @click="loadData(false)">
+                    刷新状态
+                  </button>
+                </div>
+                <template v-if="dataState.logTail">
+                  <div class="file-head">
+                    <span class="muted">初始化日志（尾部）</span>
+                  </div>
+                  <pre class="trace-pre" style="max-height: 260px">{{ dataState.logTail }}</pre>
+                </template>
+              </template>
+              <div v-else class="empty">暂无数据状态</div>
             </template>
 
             <template v-else>
@@ -397,7 +701,7 @@ onMounted(load);
           </template>
         </div>
         <div class="drawer-foot">
-          <button class="ghost" @click="detail = null">关闭</button>
+          <button class="ghost" @click="closeDetail">关闭</button>
           <button class="primary" :disabled="!data.writable" @click="editSkill(detail)">编辑正文</button>
         </div>
       </aside>
@@ -435,6 +739,110 @@ onMounted(load);
           <button class="ghost" @click="showForm = false">取消</button>
           <button class="primary" :disabled="saving" @click="save">
             {{ saving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showImport" class="modal-mask" @click.self="showImport = false">
+      <div class="modal" style="width: min(760px, 96vw)">
+        <div class="modal-head">
+          <h3>导入技能项目</h3>
+          <button class="subtle sm" @click="showImport = false">关闭</button>
+        </div>
+        <div class="modal-body">
+          <div class="tabs">
+            <button
+              :class="{ active: importMode === 'git' }"
+              @click="importMode = 'git'; importPreview = null"
+            >
+              Git 仓库
+            </button>
+            <button
+              :class="{ active: importMode === 'zip' }"
+              @click="importMode = 'zip'; importPreview = null"
+            >
+              ZIP 包
+            </button>
+          </div>
+          <div class="form-grid">
+            <template v-if="importMode === 'git'">
+              <label class="field span-2">
+                Git 地址（https）
+                <input
+                  v-model="importForm.url"
+                  class="mono"
+                  placeholder="https://github.com/Wscats/poetry-skills.git"
+                />
+              </label>
+              <label class="field">
+                分支或标签（可选）
+                <input v-model="importForm.ref" placeholder="main" />
+              </label>
+            </template>
+            <template v-else>
+              <label class="field span-2">
+                ZIP 文件
+                <input type="file" accept=".zip" @change="pickImportFile" />
+              </label>
+            </template>
+            <label class="field">
+              技能 ID（可选）
+              <input v-model="importForm.id" class="mono" placeholder="按 SKILL.md 自动生成" />
+            </label>
+            <label class="field span-2 exec-check">
+              <span>
+                <input v-model="importForm.overwrite" type="checkbox" />
+                覆盖同名技能（内置技能也可覆盖）
+              </span>
+            </label>
+          </div>
+          <div v-if="importPreview" class="import-preview">
+            <div class="panel-row">
+              <span class="k">技能 ID</span>
+              <span class="v mono">{{ importPreview.id }}</span>
+            </div>
+            <div class="panel-row">
+              <span class="k">说明</span>
+              <span class="v">{{ importPreview.description || '—' }}</span>
+            </div>
+            <div class="panel-row">
+              <span class="k">文件</span>
+              <span class="v">
+                {{ importPreview.files?.length || 0 }} 个 ·
+                {{
+                  formatSize(
+                    (importPreview.files || []).reduce((sum, file) => sum + (file.size || 0), 0)
+                  )
+                }}
+              </span>
+            </div>
+            <div class="panel-row">
+              <span class="k">setup</span>
+              <span class="v mono">{{ importPreview.setupCommand || '—' }}</span>
+            </div>
+            <div class="panel-row">
+              <span class="k">数据上限</span>
+              <span class="v">{{ formatSize(importPreview.dataMaxBytes) }}</span>
+            </div>
+            <div v-if="importPreview.existing" class="file-hint warn">
+              同名技能已存在，导入将覆盖现有文件。
+            </div>
+            <div v-if="importPreview.warnings?.length" class="file-hint warn">
+              {{ importPreview.warnings.join('；') }}
+            </div>
+          </div>
+          <p class="file-hint">
+            目录式项目需包含 <code>SKILL.md</code>；<code>setup.sh</code>、<code>scripts/</code>
+            会随包导入，<code>data/</code> 不参与导入，由初始化脚本生成。
+          </p>
+        </div>
+        <div class="modal-foot">
+          <button class="ghost" :disabled="previewing || importing" @click="submitImport(true)">
+            {{ previewing ? '解析中…' : '预览' }}
+          </button>
+          <button class="primary" :disabled="previewing || importing" @click="submitImport(false)">
+            {{ importing ? '导入中…' : '导入' }}
           </button>
         </div>
       </div>
@@ -571,5 +979,42 @@ onMounted(load);
 .exec-check input[type='checkbox'] {
   height: auto;
   margin-right: 6px;
+}
+
+.meta-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-item {
+  display: flex;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.meta-item .mono {
+  flex: 0 0 auto;
+  min-width: 120px;
+}
+
+.data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, #fafbfc);
+}
+
+.modal-body .tabs {
+  margin-bottom: 4px;
 }
 </style>

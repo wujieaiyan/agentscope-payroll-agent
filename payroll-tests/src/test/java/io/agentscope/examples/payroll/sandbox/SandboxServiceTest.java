@@ -8,12 +8,17 @@ import io.agentscope.payroll.sandbox.SandboxRequest;
 import io.agentscope.payroll.sandbox.SandboxResult;
 import io.agentscope.payroll.sandbox.SandboxService;
 import io.agentscope.payroll.sandbox.SandboxSettings;
+import io.agentscope.payroll.sandbox.SkillInitState;
+import io.agentscope.payroll.sandbox.SkillInitStatus;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SandboxServiceTest {
 
@@ -133,6 +138,71 @@ class SandboxServiceTest {
         first.join(5000);
     }
 
+    @Test
+    @DisplayName("声明依赖数据的技能在状态非 READY 时拒绝执行，READY 后放行")
+    void requiresReadyData(@TempDir Path skillRoot) throws IOException {
+        SandboxSettings settings =
+                new SandboxSettings(
+                        "token", "docker", "image", 4, "", skillRoot.toString(), "init", 600_000, 1_000_000, 2);
+        AtomicInteger calls = new AtomicInteger();
+        SandboxService service =
+                new SandboxService(settings, (request, sha) -> {
+                    calls.incrementAndGet();
+                    return SandboxResult.ok(0, "", "", 0, sha, false);
+                });
+        SandboxRequest request = requiringData();
+
+        SandboxResult missing = service.execute(request);
+        assertEquals(SandboxResult.DATA_NOT_READY, missing.status());
+        assertTrue(missing.message().contains("未初始化"), missing.message());
+
+        Path skillDir = settings.skillDir("payroll-auditor");
+        long now = System.currentTimeMillis();
+        SkillInitState.write(
+                skillDir, SkillInitStatus.initializing("payroll-auditor", "setup.sh", now));
+        assertTrue(service.execute(request).message().contains("正在初始化"), "初始化中应提示稍后重试");
+
+        SkillInitState.write(
+                skillDir,
+                new SkillInitStatus(
+                        SkillInitStatus.FAILED,
+                        "payroll-auditor",
+                        "setup.sh",
+                        1,
+                        now,
+                        now + 10,
+                        0,
+                        "",
+                        "网络不可用"));
+        SandboxResult failed = service.execute(request);
+        assertEquals(SandboxResult.DATA_NOT_READY, failed.status());
+        assertTrue(failed.message().contains("网络不可用"), failed.message());
+
+        SkillInitState.write(
+                skillDir,
+                new SkillInitStatus(
+                        SkillInitStatus.READY,
+                        "payroll-auditor",
+                        "setup.sh",
+                        0,
+                        now,
+                        now + 10,
+                        1024,
+                        "",
+                        "初始化完成"));
+        assertEquals(SandboxResult.OK, service.execute(request).status());
+        assertEquals(1, calls.get(), "只有 READY 后才允许进入执行器");
+    }
+
+    @Test
+    @DisplayName("未声明依赖数据的技能不检查初始化状态")
+    void skipsDataCheckWhenNotRequired() {
+        SandboxService service =
+                new SandboxService(settings("token", 4), (request, sha) -> SandboxResult.ok(0, "", "", 0, sha, false));
+
+        assertEquals(SandboxResult.OK, service.execute(request(7L)).status());
+    }
+
     private static SandboxSettings settings(String token, int concurrency) {
         return new SandboxSettings(token, "docker", "payroll-sandbox-runtime:local", concurrency, "");
     }
@@ -145,5 +215,16 @@ class SandboxServiceTest {
                 List.of("--month", "2026-11"),
                 1000,
                 List.of(new SandboxRequest.ScriptFile("scripts/check.py", SCRIPT)));
+    }
+
+    private static SandboxRequest requiringData() {
+        return new SandboxRequest(
+                7L,
+                "payroll-auditor",
+                "scripts/check.py",
+                List.of(),
+                1000,
+                List.of(new SandboxRequest.ScriptFile("scripts/check.py", SCRIPT)),
+                true);
     }
 }

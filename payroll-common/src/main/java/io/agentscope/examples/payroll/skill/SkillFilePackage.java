@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.skill;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -10,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,28 +20,43 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 技能包伴生文件：Nacos dataId 为 {@code <skill-id>.files.json}，格式
- * {@code {"version":1,"mdHash":"...","files":[{"path","content"}]}}。
+ * 技能包伴生文件：Nacos dataId 为 {@code <skill-id>.files.json}，v2 格式
+ * {@code {"version":2,"mdHash":"...","meta":{...},"files":[{"path","content"}]}}。
  *
  * <p>{@code mdHash} 绑定正文版本，正文变更后未重发文件包时文件被忽略，避免读到
- * 与提示词不匹配的参考资料。文件只从内存读取，不落盘。
+ * 与提示词不匹配的参考资料。{@code meta} 保留 SKILL.md 原始 frontmatter，
+ * 供管理台保存正文时不被覆盖。v2 兼容读取 v1，写入统一升到 v2。文件只从内存读取，不落盘。
  */
 public final class SkillFilePackage {
 
     public static final String DATA_ID_SUFFIX = ".files.json";
-    public static final int VERSION = 1;
-    public static final int MAX_FILES = 20;
+    public static final int VERSION = 2;
+    public static final int MIN_COMPAT_VERSION = 1;
     public static final String KIND_REFERENCE = "reference";
     public static final String KIND_SCRIPT = "script";
+    public static final String KIND_ASSET = "asset";
 
+    public static final String SKILL_MD = "SKILL.md";
+    public static final String PROMPT_MD = "PROMPT.md";
+    public static final String README_MD = "README.md";
+    public static final String LICENSE = "LICENSE";
+    public static final String SETUP_SH = "setup.sh";
+
+    private static final Set<String> ROOT_FILES =
+            Set.of(SKILL_MD, PROMPT_MD, README_MD, LICENSE, SETUP_SH);
+    private static final List<String> DIRECTORY_PREFIXES =
+            List.of("references/", "scripts/", "assets/");
     private static final String REFERENCES_PREFIX = "references/";
     private static final String SCRIPTS_PREFIX = "scripts/";
+    private static final String ASSETS_PREFIX = "assets/";
     private static final int MAX_PATH_LENGTH = 200;
     private static final Pattern PATH_PATTERN =
             Pattern.compile("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$");
     private static final Pattern CONTROL_PATTERN =
             Pattern.compile("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]");
     private static final Set<String> SCRIPT_SUFFIXES = Set.of(".py", ".sh", ".js");
+    private static final TypeReference<LinkedHashMap<String, Object>> META_TYPE =
+            new TypeReference<>() {};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -50,7 +67,11 @@ public final class SkillFilePackage {
     public record Summary(String path, int size, String kind) {
     }
 
-    public record Parsed(String mdHash, List<SkillFile> files) {
+    public record Parsed(String mdHash, Map<String, Object> meta, List<SkillFile> files) {
+
+        public Parsed(String mdHash, List<SkillFile> files) {
+            this(mdHash, Map.of(), files);
+        }
     }
 
     private SkillFilePackage() {
@@ -86,12 +107,21 @@ public final class SkillFilePackage {
         }
         try {
             JsonNode root = JSON.readTree(raw);
-            if (root == null || root.path("version").asInt(0) != VERSION) {
+            if (root == null) {
+                return Optional.empty();
+            }
+            int version = root.path("version").asInt(0);
+            if (version < MIN_COMPAT_VERSION || version > VERSION) {
                 return Optional.empty();
             }
             String mdHash = root.path("mdHash").asText("");
             if (mdHash.isBlank()) {
                 return Optional.empty();
+            }
+            Map<String, Object> meta = new LinkedHashMap<>();
+            JsonNode metaNode = root.path("meta");
+            if (metaNode.isObject()) {
+                meta.putAll(JSON.convertValue(metaNode, META_TYPE));
             }
             List<SkillFile> files = new ArrayList<>();
             JsonNode items = root.path("files");
@@ -103,16 +133,29 @@ public final class SkillFilePackage {
                                     item.path("content").asText("")));
                 }
             }
-            return Optional.of(new Parsed(mdHash, List.copyOf(files)));
+            return Optional.of(
+                    new Parsed(
+                            mdHash,
+                            Collections.unmodifiableMap(meta),
+                            List.copyOf(files)));
         } catch (JsonProcessingException | RuntimeException e) {
             return Optional.empty();
         }
     }
 
     public static String compose(String mdHash, List<SkillFile> files) {
+        return compose(mdHash, Map.of(), files);
+    }
+
+    public static String compose(String mdHash, Map<String, Object> meta, List<SkillFile> files) {
         ObjectNode root = JSON.createObjectNode();
         root.put("version", VERSION);
         root.put("mdHash", mdHash == null ? "" : mdHash);
+        if (meta == null || meta.isEmpty()) {
+            root.putObject("meta");
+        } else {
+            root.set("meta", JSON.valueToTree(meta));
+        }
         ArrayNode items = root.putArray("files");
         for (SkillFile file : files) {
             ObjectNode item = items.addObject();
@@ -132,8 +175,9 @@ public final class SkillFilePackage {
         if (files == null || files.isEmpty()) {
             return List.of();
         }
-        if (files.size() > MAX_FILES) {
-            throw new PayrollException("技能文件最多 " + MAX_FILES + " 个，当前 " + files.size() + " 个");
+        int maxFiles = settings.maxFiles();
+        if (files.size() > maxFiles) {
+            throw new PayrollException("技能文件最多 " + maxFiles + " 个，当前 " + files.size() + " 个");
         }
         Map<String, SkillFile> unique = new LinkedHashMap<>();
         long totalBytes = 0;
@@ -163,7 +207,10 @@ public final class SkillFilePackage {
         return List.copyOf(unique.values());
     }
 
-    /** 只允许 {@code references/**} 与 {@code scripts/**} 下的相对路径。 */
+    /**
+     * 允许的包内路径：固定根文件，或 {@code references/**}、{@code scripts/**}、
+     * {@code assets/**} 下的相对路径。{@code data/**} 属于沙箱工作区，不进包。
+     */
     public static String normalizePath(String raw) {
         String path = raw == null ? "" : raw.trim();
         if (path.isBlank()) {
@@ -187,8 +234,15 @@ public final class SkillFilePackage {
                 throw new PayrollException("文件路径不能包含 . 或 .. 片段：" + path);
             }
         }
-        if (!path.startsWith(REFERENCES_PREFIX) && !path.startsWith(SCRIPTS_PREFIX)) {
-            throw new PayrollException("文件只能放在 references/ 或 scripts/ 目录下：" + path);
+        if (ROOT_FILES.contains(path)) {
+            return path;
+        }
+        if (DIRECTORY_PREFIXES.stream().noneMatch(path::startsWith)) {
+            throw new PayrollException(
+                    "文件只能放在 references/、scripts/、assets/ 目录下，或使用固定根文件 "
+                            + String.join("、", ROOT_FILES.stream().sorted().toList())
+                            + "："
+                            + path);
         }
         if (path.startsWith(SCRIPTS_PREFIX)
                 && SCRIPT_SUFFIXES.stream().noneMatch(path::endsWith)) {
@@ -197,8 +251,41 @@ public final class SkillFilePackage {
         return path;
     }
 
+    /**
+     * skill_read 可读路径：说明文件与 references/scripts；{@code setup.sh} 与
+     * {@code assets/**} 不进模型上下文。
+     */
+    public static String normalizeReadPath(String raw) {
+        String path = normalizePath(raw);
+        if (!isReadable(path)) {
+            throw new PayrollException(
+                    "只能读取 references/**、scripts/** 与 SKILL.md/PROMPT.md/README.md/LICENSE："
+                            + path);
+        }
+        return path;
+    }
+
+    public static boolean isReadable(String path) {
+        if (path == null) {
+            return false;
+        }
+        if (ROOT_FILES.contains(path)) {
+            return !SETUP_SH.equals(path);
+        }
+        return path.startsWith(REFERENCES_PREFIX) || path.startsWith(SCRIPTS_PREFIX);
+    }
+
     public static String kind(String path) {
-        return path != null && path.startsWith(SCRIPTS_PREFIX) ? KIND_SCRIPT : KIND_REFERENCE;
+        if (path == null) {
+            return KIND_REFERENCE;
+        }
+        if (path.startsWith(SCRIPTS_PREFIX)) {
+            return KIND_SCRIPT;
+        }
+        if (path.startsWith(ASSETS_PREFIX)) {
+            return KIND_ASSET;
+        }
+        return KIND_REFERENCE;
     }
 
     public static Summary summary(SkillFile file) {

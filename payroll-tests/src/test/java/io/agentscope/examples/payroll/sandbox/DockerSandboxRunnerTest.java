@@ -51,7 +51,29 @@ class DockerSandboxRunnerTest {
         assertTrue(command.contains("python3"), command.toString());
         assertTrue(command.contains("/src/scripts/check.py"), command.toString());
         assertTrue(command.contains("--month"), command.toString());
+        assertTrue(
+                command.stream().noneMatch(value -> value.contains("target=/data")),
+                "没有数据目录时不应挂载 /data");
         assertTrue(directories(workDir).isEmpty(), "执行后应清理工作目录");
+    }
+
+    @Test
+    @DisplayName("技能数据目录存在时只读挂载到 /data")
+    void mountsSkillDataReadOnly() throws IOException {
+        Files.createDirectories(workDir.resolve("skills/payroll-auditor/data/poems"));
+        FakeExecutor executor = new FakeExecutor(List.of(outcome(0, "", "")));
+        DockerSandboxRunner runner = new DockerSandboxRunner(settings(), executor);
+
+        runner.run(request(), "sha");
+
+        List<String> command = executor.commands.get(0);
+        String mount =
+                command.stream()
+                        .filter(value -> value.contains("target=/data"))
+                        .findFirst()
+                        .orElseThrow(() -> new AssertionError("缺少 /data 挂载：" + command));
+        assertTrue(mount.contains("readonly"), mount);
+        assertTrue(mount.contains("payroll-auditor"), mount);
     }
 
     @Test

@@ -7,6 +7,7 @@ import io.agentscope.core.tool.ToolParam;
 import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
 import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.SkillExecutions;
+import io.agentscope.examples.payroll.skill.SkillInitRequirements;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -85,6 +86,7 @@ public final class SkillRunTools {
                 可执行脚本：%s。
                 需要时调用 skill_run(script_path, args) 提交执行；执行前必须由用户在确认卡片中确认，未确认不会运行。
                 脚本在禁网、只读、非 root 的一次性容器中运行，最长 %d 秒，不能安装依赖或访问宿主文件。
+                初始化后的技能数据只读挂载在容器内 /data，脚本可直接读取；技能声明了 setup 时，数据未初始化会被拒绝。
                 多个技能含同名脚本时用 skill_id 指定；输出超长会截断。
                 """
                 .formatted(String.join("；", lines), Math.max(1, timeoutMs / 1000));
@@ -146,6 +148,14 @@ public final class SkillRunTools {
             record(context, arguments, result, startedAt);
             return result;
         }
+        if (SkillInitRequirements.requiresData(target)) {
+            String notReady = dataNotReady(target);
+            if (notReady != null) {
+                result = error(notReady);
+                record(context, arguments, result, startedAt);
+                return result;
+            }
+        }
         ActionGuard guard = context == null ? null : context.get(ActionGuard.class);
         if (guard == null) {
             result = error("脚本执行需要会话内确认，当前调用上下文不可用，已拒绝直接运行");
@@ -165,6 +175,39 @@ public final class SkillRunTools {
                 timeoutMs);
         record(context, arguments, result, startedAt);
         return result;
+    }
+
+    /**
+     * 技能声明 setup 时先核对数据状态；就绪返回 null，否则返回可直接展示的提示。
+     */
+    private String dataNotReady(AgentSkill skill) {
+        if (gateway == null) {
+            return "技能需要初始化数据，但当前无法访问沙箱，已拒绝执行";
+        }
+        SandboxGateway.SkillData data;
+        try {
+            data = gateway.skillData(skill.getName());
+        } catch (RuntimeException e) {
+            return "无法确认技能数据状态：" + e.getMessage();
+        }
+        String status = data == null ? null : data.status();
+        if (status == null) {
+            return "技能数据未初始化，请先在技能管理台执行初始化";
+        }
+        return switch (status) {
+            case SandboxGateway.SkillData.READY -> null;
+            case SandboxGateway.SkillData.INITIALIZING -> "技能数据正在初始化，请稍后重试";
+            case SandboxGateway.SkillData.FAILED -> "技能数据初始化失败，请先在技能管理台重新初始化"
+                    + (data.message() == null || data.message().isBlank()
+                            ? ""
+                            : "：" + data.message());
+            case SandboxGateway.SkillData.BUSY,
+                    SandboxGateway.SkillData.UNAVAILABLE,
+                    SandboxGateway.SkillData.INVALID ->
+                    "无法确认技能数据状态："
+                            + (data.message() == null ? status : data.message());
+            default -> "技能数据未初始化，请先在技能管理台执行初始化";
+        };
     }
 
     /**

@@ -2,6 +2,7 @@
 # 用法：
 #   mvn -DskipTests package
 #   docker build -f docker/sandbox-runtime.Dockerfile -t payroll-sandbox-runtime:local .
+#   docker build -f docker/sandbox-init.Dockerfile -t payroll-sandbox-init:local .
 #   docker compose -f docker/docker-compose.yml up -d --build
 #   浏览器访问 http://127.0.0.1:18088
 # 说明：
@@ -12,6 +13,8 @@
 #   - 模型由 compose 内的 Ollama 提供，直接挂载宿主机模型目录（只读），无需宿主机 Ollama。
 #   - sandbox 通过 docker.sock 启动一次性脚本容器；work 目录在宿主机与容器内保持同一绝对路径，
 #     否则宿主机 Docker 看不到脚本 bind 源。脚本容器本身禁网、只读、非 root、限额运行。
+#   - 技能数据初始化使用独立 init 镜像（允许联网），工作区在 work 目录下的 skills/，
+#     可用 PAYROLL_SANDBOX_SKILL_ROOT 覆盖；初始化后的 data/ 以只读方式挂到运行容器的 /data。
 
 name: payroll-multinode
 
@@ -196,10 +199,14 @@ services:
       PAYROLL_SANDBOX_SCRIPT_IMAGE: ${PAYROLL_SANDBOX_SCRIPT_IMAGE:-payroll-sandbox-runtime:local}
       PAYROLL_SANDBOX_MAX_CONCURRENCY: "4"
       PAYROLL_SANDBOX_WORK_DIR: ${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}
+      # 技能工作区（<root>/<id>/data）与 init 镜像；路径须与宿主机一致，嵌套的 docker run 才能 bind。
+      PAYROLL_SANDBOX_SKILL_ROOT: ${PAYROLL_SANDBOX_SKILL_ROOT:-/tmp/payroll-sandbox-work/skills}
+      PAYROLL_SANDBOX_INIT_IMAGE: ${PAYROLL_SANDBOX_INIT_IMAGE:-payroll-sandbox-init:local}
       TZ: Asia/Shanghai
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}:${PAYROLL_SANDBOX_WORK_DIR:-/tmp/payroll-sandbox-work}
+      - ${PAYROLL_SANDBOX_SKILL_ROOT:-/tmp/payroll-sandbox-work/skills}:${PAYROLL_SANDBOX_SKILL_ROOT:-/tmp/payroll-sandbox-work/skills}
     expose:
       - "8200"
 

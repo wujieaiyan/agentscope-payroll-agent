@@ -105,6 +105,39 @@ class SandboxControllerTest {
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, unavailable.getStatusCode());
     }
 
+    @Test
+    @DisplayName("技能数据未就绪映射为 409")
+    void mapsDataNotReadyToConflict() {
+        ResponseEntity<SandboxResult> response =
+                call(
+                        controller(TOKEN, (request, sha) -> SandboxResult.dataNotReady("技能数据未初始化")),
+                        sign(TOKEN, BODY),
+                        BODY);
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        assertNotNull(response.getBody());
+        assertEquals(SandboxResult.DATA_NOT_READY, response.getBody().status());
+    }
+
+    @Test
+    @DisplayName("require_data 透传到请求对象")
+    void parsesRequireData() {
+        String body = BODY.replace("\"scripts\":[", "\"require_data\":true,\"scripts\":[");
+        java.util.concurrent.atomic.AtomicReference<Boolean> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        SandboxRunner runner =
+                (request, sha) -> {
+                    seen.set(request.requireData());
+                    return SandboxResult.ok(0, "", "", 0, sha, false);
+                };
+
+        ResponseEntity<SandboxResult> response = call(controller(TOKEN, runner), sign(TOKEN, body), body);
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        assertNotNull(response.getBody());
+        assertEquals(SandboxResult.DATA_NOT_READY, response.getBody().status());
+        assertNull(seen.get(), "require_data=true 应在进入执行器前被数据状态拦截");
+    }
+
     private static ResponseEntity<SandboxResult> call(
             SandboxController controller, String signature, String body) {
         return controller.execute(timestamp(), signature, body);

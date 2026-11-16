@@ -12,27 +12,33 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillDetail;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillSummary;
 import io.agentscope.examples.payroll.skill.RoleSkills;
 import io.agentscope.examples.payroll.skill.SkillFilePackage;
+import io.agentscope.examples.payroll.skill.SkillImportService;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class SkillAdminControllerTest {
 
     private final NacosSkillRegistry registry = mock(NacosSkillRegistry.class);
     private final NacosAgentRegistry agentRegistry = mock(NacosAgentRegistry.class);
     private final AuditService auditService = mock(AuditService.class);
+    private final SkillImportService importService = mock(SkillImportService.class);
+    private final SandboxGateway gateway = mock(SandboxGateway.class);
     private final SkillAdminController controller =
-            new SkillAdminController(registry, agentRegistry, auditService);
+            new SkillAdminController(registry, agentRegistry, auditService, importService, gateway);
 
     @Test
     @DisplayName("列表返回存储状态并按关键字过滤")
@@ -248,6 +254,236 @@ class SkillAdminControllerTest {
                         "payroll-auditor",
                         Map.of("path", "references/old.md"),
                         Map.of("deleted", "references/old.md"));
+    }
+
+    @Test
+    @DisplayName("Git 导入写入来源与提交审计")
+    void importGitWritesAudit() {
+        SkillImportService.ImportResult result =
+                new SkillImportService.ImportResult(
+                        "poetry",
+                        "abc123",
+                        "诗词技能",
+                        Map.of("version", "1.0.0"),
+                        List.of(new SkillFilePackage.Summary("scripts/query.py", 12, "script")),
+                        "sh setup.sh",
+                        1024L,
+                        List.of(),
+                        false,
+                        false);
+        when(importService.importGit(
+                        "https://github.com/Wscats/poetry-skills.git", "main", "poetry", true, false))
+                .thenReturn(result);
+
+        ApiResponse response =
+                controller.importGit(
+                        new SkillAdminController.GitImportInput(
+                                "https://github.com/Wscats/poetry-skills.git",
+                                "main",
+                                "poetry",
+                                true,
+                                false));
+
+        assertSame(result, response.data());
+        verify(auditService).record(eq("skill.import"), eq("skill"), eq("poetry"), eq(null), any());
+    }
+
+    @Test
+    @DisplayName("dryRun 导入只返回预览，不写审计")
+    void importDryRunSkipsAudit() {
+        SkillImportService.ImportResult preview =
+                new SkillImportService.ImportResult(
+                        "poetry",
+                        null,
+                        "诗词技能",
+                        Map.of(),
+                        List.of(),
+                        null,
+                        1024L,
+                        List.of("activation 首期只展示，不参与技能路由"),
+                        false,
+                        true);
+        when(importService.importGit(
+                        "https://github.com/Wscats/poetry-skills.git", null, "poetry", false, true))
+                .thenReturn(preview);
+
+        ApiResponse response =
+                controller.importGit(
+                        new SkillAdminController.GitImportInput(
+                                "https://github.com/Wscats/poetry-skills.git",
+                                null,
+                                "poetry",
+                                false,
+                                true));
+
+        assertSame(preview, response.data());
+        verify(auditService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("数据状态解析 setup 并透传初始化进度")
+    void dataStatusReportsSetupAndState() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.skillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.READY,
+                                "poetry-skill",
+                                0,
+                                1_000L,
+                                2_000L,
+                                4_096L,
+                                "done",
+                                "初始化完成"));
+
+        Map<?, ?> data = (Map<?, ?>) controller.dataStatus("poetry-skill").data();
+
+        assertEquals(true, data.get("requiresData"));
+        assertEquals("setup.sh", data.get("setupPath"));
+        assertEquals(SandboxGateway.SkillData.READY, data.get("status"));
+        assertEquals(4_096L, data.get("sizeBytes"));
+        verify(auditService, never()).record(eq("skill.init.finish"), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("未声明 setup 的技能拒绝初始化")
+    void initDataRejectsMissingSetup() {
+        when(registry.detail("payroll-auditor"))
+                .thenReturn(
+                        new SkillDetail(
+                                "payroll-auditor",
+                                "薪酬审计",
+                                "正文",
+                                "nacos",
+                                false,
+                                false,
+                                1L,
+                                List.of(new SkillFilePackage.Summary("scripts/run.py", 3, "script")),
+                                true,
+                                Map.of()));
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class, () -> controller.initData("payroll-auditor", null));
+
+        assertTrue(error.getMessage().contains("setup"), error.getMessage());
+        verify(gateway, never()).initSkill(any());
+    }
+
+    @Test
+    @DisplayName("数据已就绪时初始化需要显式 confirm")
+    void initDataRequiresOverwriteWhenReady() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(registry.fileContent("poetry-skill", "setup.sh")).thenReturn("#!/bin/sh");
+        when(registry.fileContent("poetry-skill", "scripts/query.py")).thenReturn("print(1)");
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.skillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.READY, "poetry-skill", 0, 1, 2, 3, "", ""));
+
+        assertThrows(
+                PayrollConflictException.class,
+                () -> controller.initData("poetry-skill", new SkillAdminController.DataInitInput(false)));
+
+        verify(gateway, never()).initSkill(any());
+        verify(gateway, never()).deleteSkillData(any());
+    }
+
+    @Test
+    @DisplayName("初始化提交整包并按终态补记 skill.init.finish")
+    void initDataSubmitsPackageAndRecordsFinish() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(registry.fileContent("poetry-skill", "setup.sh")).thenReturn("#!/bin/sh\necho seed");
+        when(registry.fileContent("poetry-skill", "scripts/query.py")).thenReturn("print(1)");
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.skillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.UNKNOWN, "poetry-skill", null, 0, 0, 0, "", ""));
+        when(gateway.deleteSkillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.UNKNOWN, "poetry-skill", null, 0, 0, 0, "", "工作区已删除"));
+        when(gateway.initSkill(any()))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.INITIALIZING, "poetry-skill", null, 1, 0, 0, "", "已提交"));
+
+        Map<?, ?> data =
+                (Map<?, ?>)
+                        controller
+                                .initData("poetry-skill", new SkillAdminController.DataInitInput(true))
+                                .data();
+
+        assertEquals(SandboxGateway.SkillData.INITIALIZING, data.get("status"));
+        ArgumentCaptor<SandboxGateway.InitRequest> captured =
+                ArgumentCaptor.forClass(SandboxGateway.InitRequest.class);
+        verify(gateway).initSkill(captured.capture());
+        SandboxGateway.InitRequest request = captured.getValue();
+        assertEquals("setup.sh", request.setupPath());
+        assertEquals("#!/bin/sh\necho seed", request.setupContent());
+        assertEquals(2, request.files().size());
+        assertEquals(
+                List.of("setup.sh", "scripts/query.py"),
+                request.files().stream().map(SandboxGateway.Script::path).toList());
+        verify(gateway).deleteSkillData("poetry-skill");
+        verify(auditService).record(eq("skill.init.start"), eq("skill"), eq("poetry-skill"), any(), any());
+
+        when(gateway.skillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.READY,
+                                "poetry-skill",
+                                0,
+                                1,
+                                2,
+                                4_096L,
+                                "done",
+                                "初始化完成"));
+        controller.dataStatus("poetry-skill");
+
+        verify(auditService).record(eq("skill.init.finish"), eq("skill"), eq("poetry-skill"), eq(null), any());
+    }
+
+    @Test
+    @DisplayName("删除技能数据写入审计")
+    void deleteDataWritesAudit() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.skillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.READY, "poetry-skill", 0, 1, 2, 4_096L, "", ""));
+        when(gateway.deleteSkillData("poetry-skill"))
+                .thenReturn(
+                        new SandboxGateway.SkillData(
+                                SandboxGateway.SkillData.UNKNOWN, "poetry-skill", null, 0, 0, 0, "", "工作区已删除"));
+
+        controller.deleteData("poetry-skill");
+
+        verify(auditService)
+                .record(eq("skill.data.delete"), eq("skill"), eq("poetry-skill"), any(), any());
+    }
+
+    private static SkillDetail scriptedDetail() {
+        return new SkillDetail(
+                "poetry-skill",
+                "诗词技能",
+                "正文",
+                "nacos",
+                false,
+                false,
+                1L,
+                List.of(
+                        new SkillFilePackage.Summary("setup.sh", 10, "reference"),
+                        new SkillFilePackage.Summary("scripts/query.py", 8, "script"),
+                        new SkillFilePackage.Summary("assets/sample.json", 16, "reference"),
+                        new SkillFilePackage.Summary("references/quickstart.md", 20, "reference"),
+                        new SkillFilePackage.Summary("notes.md", 5, "reference")),
+                true,
+                Map.of("setup", "bash setup.sh"));
     }
 
     private static AgentDefinition agent(String name, String skillId) {

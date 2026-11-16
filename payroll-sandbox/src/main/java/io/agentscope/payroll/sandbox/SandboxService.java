@@ -37,6 +37,12 @@ public class SandboxService {
         } catch (IllegalArgumentException e) {
             return SandboxResult.invalid(e.getMessage());
         }
+        if (request.requireData()) {
+            SandboxResult notReady = requireReadyData(request);
+            if (notReady != null) {
+                return notReady;
+            }
+        }
         if (!globalSlots.tryAcquire()) {
             return SandboxResult.busy("沙箱并发已满，请稍后重试");
         }
@@ -55,6 +61,22 @@ public class SandboxService {
             }
             globalSlots.release();
         }
+    }
+
+    /** 技能声明了 setup：数据必须 READY，否则返回可直接展示给用户的提示；就绪返回 null。 */
+    private SandboxResult requireReadyData(SandboxRequest request) {
+        SkillInitStatus state = SkillInitState.read(settings.skillDir(request.skillId()));
+        if (state != null && state.ready()) {
+            return null;
+        }
+        if (state == null) {
+            return SandboxResult.dataNotReady("技能数据未初始化，请先在技能管理台执行初始化");
+        }
+        if (SkillInitStatus.INITIALIZING.equals(state.status())) {
+            return SandboxResult.dataNotReady("技能数据正在初始化，请稍后重试");
+        }
+        String detail = state.message() == null || state.message().isBlank() ? "" : "：" + state.message();
+        return SandboxResult.dataNotReady("技能数据初始化失败，请先在技能管理台重新初始化" + detail);
     }
 
     /** 返回目标脚本完整 SHA-256；同时完成路径、数量、大小与参数校验。 */

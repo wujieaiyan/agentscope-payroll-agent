@@ -298,19 +298,130 @@ class NacosSkillRegistryTest {
                 () ->
                         registry.replaceFiles(
                                 AUDITOR,
-                                List.of(file("references/big.md", "x".repeat(64 * 1024 + 1)))));
+                                List.of(file("references/big.md", "x".repeat(512 * 1024 + 1)))));
         List<SkillFilePackage.SkillFile> many =
-                IntStream.rangeClosed(1, 21)
+                IntStream.rangeClosed(1, 201)
                         .mapToObj(index -> file("references/f" + index + ".md", "x"))
                         .toList();
         assertThrows(PayrollException.class, () -> registry.replaceFiles(AUDITOR, many));
         List<SkillFilePackage.SkillFile> heavy =
-                IntStream.rangeClosed(1, 5)
-                        .mapToObj(index -> file("references/heavy" + index + ".md", "x".repeat(60_000)))
+                IntStream.rangeClosed(1, 9)
+                        .mapToObj(index -> file("references/heavy" + index + ".md", "x".repeat(500_000)))
                         .toList();
         assertThrows(PayrollException.class, () -> registry.replaceFiles(AUDITOR, heavy));
 
         assertFalse(nacos.configs.containsKey(AUDITOR + ".files.json"));
+    }
+
+    @Test
+    @DisplayName("接受技能项目根文件、assets 与脚本，拒绝 data 与非白名单根文件")
+    void acceptsProjectFiles() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+
+        List<SkillFilePackage.Summary> saved =
+                registry.replaceFiles(
+                        AUDITOR,
+                        List.of(
+                                file("SKILL.md", "# 技能"),
+                                file("PROMPT.md", "提示"),
+                                file("README.md", "说明"),
+                                file("LICENSE", "MIT"),
+                                file("setup.sh", "echo ok"),
+                                file("references/faq.md", "# FAQ"),
+                                file("scripts/check.py", "print('ok')"),
+                                file("assets/data.json", "{}")));
+
+        assertEquals(8, saved.size());
+        assertEquals(SkillFilePackage.KIND_SCRIPT, kindOf(saved, "scripts/check.py"));
+        assertEquals(SkillFilePackage.KIND_ASSET, kindOf(saved, "assets/data.json"));
+        assertEquals(SkillFilePackage.KIND_REFERENCE, kindOf(saved, "README.md"));
+
+        assertTrue(SkillFilePackage.isReadable("SKILL.md"));
+        assertTrue(SkillFilePackage.isReadable("PROMPT.md"));
+        assertFalse(SkillFilePackage.isReadable("setup.sh"));
+        assertFalse(SkillFilePackage.isReadable("assets/data.json"));
+        assertThrows(PayrollException.class, () -> SkillFilePackage.normalizeReadPath("setup.sh"));
+
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("data/poetry.json", "{}"))));
+        assertThrows(
+                PayrollException.class,
+                () -> registry.replaceFiles(AUDITOR, List.of(file("notes.md", "x"))));
+    }
+
+    @Test
+    @DisplayName("保存正文保留导入项目的 version/license/activation/setup 等元信息")
+    void preservesProjectMetadata() throws IOException {
+        nacos = new FakeNacosServer();
+        String body = roleContent("诗词查询规则。");
+        nacos.configs.put(
+                "poetry.md",
+                "---\n"
+                        + "name: poetry\n"
+                        + "version: 1.0.0\n"
+                        + "license: MIT\n"
+                        + "description: \"诗词检索与生成\"\n"
+                        + "type: prompt\n"
+                        + "activation:\n"
+                        + "  - trigger: \"诗词生成\"\n"
+                        + "    description: \"写诗时激活\"\n"
+                        + "setup: \"sh setup.sh\"\n"
+                        + "data:\n"
+                        + "  max-bytes: 536870912\n"
+                        + "execution:\n"
+                        + "  enabled: true\n"
+                        + "  timeout-seconds: 20\n"
+                        + "---\n"
+                        + body);
+        NacosSkillRegistry registry = registry(true);
+
+        SkillDetail detail = registry.detail("poetry");
+        assertEquals("诗词检索与生成", detail.description());
+        assertEquals("1.0.0", detail.metadata().get("version"));
+        assertTrue(detail.executionEnabled());
+        assertTrue(detail.metadata().containsKey("activation"));
+
+        registry.update("poetry", "诗词检索与生成", body, true);
+
+        String raw = nacos.configs.get("poetry.md");
+        assertTrue(raw.contains("version: 1.0.0"), raw);
+        assertTrue(raw.contains("license: MIT"), raw);
+        assertTrue(raw.contains("type: prompt"), raw);
+        assertTrue(raw.contains("setup: sh setup.sh"), raw);
+        assertTrue(raw.contains("max-bytes: 536870912"), raw);
+        assertTrue(raw.contains("trigger: \"诗词生成\""), raw);
+        assertTrue(raw.contains("execution:\n  timeout-seconds: 20\n  enabled: true"), raw);
+
+        SkillDetail reloaded = registry(true).detail("poetry");
+        assertEquals("1.0.0", reloaded.metadata().get("version"));
+        assertTrue(reloaded.executionEnabled());
+    }
+
+    @Test
+    @DisplayName("v2 写入并兼容读取 v1 文件包")
+    void readsLegacyV1Package() throws IOException {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        String body = registry.detail(AUDITOR).content();
+        nacos.configs.put(
+                AUDITOR + ".files.json",
+                "{\"version\":1,\"mdHash\":\""
+                        + SkillFilePackage.mdHash(body)
+                        + "\",\"files\":[{\"path\":\"references/faq.md\",\"content\":\"# FAQ\"}]}");
+
+        NacosSkillRegistry reloaded = registry(true);
+        SkillDetail detail = reloaded.detail(AUDITOR);
+        assertEquals(1, detail.files().size());
+        assertEquals("# FAQ", reloaded.fileContent(AUDITOR, "references/faq.md"));
+
+        registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
+        assertTrue(
+                nacos.configs.get(AUDITOR + ".files.json").contains("\"version\" : 2"),
+                nacos.configs.get(AUDITOR + ".files.json"));
     }
 
     @Test
@@ -379,6 +490,14 @@ class NacosSkillRegistryTest {
 
     private static SkillFilePackage.SkillFile file(String path, String content) {
         return new SkillFilePackage.SkillFile(path, content);
+    }
+
+    private static String kindOf(List<SkillFilePackage.Summary> files, String path) {
+        return files.stream()
+                .filter(file -> file.path().equals(path))
+                .map(SkillFilePackage.Summary::kind)
+                .findFirst()
+                .orElseThrow();
     }
 
     private static String roleContent(String marker) {

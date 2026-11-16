@@ -166,14 +166,29 @@ public class DockerSandboxRunner implements SandboxRunner {
                         "--security-opt",
                         "no-new-privileges",
                         "--mount",
-                        "type=bind,source=" + src.toAbsolutePath() + ",target=/src,readonly",
-                        "-w",
-                        "/work",
-                        settings.scriptImage()));
+                        "type=bind,source=" + src.toAbsolutePath() + ",target=/src,readonly"));
+        Path dataDir = dataDir(request.skillId());
+        if (dataDir != null) {
+            command.add("--mount");
+            command.add(
+                    "type=bind,source="
+                            + dataDir.toAbsolutePath()
+                            + ",target="
+                            + SandboxProtocol.DATA_MOUNT
+                            + ",readonly");
+        }
+        command.addAll(List.of("-w", "/work", settings.scriptImage()));
         command.addAll(SandboxProtocol.interpreter(request.scriptPath()));
         command.add("/src/" + request.scriptPath());
         command.addAll(SandboxProtocol.requireArgs(request.args()));
         return command;
+    }
+
+    /** 技能数据目录存在才挂载；路径由已校验的技能 ID 推导，不接受请求传入。 */
+    private Path dataDir(String skillId) {
+        String id = SandboxProtocol.requireSkillId(skillId);
+        Path dir = settings.skillDataDir(id);
+        return Files.isDirectory(dir) ? dir : null;
     }
 
     private void killContainer(String containerName) {

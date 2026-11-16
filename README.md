@@ -312,15 +312,19 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 
 ### 参考文件与脚本文件
 
-技能可携带配套文件（参考文档、脚本），存放在同 group 的 `<技能ID>.files.json`：
+技能可携带配套文件（参考文档、脚本、目录式技能项目的根文件），存放在同 group 的 `<技能ID>.files.json`：
 
 ```json
-{"version":1,"mdHash":"<正文前16位 SHA-256>","files":[{"path":"references/faq.md","content":"..."}]}
+{"version":2,"mdHash":"<正文前16位 SHA-256>","meta":{...},"files":[{"path":"references/faq.md","content":"..."}]}
 ```
 
-- 路径规则：只允许 `references/**` 与 `scripts/**`，使用 `/` 分隔的相对路径；
-  拒绝 `.`/`..` 段、反斜杠、控制字符；脚本仅允许 `.py`/`.sh`/`.js`。
-- 容量上限：单技能最多 20 个文件、单文件 64KB（65536）、总量 256KB（262144）。
+- 路径白名单：根文件 `SKILL.md`、`PROMPT.md`、`README.md`、`LICENSE`、`setup.sh`（固定名），
+  目录 `references/**`、`scripts/**`、`assets/**`；使用 `/` 分隔的相对路径，
+  拒绝 `.`/`..` 段、反斜杠、控制字符；脚本仅允许 `.py`/`.sh`/`.js`；`data/**` 永不入库。
+- 容量上限：单技能最多 200 个文件、单文件 512KB（524288）、总量 4MB（4194304）；
+  大数据请放技能工作区 `data/`（见下节）。
+- `meta` 保存导入时的完整 frontmatter；管理台保存正文只重写 `name/description/execution`，
+  `version/license/type/activation/setup/data` 原样保留。v2 兼容读取 v1，写入统一升到 v2。
 - `mdHash` 绑定：文件包与正文哈希绑定，正文变更后未重发文件包会被忽略并告警，避免读到过期参考。
   在管理台保存正文时由后端自动重算并重发文件包；直接改 Nacos 控制台的正文需重新上传文件。
 - 管理台“技能管理”编辑弹窗分为“正文 / 参考文件 / 脚本文件”三个页签，支持新增、编辑、
@@ -356,13 +360,64 @@ FAQ 片段、模板、字段口径等短参考走 `skill_read`（不带引用）
 - 管理台“技能管理”的脚本页签提供“启用执行”开关，保存时写入 frontmatter `execution.enabled`；
   正文变更会使智能体缓存键失效，重启后同样生效。
 
+### 技能项目导入与数据初始化
+
+目录式技能（如 [Wscats/poetry-skills](https://github.com/Wscats/poetry-skills)）可直接导入：
+`SKILL.md` 带完整 frontmatter，可带 `PROMPT.md`/`README.md`/`LICENSE`/`setup.sh`、`references/**`、
+`scripts/**`，大数据 `data/` 不随包发布，由技能自己的 `setup.sh` 在沙箱工作区下载。
+设计说明见 [docs/skill-project-package-design.md](docs/skill-project-package-design.md)。
+
+导入接口（均需 `skill:manage`）：
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| POST | `/api/admin/skills/import/git` | JSON `{url, ref?, id?, overwrite?, dryRun?}` |
+| POST | `/api/admin/skills/import/zip` | multipart `file`、`id?`、`overwrite?`、`dryRun?` |
+| GET | `/api/admin/skills/{id}/data` | 数据工作区状态 |
+| POST | `/api/admin/skills/{id}/data/init` | `{overwrite}`；已 READY 时必须显式重建 |
+| DELETE | `/api/admin/skills/{id}/data` | 删除数据工作区，回到未初始化 |
+
+- Git 仅支持 `https://`，主机白名单 `PAYROLL_SKILL_IMPORT_HOSTS`（默认 `github.com,gitlab.com,gitee.com`），
+  使用 JGit 浅克隆（`depth=1`，可指定 `ref`），不依赖宿主机 git；解析到的 commit SHA 记入审计与详情。
+- ZIP 单包 ≤20MB、≤2000 个条目；解压前校验绝对路径、`..`、符号链接与加密项，单层顶层目录自动剥离。
+- `dryRun=true` 只解析并返回 id、元信息、文件清单、检测到的 setup 与冲突项，不写 Nacos。
+- 同 id 已存在且 `overwrite=false` 返回 409；覆盖只替换包与正文，不删除已初始化数据。
+- 解析阶段把文本 CRLF 归一化为 LF，避免 Windows 检出的脚本在 Linux 沙箱报 `bad interpreter`。
+- 审计：`skill.import`（来源 URL/SHA 或 ZIP 名称、文件数、总大小、是否覆盖）。
+
+数据初始化（`POST /{id}/data/init`）在独立 init 容器中执行技能自带的 setup 脚本：
+
+- 镜像 `PAYROLL_SANDBOX_INIT_IMAGE`（默认 `payroll-sandbox-init:local`，含 python3/node/git/curl），
+  允许联网（`--network bridge`），其余隔离与运行容器一致：只读根盘、`/work` tmpfs、非 root（65534）、
+  `cap-drop ALL`、no-new-privileges；`/skill` 为包副本，`/skill/data` 为工作区 rw。
+- 解释器按 setup 脚本 shebang 选择：`.py` → `python3 -B`，`.js` → `node`，声明 bash 的 `.sh` → `/bin/bash`，
+  其余 `.sh` → `/bin/sh`。
+- 限额：CPU 1、内存 1GB、PID 128、超时 600s（硬上限 900s）、数据目录默认 2GB（硬上限 5GB）；
+  每 5s 统计 data 大小，超限立即 kill 并标记 FAILED。全局并发 2，同技能同时只允许一次初始化。
+- 状态写入 `PAYROLL_SANDBOX_SKILL_ROOT/<id>/.init.json`（snake_case）：
+  `status`（INITIALIZING/READY/FAILED）、`exit_code`、`started_at`/`finished_at`（epoch 毫秒）、
+  `size_bytes`、`log_tail`（末尾 8KB）、`message`。
+- 审计：`skill.init.start`、`skill.init.finish`（状态、退出码、耗时、大小）、`skill.data.delete`。
+
+运行期 `skill_run` 把 `<root>/<id>/data` 只读挂到容器的 `/data`，脚本从 `/data` 读取；
+执行容器仍 `--network none`。数据未 READY 时直接返回“技能数据未初始化”，不静默降级。
+
+部署侧先构建 init 镜像，再启动 compose（工作区卷与 init 镜像已在 `docker/docker-compose.yml` 配好）：
+
+```bash
+docker build -f docker/sandbox-init.Dockerfile -t payroll-sandbox-init:local .
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
 ### 技能文件与沙箱配置项
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PAYROLL_SKILL_FILES_ENABLED` | `true` | 是否加载技能文件包；`false` 时忽略 `<id>.files.json` |
-| `PAYROLL_SKILL_FILE_MAX_BYTES` | `65536` | 单文件上限 |
-| `PAYROLL_SKILL_FILES_MAX_BYTES` | `262144` | 单技能文件总量上限 |
+| `PAYROLL_SKILL_FILE_MAX_BYTES` | `524288` | 单文件上限（v2） |
+| `PAYROLL_SKILL_FILES_MAX_BYTES` | `4194304` | 单技能文件总量上限（v2） |
+| `PAYROLL_SKILL_FILES_MAX_FILES` | `200` | 单技能文件数上限（v2） |
+| `PAYROLL_SKILL_IMPORT_HOSTS` | `github.com,gitlab.com,gitee.com` | Git 导入主机白名单（逗号分隔） |
 | `PAYROLL_SKILL_READ_MAX_PER_TURN` | `5` | 单轮 `skill_read` 次数上限 |
 | `PAYROLL_SKILL_EXEC_ENABLED` | `false` | 智能体/runtime 侧脚本执行总开关 |
 | `PAYROLL_SANDBOX_URL` | 空 | 沙箱服务地址（如 `http://sandbox:8200`） |
@@ -371,6 +426,11 @@ FAQ 片段、模板、字段口径等短参考走 `skill_read`（不带引用）
 | `PAYROLL_SANDBOX_SCRIPT_IMAGE` | `payroll-sandbox-runtime:local` | 承载 `.py`/`.sh`/`.js` 的运行时镜像 |
 | `PAYROLL_SANDBOX_MAX_CONCURRENCY` | `4` | 沙箱服务全局并发；同一用户始终 1 并发 |
 | `PAYROLL_SANDBOX_WORK_DIR` | 空 | 脚本临时目录；容器内调度时须与宿主机同路径 |
+| `PAYROLL_SANDBOX_SKILL_ROOT` | `WORK_DIR/skills` | 技能工作区根目录（宿主与容器同路径） |
+| `PAYROLL_SANDBOX_INIT_IMAGE` | `payroll-sandbox-init:local` | 技能初始化镜像（允许联网） |
+| `PAYROLL_SANDBOX_INIT_TIMEOUT_MS` | `600000` | 初始化超时，硬上限 900000 |
+| `PAYROLL_SANDBOX_INIT_MAX_BYTES` | `2147483648` | 数据目录上限，硬上限 5GB |
+| `PAYROLL_SANDBOX_INIT_CONCURRENCY` | `2` | 初始化全局并发 |
 
 拆分部署时 Web 与 runtime 都要配置 `PAYROLL_SKILL_EXEC_ENABLED`/`PAYROLL_SANDBOX_URL`/
 `PAYROLL_SANDBOX_TOKEN`：runtime 负责注册 `skill_run` 并生成提案，确认后的实际执行在 Web 节点完成。
