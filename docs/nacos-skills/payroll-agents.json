@@ -4,38 +4,677 @@
     "name": "薪酬计算专家",
     "avatar": "🧮",
     "description": "薪酬计算智能体：理解诉求并调用确定性工具完成核算，产出可复核的计算记录",
-    "tags": ["薪酬", "内置"],
-    "skillIds": ["payroll-calculator"],
+    "tags": [
+      "薪酬",
+      "内置"
+    ],
+    "skillIds": [
+      "payroll-calculator"
+    ],
     "visibility": "PUBLIC",
     "status": "ONLINE",
     "createdBy": "system",
-    "createdAt": "2026-11-08T09:00:00",
-    "updatedAt": "2026-11-08T09:00:00"
+    "createdAt": [
+      2026,
+      11,
+      7,
+      21,
+      40,
+      42,
+      888253200
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      16,
+      0,
+      15,
+      10,
+      359169500
+    ],
+    "capabilities": []
   },
   {
     "id": "payroll-validator",
     "name": "薪酬复核专家",
     "avatar": "🔍",
-    "description": "薪酬验证智能体：独立复核勾稽关系与关键金额，输出验证结论",
-    "tags": ["薪酬", "内置"],
-    "skillIds": ["payroll-validator"],
+    "description": "薪酬验证智能体：独立调用发薪前校验工具，复核勾稽关系与风险项",
+    "tags": [
+      "薪酬",
+      "内置"
+    ],
+    "skillIds": [
+      "payroll-validator"
+    ],
     "visibility": "PUBLIC",
     "status": "ONLINE",
     "createdBy": "system",
-    "createdAt": "2026-11-08T09:00:00",
-    "updatedAt": "2026-11-08T09:00:00"
+    "createdAt": [
+      2026,
+      11,
+      7,
+      21,
+      40,
+      42,
+      888253200
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      226724900
+    ],
+    "capabilities": []
   },
   {
     "id": "payroll-accountant",
     "name": "薪酬入账专家",
     "avatar": "📒",
-    "description": "薪酬核算智能体：汇总计算与验证结论，输出面向用户的最终答复",
-    "tags": ["薪酬", "内置"],
-    "skillIds": ["payroll-accountant"],
+    "description": "薪酬核算智能体：汇总计算与验证记录，生成最终可审计答复",
+    "tags": [
+      "薪酬",
+      "内置"
+    ],
+    "skillIds": [
+      "payroll-accountant"
+    ],
     "visibility": "PUBLIC",
     "status": "ONLINE",
     "createdBy": "system",
-    "createdAt": "2026-11-08T09:00:00",
-    "updatedAt": "2026-11-08T09:00:00"
+    "createdAt": [
+      2026,
+      11,
+      7,
+      21,
+      40,
+      42,
+      888253200
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      248723000
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-26aa1eaf",
+    "name": "java工程师",
+    "avatar": "🤖",
+    "description": "",
+    "tags": [
+      "编程"
+    ],
+    "skillIds": [
+      "ai-coding"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      8,
+      20,
+      14,
+      8,
+      814963400
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      311723600
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-ccaaf2ae",
+    "name": "情感专家",
+    "avatar": "ant:usergroup-add",
+    "description": "",
+    "tags": [],
+    "skillIds": [
+      "user-talk",
+      "ai-coding"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      8,
+      21,
+      25,
+      59,
+      463520800
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      328979000
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-e9c925e8",
+    "name": "办公文书专家",
+    "avatar": "✍️",
+    "description": "把零散信息整理成通知、报告、会议纪要与邮件，成稿可直接发送",
+    "tags": [
+      "办公",
+      "写作"
+    ],
+    "skillIds": [
+      "office-writer"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      11,
+      0,
+      15,
+      31,
+      598805200
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      343974700
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-22267326",
+    "name": "数据分析助手",
+    "avatar": "📊",
+    "description": "面向业务的指标分析：口径校准、趋势对比、异常归因与结论输出",
+    "tags": [
+      "数据",
+      "分析"
+    ],
+    "skillIds": [
+      "data-analyst"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      11,
+      0,
+      15,
+      31,
+      813316100
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      413180200
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-4932b5ab",
+    "name": "IT 运维助手",
+    "avatar": "🛠️",
+    "description": "桌面与开发环境排障：按层定位故障，给出可验证的修复步骤",
+    "tags": [
+      "运维",
+      "排障"
+    ],
+    "skillIds": [
+      "it-support"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      11,
+      0,
+      15,
+      31,
+      893329700
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      430177900
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-803cfaf7",
+    "name": "视频",
+    "avatar": "🤖",
+    "description": "",
+    "tags": [],
+    "skillIds": [
+      "ai-video-producer"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      15,
+      0,
+      56,
+      8,
+      276794300
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      15,
+      14,
+      16,
+      43,
+      445177500
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "agent-3e6256c6",
+    "name": "诗词专家",
+    "avatar": "📜",
+    "description": "基于 chinese-poetry 数据集提供古典诗词创作与检索：按主题或意象写诗作词，按作者、朝代、名句查证出处。",
+    "tags": [
+      "诗词",
+      "文学",
+      "创作"
+    ],
+    "skillIds": [
+      "poetry"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "admin",
+    "createdAt": [
+      2026,
+      11,
+      16,
+      21,
+      38,
+      41,
+      436138400
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      16,
+      21,
+      38,
+      41,
+      436138400
+    ],
+    "capabilities": []
+  },
+  {
+    "id": "project-product",
+    "name": "产品经理（研发团队）",
+    "avatar": "🧭",
+    "description": "研发团队·产品经理：只做需求分析，产出需求分析与 PRD，不做技术选型。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-product"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:product"
+    ]
+  },
+  {
+    "id": "project-architect",
+    "name": "技术总监（研发团队）",
+    "avatar": "🏛️",
+    "description": "研发团队·技术总监：只定架构路线与接口契约，产出架构说明与契约文档。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-architect"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:architect"
+    ]
+  },
+  {
+    "id": "project-manager",
+    "name": "项目经理（研发团队）",
+    "avatar": "🗂️",
+    "description": "研发团队·项目经理：把需求与架构拆成任务 DAG 并分发，含测试与代码审查任务。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-manager"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:plan"
+    ]
+  },
+  {
+    "id": "project-implementer",
+    "name": "后端开发工程师",
+    "avatar": "⚙️",
+    "description": "研发团队·后端开发：按任务实现服务端最小变更，产出补丁与自测结论。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-implementer"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:backend"
+    ]
+  },
+  {
+    "id": "project-frontend",
+    "name": "前端开发工程师",
+    "avatar": "🖥️",
+    "description": "研发团队·前端开发：按接口契约实现界面与交互最小变更，产出补丁与构建结论。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-frontend"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:frontend"
+    ]
+  },
+  {
+    "id": "project-dba",
+    "name": "数据库工程师",
+    "avatar": "🗄️",
+    "description": "研发团队·数据库工程师：只产出迁移/SQL 脚本并在空库与存量库 dry-run，不连生产库。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-dba"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:dba"
+    ]
+  },
+  {
+    "id": "project-devops",
+    "name": "运维工程师",
+    "avatar": "🚀",
+    "description": "研发团队·运维工程师：产出部署/配置补丁与回滚手册，只做构建校验不执行真实发布。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-devops"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:devops"
+    ]
+  },
+  {
+    "id": "project-qa",
+    "name": "测试工程师（研发团队）",
+    "avatar": "🧪",
+    "description": "研发团队·测试工程师：按验收标准设计用例并执行构建/单测/迁移 dry-run，产出测试报告。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-qa"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:qa"
+    ]
+  },
+  {
+    "id": "project-reviewer",
+    "name": "代码审查工程师",
+    "avatar": "🔎",
+    "description": "研发团队·代码审查：只读审查四类补丁的契约/正确性/安全与测试覆盖，输出逐文件结论。",
+    "tags": [
+      "研发",
+      "团队"
+    ],
+    "skillIds": [
+      "project-reviewer"
+    ],
+    "visibility": "PUBLIC",
+    "status": "ONLINE",
+    "createdBy": "system",
+    "createdAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "updatedAt": [
+      2026,
+      11,
+      17,
+      21,
+      25,
+      3,
+      778739000
+    ],
+    "capabilities": [
+      "dev:review"
+    ]
   }
 ]

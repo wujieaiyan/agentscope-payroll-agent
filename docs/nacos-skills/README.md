@@ -58,6 +58,28 @@ curl -s -X POST "http://127.0.0.1:8848/nacos/v1/cs/configs" \
   --data-urlencode "content@docs/nacos-skills/payroll-calculator.md"
 ```
 
+## 研发团队角色（九角色）
+
+对应 `docs/dev-team-prd.md` §3，已发布到同一 group：
+
+| 角色 | 技能 dataId | 智能体 id | 能力声明 |
+| --- | --- | --- | --- |
+| 产品经理 | `project-product.md` | `project-product` | `dev:product` |
+| 技术总监 | `project-architect.md` | `project-architect` | `dev:architect` |
+| 项目经理 | `project-manager.md` | `project-manager` | `dev:plan` |
+| 后端开发 | `project-implementer.md` | `project-implementer` | `dev:backend` |
+| 前端开发 | `project-frontend.md` | `project-frontend` | `dev:frontend` |
+| 数据库工程师 | `project-dba.md` | `project-dba` | `dev:dba` |
+| 运维工程师 | `project-devops.md` | `project-devops` | `dev:devops` |
+| 测试工程师 | `project-qa.md` | `project-qa` | `dev:qa` |
+| 代码审查工程师 | `project-reviewer.md` | `project-reviewer` | `dev:review` |
+
+- 能力声明使用 `dev:*` 而非 `kb:read`：`kb:read` 会被能力索引映射为薪酬域「政策知识」能力，
+  可能让研发角色被薪酬团队选角误选。待开发域独立路由落地后再开只读检索。
+- 这九个智能体现在可用于对话与流程编排，具备角色提示词；文件读写、终端、沙箱补丁等能力
+  仍需按 PRD P0/P1 落地后才会启用，当前版本不会真正修改仓库。
+- 智能体定义保存在 `payroll-agents.json`；合并时保留既有 10 个智能体，按 id 覆盖同名项。
+
 ## 流程编排配置
 
 流程定义与全局默认流程与技能共用同一个 Nacos group：
