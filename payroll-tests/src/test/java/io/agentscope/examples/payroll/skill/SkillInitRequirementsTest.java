@@ -22,11 +22,19 @@ class SkillInitRequirementsTest {
     }
 
     @Test
-    @DisplayName("未声明 setup 时回退根目录 setup.sh")
-    void fallsBackToRootSetupScript() {
+    @DisplayName("未声明 setup 时回退根目录或 scripts/ 下的 setup.sh")
+    void fallsBackToDefaultSetupScript() {
         assertEquals(
                 "setup.sh",
                 SkillInitRequirements.setupPath(null, Set.of("setup.sh", "scripts/query.py")));
+        assertEquals(
+                "scripts/setup.sh",
+                SkillInitRequirements.setupPath(null, Set.of("scripts/setup.sh")));
+        assertEquals(
+                "setup.sh",
+                SkillInitRequirements.setupPath(
+                        null, Set.of("setup.sh", "scripts/setup.sh")),
+                "根目录优先");
         assertNull(SkillInitRequirements.setupPath(null, Set.of("scripts/query.py")));
         assertNull(SkillInitRequirements.setupPath(null, null));
     }

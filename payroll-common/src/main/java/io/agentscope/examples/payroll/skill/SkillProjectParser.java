@@ -259,7 +259,11 @@ public final class SkillProjectParser {
         Object raw = metadata.get("setup");
         String command = raw == null ? "" : raw.toString().trim();
         if (command.isEmpty()) {
-            return paths.contains(SkillFilePackage.SETUP_SH) ? "sh setup.sh" : null;
+            if (paths.contains(SkillFilePackage.SETUP_SH)) {
+                return "sh " + SkillFilePackage.SETUP_SH;
+            }
+            String nested = "scripts/" + SkillFilePackage.SETUP_SH;
+            return paths.contains(nested) ? "sh " + nested : null;
         }
         if (command.indexOf('\n') >= 0
                 || command.indexOf('\r') >= 0

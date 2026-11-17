@@ -7,9 +7,9 @@ import java.util.function.Predicate;
 /**
  * 判断技能是否声明初始化数据，并解析出 setup 脚本路径。
  *
- * <p>frontmatter {@code setup: sh setup.sh} 优先；未声明但包含 {@code setup.sh} 时按默认
- * 脚本处理，与导入解析器的规则一致。解析只认 {@code setup.sh} 与 {@code scripts/**}，
- * 且要求文件确实在包内。
+ * <p>frontmatter {@code setup: sh setup.sh} 优先；未声明但包含 {@code setup.sh}（根目录或
+ * {@code scripts/}）时按默认脚本处理，与导入解析器的规则一致。解析只认 {@code setup.sh}
+ * 与 {@code scripts/**}，且要求文件确实在包内。
  */
 public final class SkillInitRequirements {
 
@@ -57,6 +57,10 @@ public final class SkillInitRequirements {
             }
             return null;
         }
-        return exists.test(SkillFilePackage.SETUP_SH) ? SkillFilePackage.SETUP_SH : null;
+        if (exists.test(SkillFilePackage.SETUP_SH)) {
+            return SkillFilePackage.SETUP_SH;
+        }
+        String nested = SCRIPTS_PREFIX + SkillFilePackage.SETUP_SH;
+        return exists.test(nested) ? nested : null;
     }
 }

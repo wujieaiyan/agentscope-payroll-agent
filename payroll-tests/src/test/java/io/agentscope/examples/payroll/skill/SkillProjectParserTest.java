@@ -64,7 +64,7 @@ class SkillProjectParserTest {
     }
 
     @Test
-    @DisplayName("缺省 setup 时存在 setup.sh 即执行")
+    @DisplayName("缺省 setup 时存在 setup.sh 即执行，含 scripts/ 下的 setup.sh")
     void defaultsSetupWhenScriptExists(@TempDir Path temp) throws IOException {
         Path dir = Files.createDirectories(temp.resolve("demo"));
         writeSkillMd(
@@ -77,6 +77,15 @@ class SkillProjectParserTest {
                 SkillProjectParser.parse(dir, SkillFileSettings.defaults());
 
         assertEquals("sh setup.sh", project.setupCommand());
+
+        Path nested = Files.createDirectories(temp.resolve("nested"));
+        writeSkillMd(nested, "name: nested\n", body());
+        Files.createDirectories(nested.resolve("scripts"));
+        Files.writeString(
+                nested.resolve("scripts/setup.sh"), "#!/bin/sh\n", StandardCharsets.UTF_8);
+        assertEquals(
+                "sh scripts/setup.sh",
+                SkillProjectParser.parse(nested, SkillFileSettings.defaults()).setupCommand());
 
         Path plain = Files.createDirectories(temp.resolve("plain"));
         writeSkillMd(plain, "name: plain\n", body());
