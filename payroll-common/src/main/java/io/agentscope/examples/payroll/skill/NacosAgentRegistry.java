@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.skill;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -31,7 +33,12 @@ public final class NacosAgentRegistry {
 
     private final NacosSkillSettings settings;
     private final NacosConfigClient client;
-    private final ObjectMapper json = JsonMapper.builder().addModule(new JavaTimeModule()).build();
+    // 兼容前置：新增字段（如 model）时旧版本必须能读取新配置，未知字段直接忽略。
+    private final ObjectMapper json =
+            JsonMapper.builder()
+                    .addModule(new JavaTimeModule())
+                    .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .build();
     private final long ttlMillis;
 
     private volatile List<AgentDefinition> cache;
@@ -219,6 +226,14 @@ public final class NacosAgentRegistry {
 
     /** 新建或更新（按 id 匹配）。返回保存后的定义。 */
     public synchronized AgentDefinition save(AgentDefinition input, String operator) {
+        return save(input, operator, true);
+    }
+
+    /**
+     * @param keepModelWhenEmpty 旧表单不带模型字段时保留已有绑定；管理台显式「继承默认」时传 false
+     */
+    public synchronized AgentDefinition save(
+            AgentDefinition input, String operator, boolean keepModelWhenEmpty) {
         requireWritable();
         List<AgentDefinition> agents = new ArrayList<>(list());
         LocalDateTime now = LocalDateTime.now();
@@ -247,7 +262,10 @@ public final class NacosAgentRegistry {
                     // 规格 6.2：未提交能力声明时保留已有声明，避免旧表单保存后静默丢能力。
                     input.capabilities().isEmpty()
                             ? existing.capabilities()
-                            : input.capabilities());
+                            : input.capabilities(),
+                    keepModelWhenEmpty && input.model().isEmpty()
+                            ? existing.model()
+                            : input.model());
             agents.set(index, saved);
         } else {
             String id = input.id() == null || input.id().isBlank()
@@ -265,7 +283,8 @@ public final class NacosAgentRegistry {
                     operator,
                     now,
                     now,
-                    input.capabilities());
+                    input.capabilities(),
+                    input.model());
             agents.add(saved);
         }
         persist(agents);
@@ -310,11 +329,36 @@ public final class NacosAgentRegistry {
             return builtinAgents();
         }
         try {
-            List<AgentDefinition> agents =
-                    json.readValue(
-                            body.get(),
-                            json.getTypeFactory()
-                                    .constructCollectionType(List.class, AgentDefinition.class));
+            JsonNode root = json.readTree(body.get());
+            if (root == null || !root.isArray()) {
+                throw new IllegalStateException("配置根节点不是 JSON 数组");
+            }
+            List<AgentDefinition> agents = new ArrayList<>(root.size());
+            List<String> skipped = new ArrayList<>();
+            for (JsonNode node : root) {
+                try {
+                    AgentDefinition agent = json.treeToValue(node, AgentDefinition.class);
+                    if (agent == null || agent.id() == null || agent.id().isBlank()
+                            || agent.name() == null || agent.name().isBlank()) {
+                        skipped.add(node.path("id").asText("<无 id>"));
+                        continue;
+                    }
+                    agents.add(agent);
+                } catch (Exception perEntry) {
+                    // 单条结构异常只跳过该条，不能让整份配置失效。
+                    skipped.add(node.path("id").asText("<无 id>"));
+                    log.warn(
+                            "[Agent] 跳过无法解析的智能体配置（id={}）：{}",
+                            node.path("id").asText("<无 id>"),
+                            perEntry.getMessage());
+                }
+            }
+            if (agents.isEmpty()) {
+                throw new IllegalStateException("没有可用的智能体配置（跳过 " + skipped.size() + " 条）");
+            }
+            if (!skipped.isEmpty()) {
+                log.warn("[Agent] 配置 {} 有 {} 条无效条目已跳过：{}", DATA_ID, skipped.size(), skipped);
+            }
             log.info("[Agent] 从 Nacos 加载 {} 个智能体定义", agents.size());
             return List.copyOf(agents);
         } catch (Exception e) {

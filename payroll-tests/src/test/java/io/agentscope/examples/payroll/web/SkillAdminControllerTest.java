@@ -50,14 +50,80 @@ class SkillAdminControllerTest {
                                 summary("payroll-auditor", "薪酬审计", "nacos", false)));
         when(registry.writable()).thenReturn(true);
         when(registry.location()).thenReturn("http://nacos/payroll-agent");
+        when(agentRegistry.list()).thenReturn(List.of());
 
-        Map<?, ?> all = (Map<?, ?>) controller.list(null).data();
+        Map<?, ?> all = (Map<?, ?>) controller.list(null, null, null, null, null).data();
         assertEquals(true, all.get("writable"));
         assertEquals("http://nacos/payroll-agent", all.get("location"));
+        assertEquals(2, all.get("total"));
+        assertEquals(1, all.get("page"));
+        assertEquals(SkillAdminController.DEFAULT_PAGE_SIZE, all.get("size"));
         assertEquals(2, ((List<?>) all.get("skills")).size());
 
-        Map<?, ?> filtered = (Map<?, ?>) controller.list("audit").data();
+        Map<?, ?> filtered = (Map<?, ?>) controller.list("audit", null, null, null, null).data();
         assertEquals(1, ((List<?>) filtered.get("skills")).size());
+    }
+
+    @Test
+    @DisplayName("列表分页按 size 截断并返回规模指标")
+    void listPaginatesAndReportsScale() {
+        when(registry.list())
+                .thenReturn(
+                        List.of(
+                                summary("skill-a", "甲", "nacos", false),
+                                summary("skill-b", "乙", "nacos", false),
+                                summary("skill-c", "丙", "builtin", true)));
+        when(agentRegistry.list())
+                .thenReturn(List.of(agent("甲智能体", "skill-a"), agent("乙智能体", "skill-b")));
+
+        Map<?, ?> second = (Map<?, ?>) controller.list(null, 2, 2, null, null).data();
+
+        assertEquals(3, second.get("total"));
+        assertEquals(2, second.get("page"));
+        assertEquals(2, second.get("size"));
+        List<?> page = (List<?>) second.get("skills");
+        assertEquals(1, page.size());
+        assertEquals("skill-c", ((SkillSummary) page.get(0)).id());
+
+        Map<?, ?> stats = (Map<?, ?>) second.get("stats");
+        assertEquals(3, stats.get("totalSkills"));
+        assertEquals(2L, stats.get("boundAgents"));
+        assertEquals(2, stats.get("boundSkills"));
+        assertEquals(30L, stats.get("contentBytes"));
+    }
+
+    @Test
+    @DisplayName("列表支持来源过滤与按大小倒序")
+    void listFiltersBySourceAndSorts() {
+        when(registry.list())
+                .thenReturn(
+                        List.of(
+                                new SkillSummary("small", "小", "nacos", false, false, 1L, 10, 0),
+                                new SkillSummary("large", "大", "nacos", false, false, 2L, 90, 0),
+                                new SkillSummary(RoleSkills.CALCULATOR, "内置", "builtin", true, false, 3L, 50, 0)));
+        when(agentRegistry.list()).thenReturn(List.of());
+
+        List<?> nacos =
+                (List<?>)
+                        ((Map<?, ?>) controller.list(null, null, null, "nacos", "size").data())
+                                .get("skills");
+
+        assertEquals(2, nacos.size());
+        assertEquals("large", ((SkillSummary) nacos.get(0)).id());
+        assertEquals("small", ((SkillSummary) nacos.get(1)).id());
+    }
+
+    @Test
+    @DisplayName("不支持的排序字段返回明确错误")
+    void listRejectsUnknownSort() {
+        when(registry.list()).thenReturn(List.of());
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.list(null, null, null, null, "unknown"));
+
+        assertTrue(error.getMessage().contains("unknown"), error.getMessage());
     }
 
     @Test

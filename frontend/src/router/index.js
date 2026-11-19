@@ -22,6 +22,7 @@ const routes = [
       { path: 'agents', name: 'agents', component: () => import('../views/admin/AgentsView.vue'), meta: { title: '智能体' } },
       { path: 'flows', name: 'flows', component: () => import('../views/admin/FlowsView.vue'), meta: { title: '流程编排' } },
       { path: 'skills', name: 'skills', component: () => import('../views/admin/SkillsView.vue'), meta: { title: '技能' } },
+      { path: 'models', name: 'models', component: () => import('../views/admin/ModelsView.vue'), meta: { title: '模型配置' } },
       { path: 'team', name: 'team', component: () => import('../views/admin/TeamView.vue'), meta: { title: '团队运行' } },
       { path: 'users', name: 'users', component: () => import('../views/admin/UsersView.vue'), meta: { title: '用户与角色' } },
       { path: 'audit', name: 'audit', component: () => import('../views/admin/AuditView.vue'), meta: { title: '审计日志' } },

@@ -11,6 +11,10 @@ import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.examples.payroll.skill.BuiltInSkillRepository;
+import io.agentscope.examples.payroll.skill.NacosSkillRepository;
+import io.agentscope.examples.payroll.skill.PayrollSkillCatalog;
+import io.agentscope.examples.payroll.skill.SkillMetrics;
 import io.agentscope.harness.agent.skill.runtime.SkillLoadTool;
 import java.util.HashMap;
 import java.util.List;
@@ -37,9 +41,15 @@ final class SkillToolGroupActivationMiddleware implements MiddlewareBase {
             LoggerFactory.getLogger(SkillToolGroupActivationMiddleware.class);
 
     private final AgentSkillRepository repository;
+    /** 目录仓库的 id→名称快照；非目录仓库为 null，走逐条解析回退。 */
+    private final Map<String, String> names;
 
     SkillToolGroupActivationMiddleware(AgentSkillRepository repository) {
         this.repository = repository;
+        this.names =
+                repository instanceof PayrollSkillCatalog catalog
+                        ? Map.copyOf(catalog.nameById())
+                        : null;
     }
 
     @Override
@@ -78,29 +88,42 @@ final class SkillToolGroupActivationMiddleware implements MiddlewareBase {
             String skillName = resolveSkillName(skillId);
             if (skillName != null) {
                 names.put(call.getId(), skillName);
+            } else {
+                SkillMetrics.activationMiss();
             }
         }
         return names;
     }
 
     /**
-     * 工具组按技能裸名称激活（与 core SkillBox 一致）。模型可能传完整 skillId，
-     * 因此先按仓库的 getSkill 解析，再回退到逐个匹配 name/skillId。
+     * 工具组按技能裸名称激活（与 core SkillBox 一致）。模型可能传完整 skillId
+     * （{@code <name>_<source>}），目录仓库用 id 映射 O(1) 解析，不再遍历全部技能。
      */
     private String resolveSkillName(String skillId) {
         if (skillId == null || skillId.isBlank() || repository == null) {
             return null;
         }
-        AgentSkill skill = repository.getSkill(skillId);
-        if (skill != null) {
-            return skill.getName();
-        }
-        for (AgentSkill candidate : repository.getAllSkills()) {
-            if (skillId.equals(candidate.getSkillId()) || skillId.equals(candidate.getName())) {
-                return candidate.getName();
+        if (names != null) {
+            String direct = names.get(skillId);
+            if (direct != null) {
+                return direct;
             }
+            for (String source :
+                    List.of(NacosSkillRepository.SOURCE, BuiltInSkillRepository.SOURCE)) {
+                String suffix = "_" + source;
+                if (skillId.endsWith(suffix)) {
+                    String base = skillId.substring(0, skillId.length() - suffix.length());
+                    String resolved = names.get(base);
+                    if (resolved != null) {
+                        return resolved;
+                    }
+                }
+            }
+            log.info("[Skill] 激活未命中：技能 {} 不在当前绑定目录中", skillId);
+            return null;
         }
-        return null;
+        AgentSkill skill = repository.getSkill(skillId);
+        return skill == null ? null : skill.getName();
     }
 
     private void activate(Agent agent, String skillName) {

@@ -5,7 +5,12 @@ import io.agentscope.core.skill.SkillFilter;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.AgentSkillRepositoryInfo;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -112,7 +117,11 @@ public final class SkillRepositories {
         return skillId + "(" + skill.getSource() + ")";
     }
 
-    private static final class ScopedSkillRepository implements AgentSkillRepository {
+    /**
+     * 绑定范围视图：目录与批量取正文都只放行绑定技能，避免自定义智能体加载到其他角色技能。
+     */
+    private static final class ScopedSkillRepository
+            implements AgentSkillRepository, PayrollSkillCatalog {
 
         private final AgentSkillRepository delegate;
         private final Set<String> allowed;
@@ -129,14 +138,95 @@ public final class SkillRepositories {
 
         @Override
         public List<String> getAllSkillNames() {
+            if (delegate instanceof PayrollSkillCatalog catalog) {
+                return catalog.listManifests().stream()
+                        .map(SkillManifest::id)
+                        .filter(allowed::contains)
+                        .toList();
+            }
             return delegate.getAllSkillNames().stream().filter(allowed::contains).toList();
         }
 
         @Override
         public List<AgentSkill> getAllSkills() {
-            return delegate.getAllSkills().stream()
-                    .filter(skill -> allowed.contains(skill.getName()))
-                    .toList();
+            return getSkills(allowed);
+        }
+
+        @Override
+        public List<SkillManifest> listManifests() {
+            if (delegate instanceof PayrollSkillCatalog catalog) {
+                return catalog.listManifests().stream()
+                        .filter(manifest -> allowed.contains(manifest.id()))
+                        .toList();
+            }
+            List<SkillManifest> manifests = new ArrayList<>();
+            for (String id : allowed) {
+                AgentSkill skill = delegate.getSkill(id);
+                if (skill != null) {
+                    manifests.add(SkillManifests.fromSkill(skill));
+                }
+            }
+            return manifests;
+        }
+
+        @Override
+        public List<AgentSkill> getSkills(Collection<String> ids) {
+            if (ids == null || ids.isEmpty()) {
+                return List.of();
+            }
+            List<String> permitted = new ArrayList<>(ids.size());
+            for (String id : ids) {
+                if (allowed.contains(id)) {
+                    permitted.add(id);
+                }
+            }
+            if (permitted.isEmpty()) {
+                return List.of();
+            }
+            if (delegate instanceof PayrollSkillCatalog catalog) {
+                return catalog.getSkills(permitted);
+            }
+            List<AgentSkill> skills = new ArrayList<>(permitted.size());
+            for (String id : permitted) {
+                AgentSkill skill = delegate.getSkill(id);
+                if (skill != null) {
+                    skills.add(skill);
+                }
+            }
+            return skills;
+        }
+
+        @Override
+        public Optional<SkillManifest> manifest(String id) {
+            if (id == null || !allowed.contains(id)) {
+                return Optional.empty();
+            }
+            if (delegate instanceof PayrollSkillCatalog catalog) {
+                return catalog.manifest(id);
+            }
+            return Optional.ofNullable(delegate.getSkill(id)).map(SkillManifests::fromSkill);
+        }
+
+        @Override
+        public Map<String, String> nameById() {
+            Map<String, String> names = new LinkedHashMap<>();
+            if (delegate instanceof PayrollSkillCatalog catalog) {
+                catalog.nameById()
+                        .forEach(
+                                (id, name) -> {
+                                    if (allowed.contains(id)) {
+                                        names.put(id, name);
+                                    }
+                                });
+            } else {
+                for (String id : allowed) {
+                    AgentSkill skill = delegate.getSkill(id);
+                    if (skill != null) {
+                        names.put(id, skill.getName());
+                    }
+                }
+            }
+            return Collections.unmodifiableMap(names);
         }
 
         @Override

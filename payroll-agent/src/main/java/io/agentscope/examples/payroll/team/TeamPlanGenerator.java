@@ -92,7 +92,14 @@ public final class TeamPlanGenerator {
         String rationale = rationale(json);
         TeamPlan plan =
                 TeamPlan.instantiate(
-                        planId, intent.taskType(), template, bindings, rationale, warnings);
+                        planId,
+                        intent.taskType(),
+                        template,
+                        bindings,
+                        parseSteps(json, "outputs"),
+                        parseSteps(json, "acceptance"),
+                        rationale,
+                        warnings);
         PlanValidation validation = validator.validate(plan, intent);
         if (!validation.valid()) {
             warnings.add("模型计划未通过校验：" + validation.summary());
@@ -230,6 +237,56 @@ public final class TeamPlanGenerator {
         return value;
     }
 
+    /**
+     * 读取模型计划里可选的 {@code steps.<ROLE>.outputs/acceptance}；缺失或格式不符时返回空表，
+     * 不因此判计划失败。
+     */
+    static Map<TeamRole, List<String>> parseSteps(String json, String field) {
+        if (json == null || json.isBlank() || field == null || field.isBlank()) {
+            return Map.of();
+        }
+        Map<String, Object> root;
+        try {
+            root = JsonSupport.fromJson(json, new TypeReference<Map<String, Object>>() {});
+        } catch (IllegalArgumentException e) {
+            return Map.of();
+        }
+        Object stepsValue = root == null ? null : root.get("steps");
+        if (!(stepsValue instanceof Map<?, ?> steps)) {
+            return Map.of();
+        }
+        Map<TeamRole, List<String>> parsed = new LinkedHashMap<>();
+        steps.forEach(
+                (key, value) -> {
+                    TeamRole role = key instanceof String name ? TeamRole.parse(name) : null;
+                    if (role == null || !(value instanceof Map<?, ?> detail)) {
+                        return;
+                    }
+                    List<String> items = readItems(detail.get(field));
+                    if (!items.isEmpty()) {
+                        parsed.put(role, items);
+                    }
+                });
+        return parsed;
+    }
+
+    private static List<String> readItems(Object value) {
+        if (!(value instanceof List<?> raw)) {
+            return List.of();
+        }
+        List<String> items = new ArrayList<>();
+        for (Object item : raw) {
+            if (item instanceof String text && !text.isBlank()) {
+                String trimmed = text.trim();
+                items.add(trimmed.length() <= 200 ? trimmed : trimmed.substring(0, 200));
+            }
+            if (items.size() >= 8) {
+                break;
+            }
+        }
+        return List.copyOf(items);
+    }
+
     private static String rationale(String json) {
         try {
             Map<String, Object> root =
@@ -282,7 +339,10 @@ public final class TeamPlanGenerator {
                                 .map(role -> "\"" + role.name() + "\":\"agent_id\"")
                                 .reduce((a, b) -> a + "," + b)
                                 .orElse(""))
-                .append("},\"rationale\":\"不超过50字\"}");
+                .append("},\"steps\":{\"ROLE\":{\"outputs\":[\"交付产物\"],")
+                .append("\"acceptance\":[\"可测试的验收标准\"]}},")
+                .append("\"rationale\":\"不超过50字\"}\n");
+        text.append("steps 可省略；给出时必须使用上面的角色名，产物与验收各不超过 8 条。");
         return text.toString();
     }
 }

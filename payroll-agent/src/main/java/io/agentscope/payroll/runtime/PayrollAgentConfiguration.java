@@ -1,5 +1,6 @@
 package io.agentscope.payroll.runtime;
 
+import io.agentscope.examples.payroll.agent.DevLlmTaskRunner;
 import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
 import io.agentscope.examples.payroll.agent.McpServerConfig;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
@@ -9,17 +10,32 @@ import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.agent.SemanticRouteSettings;
 import io.agentscope.examples.payroll.agent.ToolSafety;
+import io.agentscope.examples.payroll.db.DevArtifactStore;
+import io.agentscope.examples.payroll.db.DevTaskStore;
 import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
+import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.devteam.DevBuildRunner;
+import io.agentscope.examples.payroll.devteam.DevDockerBuildRunner;
+import io.agentscope.examples.payroll.devteam.DevPathPolicy;
+import io.agentscope.examples.payroll.devteam.DevRunnerSettings;
+import io.agentscope.examples.payroll.devteam.DevTaskBoard;
+import io.agentscope.examples.payroll.devteam.DevTaskExecutor;
+import io.agentscope.examples.payroll.devteam.DevTaskRunner;
+import io.agentscope.examples.payroll.devteam.DevTeamSettings;
+import io.agentscope.examples.payroll.devteam.ProcessCommandLauncher;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
+import io.agentscope.examples.payroll.service.ModelCredentialService;
 import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
+import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
@@ -27,12 +43,15 @@ import io.agentscope.examples.payroll.team.ShadowTeamService;
 import io.agentscope.examples.payroll.team.TeamLlmClient;
 import io.agentscope.examples.payroll.team.TeamSettings;
 import io.agentscope.examples.payroll.web.NodeRoleFilter;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -67,6 +86,21 @@ public class PayrollAgentConfiguration {
             config.readOnlyTools().forEach(tool -> mcpReadOnly.put(tool, true));
         }
         return new ToolSafety(properties.safetyOverrides(), trustReadOnlyHints, mcpReadOnly);
+    }
+
+    /** 模型连接注册表与凭证服务注入静态工厂；本节点所有会话共用同一解析结果。 */
+    @Bean
+    public ApplicationRunner modelFactoryConfigurer(
+            ModelConnectionRegistry registry,
+            ModelCredentialService credentials,
+            ModelOutboundPolicy policy) {
+        return args -> {
+            PayrollAgentFactory.configureModels(registry, credentials, policy);
+            log.info(
+                    "[Model] 模型注册表已就绪：{}，页面密钥={}",
+                    registry.location(),
+                    credentials.secretKeyAvailable() ? "可用" : "不可用");
+        };
     }
 
     /** 强制改判会影响确认行为，启动时逐条写审计，便于事后核对是谁放行的。 */
@@ -116,6 +150,223 @@ public class PayrollAgentConfiguration {
                     source,
                     e.getMessage());
         }
+    }
+
+    /**
+     * 开发域两维权限（A1）：启动即校验组合，非法配置直接启动失败；
+     * 编码模型不可用时 workspace-write 降级为 read-only，并在审计里留下原因。
+     */
+    @Bean
+    public DevTeamSettings devTeamSettings(
+            @Value("${payroll.dev-team.mode:read-only}") String mode,
+            @Value("${payroll.dev-team.approval:}") String approval) {
+        DevTeamSettings settings = DevTeamSettings.fromEnvironment(mode, approval);
+        log.info(
+                "[开发域] 模式={}（配置={}），审批={}，写权限={}，编码模型={}，上下文={}",
+                settings.mode().wireName(),
+                settings.requestedMode().wireName(),
+                settings.approval().wireName(),
+                settings.writeEnabled() ? "已启用" : "关闭",
+                settings.model().configured() ? settings.model().modelId() : "未配置",
+                settings.model().numCtx());
+        if (settings.degraded()) {
+            log.warn("[开发域] {}；写模式已关闭", settings.disabledReason());
+        }
+        return settings;
+    }
+
+    @Bean
+    public ApplicationRunner devTeamAuditRunner(
+            AuditService auditService, DevTeamSettings settings) {
+        return args -> {
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("mode", settings.mode().wireName());
+            snapshot.put("requested_mode", settings.requestedMode().wireName());
+            snapshot.put("approval", settings.approval().wireName());
+            snapshot.put("write_enabled", settings.writeEnabled());
+            snapshot.put("model", settings.model().modelId());
+            snapshot.put("num_ctx", settings.model().numCtx());
+            snapshot.put("degraded_reason", settings.disabledReason());
+            try {
+                auditService.record("devteam.config", "dev_team", "startup", null, snapshot);
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录启动配置审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    @Bean
+    public DevTaskStore devTaskStore(PayrollDatabase database) {
+        return new DevTaskStore(database);
+    }
+
+    @Bean
+    public DevArtifactStore devArtifactStore(PayrollDatabase database) {
+        return new DevArtifactStore(database);
+    }
+
+    /** 任务面板：状态机与依赖调度都落库，后端与执行节点按同一份数据工作。 */
+    @Bean
+    public DevTaskBoard devTaskBoard(DevTaskStore devTaskStore) {
+        return new DevTaskBoard(devTaskStore);
+    }
+
+    /**
+     * 受限 runner 配置（P1-3）：默认关闭；启用后构建校验只在 {@code docker run --network none}
+     * 中执行，并限制内存/CPU/进程数，缓存目录为空则不挂载。
+     */
+    @Bean
+    public DevRunnerSettings devRunnerSettings(
+            @Value("${payroll.dev-team.runner.enabled:false}") boolean enabled,
+            @Value("${payroll.dev-team.runner.docker:docker}") String dockerBinary,
+            @Value("${payroll.dev-team.runner.image:}") String defaultImage,
+            @Value("${payroll.dev-team.runner.memory-mb:2048}") long memoryMb,
+            @Value("${payroll.dev-team.runner.cpus:2}") double cpus,
+            @Value("${payroll.dev-team.runner.pids-limit:512}") long pidsLimit,
+            @Value("${payroll.dev-team.runner.maven-cache:}") String mavenCacheDir,
+            @Value("${payroll.dev-team.runner.npm-cache:}") String npmCacheDir,
+            @Value("${payroll.dev-team.runner.max-output-chars:8000}") int maxOutputChars) {
+        DevRunnerSettings settings =
+                new DevRunnerSettings(
+                        enabled,
+                        dockerBinary,
+                        defaultImage,
+                        memoryMb,
+                        cpus,
+                        pidsLimit,
+                        mavenCacheDir,
+                        npmCacheDir,
+                        maxOutputChars);
+        log.info(
+                "[开发域] 受限 runner：{}，镜像默认={}，内存={}MB，CPU={}，pids={}，m2 缓存={}，npm 缓存={}",
+                settings.enabled() ? "启用" : "关闭",
+                settings.defaultImage().isBlank() ? "未配置" : settings.defaultImage(),
+                settings.memoryMb(),
+                settings.cpus(),
+                settings.pidsLimit(),
+                settings.hasMavenCache() ? settings.mavenCacheDir() : "不挂载",
+                settings.hasNpmCache() ? settings.npmCacheDir() : "不挂载");
+        return settings;
+    }
+
+    @Bean
+    public DevBuildRunner devBuildRunner(DevRunnerSettings runnerSettings) {
+        return new DevDockerBuildRunner(
+                runnerSettings, new ProcessCommandLauncher(runnerSettings.maxOutputChars()));
+    }
+
+    @Bean
+    public ApplicationRunner devRunnerAuditRunner(
+            AuditService auditService, DevRunnerSettings runnerSettings) {
+        return args -> {
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("enabled", runnerSettings.enabled());
+            snapshot.put("docker", runnerSettings.dockerBinary());
+            snapshot.put("image", runnerSettings.defaultImage());
+            snapshot.put("memory_mb", runnerSettings.memoryMb());
+            snapshot.put("cpus", runnerSettings.cpus());
+            snapshot.put("pids_limit", runnerSettings.pidsLimit());
+            snapshot.put("maven_cache", runnerSettings.mavenCacheDir());
+            snapshot.put("npm_cache", runnerSettings.npmCacheDir());
+            try {
+                auditService.record("devteam.runner", "dev_team", "startup", null, snapshot);
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录受限 runner 配置审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    /** 编码面串行执行（P1-2/P1-6）：单线程 + 无界队列，每实例并发 1，避免多任务争抢本机模型与工作区。 */
+    @Bean(name = "devTaskExecutorPool", destroyMethod = "shutdown")
+    public ExecutorService devTaskExecutorPool() {
+        log.info("[开发域] 编码面并发=1（单线程执行器），与控制面 10s/150s 预算隔离");
+        return Executors.newSingleThreadExecutor(
+                runnable -> {
+                    Thread thread = new Thread(runnable, "dev-task-executor");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+    }
+
+    @Bean
+    public DevTaskExecutor devTaskExecutor(
+            DevTeamSettings settings,
+            DevTaskBoard board,
+            DevArtifactStore artifacts,
+            DevBuildRunner buildRunner,
+            AuditService auditService,
+            @Qualifier("devTaskExecutorPool") ExecutorService pool,
+            @Value("${payroll.dev-team.project-root:}") String projectRoot,
+            @Value("${payroll.dev-team.workspace-root:}") String workspaceRoot) {
+        Path root =
+                projectRoot == null || projectRoot.isBlank()
+                        ? DevLlmTaskRunner.defaultProjectRoot()
+                        : Path.of(projectRoot).toAbsolutePath().normalize();
+        if (root == null || !java.nio.file.Files.isDirectory(root)) {
+            log.warn(
+                    "[开发域] 研发仓库根目录不可用，任务执行会失败；请配置 payroll.dev-team.project-root");
+            root =
+                    root == null
+                            ? Path.of(System.getProperty("user.dir"))
+                                    .toAbsolutePath()
+                                    .normalize()
+                            : root;
+        }
+        Path workRoot =
+                workspaceRoot == null || workspaceRoot.isBlank()
+                        ? DevLlmTaskRunner.defaultWorkRoot()
+                        : Path.of(workspaceRoot).toAbsolutePath().normalize();
+        DevTaskRunner runner =
+                new DevLlmTaskRunner(
+                        settings, artifacts, root, workRoot, auditService, buildRunner);
+        log.info(
+                "[开发域] 任务中心已装配：仓库根={}，工作区根={}，写权限={}",
+                root,
+                workRoot,
+                settings.writeEnabled() ? "已启用" : "关闭");
+        return new DevTaskExecutor(board, runner, pool, auditService);
+    }
+
+    /**
+     * 仓库路径 profile（P0-6）：未配置时使用内置 payroll 范围；配置缺失或非法直接启动失败，
+     * 避免带着错误的写白名单执行任务。
+     */
+    @Bean
+    public ApplicationRunner devTeamPathProfileRunner(
+            @Value("${payroll.dev-team.paths-file:}") String profileFile,
+            AuditService auditService) {
+        return args -> {
+            String configured = profileFile;
+            if (configured == null || configured.isBlank()) {
+                configured = System.getenv(DevPathPolicy.ENV_PROFILE);
+            }
+            if (configured == null || configured.isBlank()) {
+                log.info("[开发域] 路径 profile：内置 payroll 范围");
+                return;
+            }
+            Path file = Path.of(configured).toAbsolutePath().normalize();
+            DevPathPolicy.loadProfile(file);
+            log.info("[开发域] 路径 profile 已加载：{}", file);
+            try {
+                auditService.record(
+                        "devteam.path-profile",
+                        "dev_team",
+                        "startup",
+                        null,
+                        Map.of(
+                                "file", file.toString(),
+                                "implementer", DevPathPolicy.describeScope(DevPathPolicy.ROLE_IMPLEMENTER),
+                                "frontend", DevPathPolicy.describeScope(DevPathPolicy.ROLE_FRONTEND)));
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录路径 profile 审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    /** 上一实例遗留的 RUNNING 任务统一置为失败，等待人工重试，绝不自动续跑。 */
+    @Bean
+    public ApplicationRunner devTaskRecoveryRunner(DevTaskExecutor devTaskExecutor) {
+        return args -> devTaskExecutor.recoverInterrupted();
     }
 
     @Bean

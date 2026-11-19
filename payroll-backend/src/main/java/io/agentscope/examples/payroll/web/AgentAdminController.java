@@ -4,10 +4,16 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
+import io.agentscope.examples.payroll.model.ModelConfigException;
+import io.agentscope.examples.payroll.model.ModelConnection;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
+import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
+import io.agentscope.examples.payroll.skill.PayrollSkillCatalog;
+import io.agentscope.examples.payroll.skill.SkillManifest;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
@@ -48,14 +54,22 @@ public class AgentAdminController {
     private final NacosFlowRegistry flowRegistry;
     private final AuthService authService;
     private final AuditService auditService;
+    private final ModelConnectionRegistry modelRegistry;
 
     @Autowired
     public AgentAdminController(
             NacosAgentRegistry registry,
             NacosFlowRegistry flowRegistry,
             AuthService authService,
-            AuditService auditService) {
-        this(registry, SkillRepositories.create(), flowRegistry, authService, auditService);
+            AuditService auditService,
+            ModelConnectionRegistry modelRegistry) {
+        this(
+                registry,
+                SkillRepositories.create(),
+                flowRegistry,
+                authService,
+                auditService,
+                modelRegistry);
     }
 
     AgentAdminController(
@@ -63,7 +77,13 @@ public class AgentAdminController {
             AgentSkillRepository skillRepository,
             AuthService authService,
             AuditService auditService) {
-        this(registry, skillRepository, null, authService, auditService);
+        this(
+                registry,
+                skillRepository,
+                null,
+                authService,
+                auditService,
+                ModelConnectionRegistry.shared());
     }
 
     AgentAdminController(
@@ -72,11 +92,28 @@ public class AgentAdminController {
             NacosFlowRegistry flowRegistry,
             AuthService authService,
             AuditService auditService) {
+        this(
+                registry,
+                skillRepository,
+                flowRegistry,
+                authService,
+                auditService,
+                ModelConnectionRegistry.shared());
+    }
+
+    AgentAdminController(
+            NacosAgentRegistry registry,
+            AgentSkillRepository skillRepository,
+            NacosFlowRegistry flowRegistry,
+            AuthService authService,
+            AuditService auditService,
+            ModelConnectionRegistry modelRegistry) {
         this.registry = registry;
         this.skillRepository = skillRepository;
         this.flowRegistry = flowRegistry;
         this.authService = authService;
         this.auditService = auditService;
+        this.modelRegistry = modelRegistry;
     }
 
     /** 列表支持关键字、标签、技能、状态、可见范围筛选。 */
@@ -181,13 +218,16 @@ public class AgentAdminController {
         return ApiResponse.ok(Map.of("activeAgentId", ""));
     }
 
-    /** 可绑定技能清单，供编辑表单的技能多选。 */
+    /** 可绑定技能清单，供编辑表单的技能多选；目录仓库只读 manifest，不拉取正文。 */
     @GetMapping("/skills")
     @RequirePermission(Permissions.AGENT_MANAGE)
     public ApiResponse skills() {
-        List<Map<String, String>> skills = skillRepository.getAllSkills().stream()
-                .map(this::skillOption)
-                .toList();
+        List<Map<String, String>> skills =
+                skillCatalog() != null
+                        ? skillCatalog().listManifests().stream()
+                                .map(this::skillOption)
+                                .toList()
+                        : skillRepository.getAllSkills().stream().map(this::skillOption).toList();
         return ApiResponse.ok(skills);
     }
 
@@ -205,11 +245,20 @@ public class AgentAdminController {
     public ApiResponse update(
             @PathVariable String id,
             @RequestBody AgentDefinition input,
+            @RequestParam(name = "clearModel", defaultValue = "false") boolean clearModel,
             HttpServletRequest request) {
         AgentDefinition before = find(id);
         AgentDefinition validated = validate(input, id);
-        AgentDefinition saved = registry.save(validated, operator(request));
+        AgentDefinition saved = registry.save(validated, operator(request), !clearModel);
         auditService.record("agent.update", "agent_definition", saved.id(), before, saved);
+        if (!before.model().equals(saved.model())) {
+            auditService.record(
+                    "agent.model.change",
+                    "agent_definition",
+                    saved.id(),
+                    before.model(),
+                    saved.model());
+        }
         return ApiResponse.ok(saved);
     }
 
@@ -252,7 +301,14 @@ public class AgentAdminController {
         String status = normalizeEnum(
                 "状态", input.status(), AgentDefinition.STATUS_OFFLINE,
                 AgentDefinition.STATUS_ONLINE, AgentDefinition.STATUS_OFFLINE);
-        Set<String> knownSkills = Set.copyOf(skillRepository.getAllSkillNames());
+        Set<String> knownSkills;
+        if (skillCatalog() != null) {
+            knownSkills = skillCatalog().listManifests().stream()
+                    .map(SkillManifest::id)
+                    .collect(Collectors.toUnmodifiableSet());
+        } else {
+            knownSkills = Set.copyOf(skillRepository.getAllSkillNames());
+        }
         List<String> skillIds = input.skillIds().stream().distinct().toList();
         for (String skillId : skillIds) {
             if (!knownSkills.contains(skillId)) {
@@ -273,6 +329,7 @@ public class AgentAdminController {
             }
         }
         List<String> capabilities = normalizeCapabilities(input.capabilities());
+        AgentModelSettings model = validateModel(input.model());
         return new AgentDefinition(
                 forcedId,
                 name,
@@ -285,7 +342,44 @@ public class AgentAdminController {
                 input.createdBy(),
                 input.createdAt(),
                 input.updatedAt(),
-                capabilities);
+                capabilities,
+                model);
+    }
+
+    /** 智能体级模型只覆盖控制面；连接必须存在且启用，数值范围与连接保存保持一致。 */
+    private AgentModelSettings validateModel(AgentModelSettings input) {
+        if (input == null || input.isEmpty()) {
+            return AgentModelSettings.none();
+        }
+        if (input.numCtx() != null && input.numCtx() < 512) {
+            throw new PayrollException("模型上下文不能小于 512");
+        }
+        if (input.numPredict() != null && input.numPredict() <= 0) {
+            throw new PayrollException("最大输出 token 必须大于 0");
+        }
+        if (input.temperature() != null
+                && (input.temperature() < 0D || input.temperature() > 2D)) {
+            throw new PayrollException("温度必须在 0 到 2 之间");
+        }
+        if (input.timeoutSeconds() != null && input.timeoutSeconds() <= 0) {
+            throw new PayrollException("超时时间必须大于 0 秒");
+        }
+        if (!input.connectionId().isBlank()) {
+            ModelConnection connection =
+                    modelRegistry
+                            .find(input.connectionId())
+                            .orElseThrow(
+                                    () ->
+                                            new ModelConfigException(
+                                                    ModelConfigException.CONNECTION_UNAVAILABLE,
+                                                    "未知模型连接：" + input.connectionId()));
+            if (!connection.isEnabled()) {
+                throw new ModelConfigException(
+                        ModelConfigException.CONNECTION_UNAVAILABLE,
+                        "模型连接已停用：" + input.connectionId());
+            }
+        }
+        return input;
     }
 
     /** 能力声明统一小写去重，避免同一能力因大小写不同被判定为未声明。 */
@@ -333,6 +427,18 @@ public class AgentAdminController {
         option.put("description", skill.getDescription());
         option.put("source", skill.getSource());
         return option;
+    }
+
+    private Map<String, String> skillOption(SkillManifest manifest) {
+        Map<String, String> option = new LinkedHashMap<>();
+        option.put("id", manifest.id());
+        option.put("description", manifest.description());
+        option.put("source", manifest.source());
+        return option;
+    }
+
+    private PayrollSkillCatalog skillCatalog() {
+        return skillRepository instanceof PayrollSkillCatalog catalog ? catalog : null;
     }
 
     private static boolean contains(String value, String needle) {

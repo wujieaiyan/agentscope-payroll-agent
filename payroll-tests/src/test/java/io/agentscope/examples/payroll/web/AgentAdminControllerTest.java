@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -193,10 +194,12 @@ class AgentAdminControllerTest {
         PayrollException error =
                 assertThrows(
                         PayrollException.class,
-                        () -> controller.update("missing", agent(null, "顾问", null), request));
+                        () ->
+                                controller.update(
+                                        "missing", agent(null, "顾问", null), true, request));
 
         assertTrue(error.getMessage().contains("智能体不存在"), error.getMessage());
-        verify(registry, never()).save(any(), any());
+        verify(registry, never()).save(any(), any(), anyBoolean());
     }
 
     @Test
@@ -205,10 +208,14 @@ class AgentAdminControllerTest {
         AgentDefinition before = agent("agent-1", "旧名称", AgentDefinition.STATUS_ONLINE);
         AgentDefinition after = agent("agent-1", "新名称", AgentDefinition.STATUS_OFFLINE);
         when(registry.list()).thenReturn(List.of(before));
-        when(registry.save(any(), eq("system"))).thenReturn(after);
+        when(registry.save(any(), eq("system"), eq(false))).thenReturn(after);
 
         ApiResponse response =
-                controller.update("agent-1", agent(null, "新名称", AgentDefinition.STATUS_OFFLINE), request);
+                controller.update(
+                        "agent-1",
+                        agent(null, "新名称", AgentDefinition.STATUS_OFFLINE),
+                        true,
+                        request);
 
         assertSame(after, response.data());
         verify(auditService)

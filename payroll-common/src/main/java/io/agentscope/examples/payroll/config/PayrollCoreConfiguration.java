@@ -11,9 +11,15 @@ import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2ChatTurnStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
+import io.agentscope.examples.payroll.db.ModelCredentialStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.AnswerCache;
+import io.agentscope.examples.payroll.model.ModelCredentialCipher;
+import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
+import io.agentscope.examples.payroll.service.ModelCredentialService;
+import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
+import io.agentscope.examples.payroll.skill.NacosSkillSettings;
 import io.agentscope.examples.payroll.memory.SemanticCacheService;
 import io.agentscope.examples.payroll.memory.SemanticCacheSettings;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
@@ -502,6 +508,72 @@ public class PayrollCoreConfiguration {
             H2AuditStore auditStore,
             @Value("${payroll.audit.retention-days:180}") int retentionDays) {
         return new AuditService(auditStore, retentionDays);
+    }
+
+    /** 模型连接整份存 Nacos；Nacos 未启用时只提供环境变量派生的只读连接。 */
+    @Bean
+    public ModelConnectionRegistry modelConnectionRegistry() {
+        return ModelConnectionRegistry.shared();
+    }
+
+    @Bean
+    public ModelCredentialCipher modelCredentialCipher() {
+        ModelCredentialCipher cipher = ModelCredentialCipher.fromEnvironment();
+        if (cipher.available()) {
+            log.info("[Model] 页面密钥加密已启用（PAYROLL_SECRET_KEY 已配置）");
+        } else {
+            log.warn("[Model] 页面密钥加密不可用：{}，模型配置页只能使用环境变量密钥", cipher.unavailableReason());
+        }
+        return cipher;
+    }
+
+    @Bean
+    public ModelCredentialStore modelCredentialStore(PayrollDatabase database) {
+        return new ModelCredentialStore(database);
+    }
+
+    @Bean
+    public ModelCredentialService modelCredentialService(
+            ModelCredentialStore store, ModelCredentialCipher cipher) {
+        return new ModelCredentialService(store, cipher);
+    }
+
+    /** 出网拒绝同时写审计：原始地址只保留主机，避免把查询串/凭证类片段带进审计库。 */
+    @Bean
+    public ModelOutboundPolicy modelOutboundPolicy(AuditService auditService) {
+        return ModelOutboundPolicy.fromEnvironment()
+                .withDenialSink(
+                        (uri, reason) ->
+                                auditService.recordFailure(
+                                        "model.outbound.denied",
+                                        "model_connection",
+                                        uri.getHost() == null ? "" : uri.getHost(),
+                                        403,
+                                        reason));
+    }
+
+    /** 启动时按「凭证存在但连接不存在」清理孤儿并告警；Nacos 未启用时跳过，避免误删。 */
+    @Bean
+    public ApplicationRunner modelCredentialCleanupRunner(
+            ModelConnectionRegistry registry, ModelCredentialService credentials) {
+        return args -> {
+            if (!registry.writable()) {
+                return;
+            }
+            try {
+                Set<String> valid = new LinkedHashSet<>();
+                registry.connections().stream()
+                        .filter(connection -> !connection.envDerived())
+                        .map(connection -> connection.id())
+                        .forEach(valid::add);
+                int removed = credentials.cleanupOrphans(valid);
+                if (removed > 0) {
+                    log.info("[Model] 启动时清理孤儿模型凭证 {} 条", removed);
+                }
+            } catch (RuntimeException e) {
+                log.warn("[Model] 清理孤儿模型凭证失败：{}", e.getMessage());
+            }
+        };
     }
 
     /** 启动时清理超过保留期的审计日志，避免数据库无限增长。 */

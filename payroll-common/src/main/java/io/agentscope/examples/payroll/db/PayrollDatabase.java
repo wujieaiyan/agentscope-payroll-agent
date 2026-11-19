@@ -212,6 +212,113 @@ public final class PayrollDatabase {
                 ON chat_attachments (user_id, created_at)
             """,
             """
+            CREATE TABLE IF NOT EXISTS dev_artifacts (
+                artifact_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                task_id VARCHAR(64) NOT NULL,
+                artifact_type VARCHAR(32) NOT NULL,
+                version INT NOT NULL,
+                owner VARCHAR(64) NOT NULL,
+                title VARCHAR(200) NOT NULL DEFAULT '',
+                content CLOB NOT NULL,
+                content_hash CHAR(64) NOT NULL,
+                diff_hash VARCHAR(128),
+                size_bytes BIGINT NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uk_dev_artifacts_version
+                ON dev_artifacts (task_id, artifact_type, version)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_dev_artifacts_task
+                ON dev_artifacts (task_id, created_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dev_tasks (
+                row_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                plan_id VARCHAR(64) NOT NULL,
+                task_id VARCHAR(64) NOT NULL,
+                title VARCHAR(200) NOT NULL,
+                role VARCHAR(64) NOT NULL,
+                owner_agent VARCHAR(128) NOT NULL DEFAULT '',
+                priority INT NOT NULL DEFAULT 0,
+                status VARCHAR(16) NOT NULL,
+                depends_on CLOB,
+                outputs CLOB,
+                acceptance CLOB,
+                note VARCHAR(500) NOT NULL DEFAULT '',
+                attempt INT NOT NULL DEFAULT 0,
+                error VARCHAR(500) NOT NULL DEFAULT '',
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uk_dev_tasks_plan_task
+                ON dev_tasks (plan_id, task_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_dev_tasks_plan_status
+                ON dev_tasks (plan_id, status)
+            """,
+            """
+            ALTER TABLE dev_tasks
+                ADD COLUMN IF NOT EXISTS attempt INT NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE dev_tasks
+                ADD COLUMN IF NOT EXISTS error VARCHAR(500) NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE dev_tasks
+                ADD COLUMN IF NOT EXISTS started_at TIMESTAMP
+            """,
+            """
+            ALTER TABLE dev_tasks
+                ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dev_approval_batches (
+                batch_id VARCHAR(64) PRIMARY KEY,
+                plan_id VARCHAR(64) NOT NULL,
+                summary VARCHAR(500) NOT NULL DEFAULT '',
+                status VARCHAR(16) NOT NULL,
+                items_json CLOB NOT NULL,
+                decided_by VARCHAR(64) NOT NULL DEFAULT '',
+                note VARCHAR(500) NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL,
+                decided_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_dev_approval_plan
+                ON dev_approval_batches (plan_id, status, created_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dev_deliveries (
+                delivery_id VARCHAR(64) PRIMARY KEY,
+                plan_id VARCHAR(64) NOT NULL,
+                branch VARCHAR(120) NOT NULL,
+                base_commit VARCHAR(64) NOT NULL DEFAULT '',
+                pr_title VARCHAR(200) NOT NULL DEFAULT '',
+                pr_body CLOB NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                patches_json CLOB NOT NULL,
+                commit_id VARCHAR(64) NOT NULL DEFAULT '',
+                decided_by VARCHAR(64) NOT NULL DEFAULT '',
+                note VARCHAR(500) NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL,
+                decided_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_dev_deliveries_plan
+                ON dev_deliveries (plan_id, status, created_at)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS chat_tool_traces (
                 trace_id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 message_id BIGINT NOT NULL,
@@ -238,6 +345,23 @@ public final class PayrollDatabase {
             """
             CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_session
                 ON chat_tool_traces (session_id)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS model_credential (
+                credential_id VARCHAR(64) PRIMARY KEY,
+                connection_id VARCHAR(64) NOT NULL,
+                cipher_text VARCHAR(2048) NOT NULL,
+                nonce VARCHAR(64) NOT NULL,
+                key_version INT NOT NULL DEFAULT 1,
+                created_by VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                last_used_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_model_credential_connection
+                ON model_credential (connection_id)
             """,
             """
             CREATE TABLE IF NOT EXISTS employees (

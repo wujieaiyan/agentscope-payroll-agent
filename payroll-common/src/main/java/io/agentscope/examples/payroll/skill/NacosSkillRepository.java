@@ -5,13 +5,15 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.AgentSkillRepositoryInfo;
 import io.agentscope.core.skill.util.MarkdownSkillParser;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,12 +22,18 @@ import org.slf4j.LoggerFactory;
  * 从 Nacos 配置中心读取角色技能，dataId 约定为 {@code <skill-id>.md}，
  * 伴生 {@code <skill-id>.files.json} 解析为 {@link AgentSkill#getResources()}。
  *
- * <p>远程内容按 TTL 缓存，读取失败时对应技能返回 null，由
- * {@link CompositeSkillRepository} 回退到代码内置版本。仓库只读。
+ * <p>目录（id + manifest）按 TTL 缓存，一次 {@code list} 调用即拿到全部正文；
+ * 正文按访问顺序 LRU 缓存，冷启动不逐条拉取。列表或正文读取失败时回退上次成功快照
+ * 或代码内置版本。仓库只读。
  */
-public final class NacosSkillRepository implements AgentSkillRepository {
+public final class NacosSkillRepository implements AgentSkillRepository, PayrollSkillCatalog {
 
     public static final String SOURCE = "nacos";
+
+    /** 正文缓存上限：256 条 / 约 8M 字符（≈16MB），超出按最久未用淘汰。 */
+    static final int MAX_CACHED_ENTRIES = 256;
+
+    static final long MAX_CACHED_CHARS = 8_000_000L;
 
     private static final Logger log = LoggerFactory.getLogger(NacosSkillRepository.class);
 
@@ -39,7 +47,10 @@ public final class NacosSkillRepository implements AgentSkillRepository {
         List<NacosConfigClient.ConfigEntry> list(String dataIdPattern);
     }
 
-    private record Entry(long fetchedAt, AgentSkill skill) {
+    private record Entry(long fetchedAt, AgentSkill skill, long chars) {
+    }
+
+    private record Catalog(Set<String> ids, Map<String, SkillManifest> manifests, long fetchedAt) {
     }
 
     private final NacosSkillSettings settings;
@@ -48,12 +59,13 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     private final ConfigLister lister;
     private final LongSupplier clock;
     private final long ttlMillis;
-    private final Map<String, Entry> cache = new ConcurrentHashMap<>();
-    private final Set<String> missingWarned = ConcurrentHashMap.newKeySet();
+    private final Map<String, Entry> cache = new LinkedHashMap<>(64, 0.75F, true);
+    private final Set<String> missingWarned = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    private volatile List<String> knownIds;
-    private volatile List<String> lastGoodIds;
-    private volatile long idsFetchedAt;
+    private long cachedChars;
+    private volatile Catalog catalog;
+    private volatile Catalog lastGood;
+    private volatile Catalog builtin;
 
     public NacosSkillRepository(NacosSkillSettings settings) {
         this(
@@ -103,7 +115,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
 
     @Override
     public AgentSkill getSkill(String name) {
-        if (name == null || !knownIds().contains(name)) {
+        if (name == null || !catalog().ids().contains(name)) {
             return null;
         }
         return cachedSkill(name);
@@ -112,7 +124,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     @Override
     public List<String> getAllSkillNames() {
         List<String> names = new ArrayList<>();
-        for (String id : knownIds()) {
+        for (String id : catalog().ids()) {
             if (cachedSkill(id) != null) {
                 names.add(id);
             }
@@ -123,7 +135,7 @@ public final class NacosSkillRepository implements AgentSkillRepository {
     @Override
     public List<AgentSkill> getAllSkills() {
         List<AgentSkill> skills = new ArrayList<>();
-        for (String id : knownIds()) {
+        for (String id : catalog().ids()) {
             AgentSkill skill = cachedSkill(id);
             if (skill != null) {
                 skills.add(skill);
@@ -132,67 +144,194 @@ public final class NacosSkillRepository implements AgentSkillRepository {
         return skills;
     }
 
+    @Override
+    public List<SkillManifest> listManifests() {
+        List<SkillManifest> manifests = new ArrayList<>();
+        for (SkillManifest manifest : catalog().manifests().values()) {
+            manifests.add(enrich(manifest));
+        }
+        return List.copyOf(manifests);
+    }
+
+    @Override
+    public List<AgentSkill> getSkills(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        Set<String> known = catalog().ids();
+        List<AgentSkill> skills = new ArrayList<>(ids.size());
+        for (String id : ids) {
+            if (!known.contains(id)) {
+                continue;
+            }
+            AgentSkill skill = cachedSkill(id);
+            if (skill != null) {
+                skills.add(skill);
+            }
+        }
+        return skills;
+    }
+
+    @Override
+    public Optional<SkillManifest> manifest(String id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        SkillManifest base = catalog().manifests().get(id);
+        return base == null ? Optional.empty() : Optional.of(enrich(base));
+    }
+
+    @Override
+    public Map<String, String> nameById() {
+        Map<String, String> names = new LinkedHashMap<>();
+        catalog().manifests().forEach((id, manifest) -> names.put(id, manifest.name()));
+        return Collections.unmodifiableMap(names);
+    }
+
     /**
-     * 内置技能 + Nacos 中额外发布的 {@code <id>.md}。列表按 TTL 缓存，
-     * 使管理台新建的技能无需重启即可出现在可绑定技能清单里。
-     *
-     * <p>列表请求失败时沿用上次成功快照：自定义技能没有内置兜底，若瞬时失败就退回
-     * 内置清单，{@code getSkill} 会屏蔽掉 Nacos 技能，模型只能报“角色技能未加载”。
+     * 目录快照：内置技能 + Nacos 中额外发布的 {@code <id>.md}。一次 list 调用同时得到
+     * id 与 manifest，避免逐个技能再拉正文。列表失败时沿用上次成功快照：自定义技能
+     * 没有内置兜底，瞬时失败若退回内置清单，模型只能报“角色技能未加载”。
      */
-    private List<String> knownIds() {
+    private Catalog catalog() {
         if (lister == null) {
-            return RoleSkills.ids();
+            return builtinCatalog();
         }
         long now = clock.getAsLong();
-        List<String> snapshot = knownIds;
-        if (snapshot != null && now - idsFetchedAt < ttlMillis) {
+        Catalog snapshot = catalog;
+        if (snapshot != null && now - snapshot.fetchedAt() < ttlMillis) {
             return snapshot;
         }
         synchronized (this) {
-            snapshot = knownIds;
-            if (snapshot != null && now - idsFetchedAt < ttlMillis) {
+            snapshot = catalog;
+            if (snapshot != null && now - snapshot.fetchedAt() < ttlMillis) {
                 return snapshot;
             }
-            Set<String> ids = new LinkedHashSet<>(RoleSkills.ids());
+            long started = System.nanoTime();
             try {
-                for (NacosConfigClient.ConfigEntry entry : lister.list("*" + NacosSkillRegistry.DATA_ID_SUFFIX)) {
-                    String dataId = entry.dataId();
-                    if (dataId == null || !dataId.endsWith(NacosSkillRegistry.DATA_ID_SUFFIX)) {
-                        continue;
-                    }
-                    String id =
-                            dataId.substring(
-                                    0, dataId.length() - NacosSkillRegistry.DATA_ID_SUFFIX.length());
-                    if (NacosSkillRegistry.isValidId(id)) {
-                        ids.add(id);
-                    }
-                }
-            } catch (RuntimeException e) {
-                List<String> previous = lastGoodIds;
-                if (previous != null) {
-                    log.warn(
-                            "[Skill] 列出 Nacos 技能失败，沿用上次成功快照（{} 个技能）：{}",
-                            previous.size(),
-                            e.getMessage());
-                    knownIds = previous;
-                    idsFetchedAt = now;
-                    return previous;
-                }
-                log.warn("[Skill] 列出 Nacos 技能失败，仅保留内置技能：{}", e.getMessage());
+                return rebuildCatalog(now);
+            } finally {
+                SkillMetrics.catalogBuilt(SOURCE, System.nanoTime() - started);
             }
-            snapshot = List.copyOf(ids);
-            knownIds = snapshot;
-            lastGoodIds = snapshot;
-            idsFetchedAt = now;
-            return snapshot;
         }
     }
 
+    private Catalog rebuildCatalog(long now) {
+        Set<String> ids = new LinkedHashSet<>(RoleSkills.ids());
+        Map<String, SkillManifest> manifests = new LinkedHashMap<>();
+        BuiltInSkillRepository.MANIFESTS.forEach((id, manifest) -> manifests.put(id, manifest));
+        try {
+            Set<String> remoteIds = new LinkedHashSet<>();
+            Map<String, SkillManifest> remoteManifests = new LinkedHashMap<>();
+            for (NacosConfigClient.ConfigEntry entry :
+                    lister.list("*" + NacosSkillRegistry.DATA_ID_SUFFIX)) {
+                String dataId = entry.dataId();
+                if (dataId == null || !dataId.endsWith(NacosSkillRegistry.DATA_ID_SUFFIX)) {
+                    continue;
+                }
+                String id =
+                        dataId.substring(
+                                0, dataId.length() - NacosSkillRegistry.DATA_ID_SUFFIX.length());
+                if (NacosSkillRegistry.isValidId(id)) {
+                    remoteIds.add(id);
+                    remoteManifests.put(id, manifestOf(id, entry.content()));
+                }
+            }
+            ids.addAll(remoteIds);
+            manifests.putAll(remoteManifests);
+        } catch (RuntimeException e) {
+            Catalog previous = lastGood;
+            if (previous != null) {
+                log.warn(
+                        "[Skill] 列出 Nacos 技能失败，沿用上次成功快照（{} 个技能）：{}",
+                        previous.ids().size(),
+                        e.getMessage());
+                // 失败时刻也计入 TTL，避免 Nacos 故障期间每次调用都重试列表。
+                Catalog retry = new Catalog(previous.ids(), previous.manifests(), now);
+                catalog = retry;
+                return retry;
+            }
+            log.warn("[Skill] 列出 Nacos 技能失败，仅保留内置技能：{}", e.getMessage());
+        }
+        Catalog next =
+                new Catalog(
+                        Collections.unmodifiableSet(new LinkedHashSet<>(ids)),
+                        Collections.unmodifiableMap(manifests),
+                        now);
+        catalog = next;
+        lastGood = next;
+        return next;
+    }
+
+    /** 无列表能力（本地回退仓库）时只暴露内置技能。 */
+    private Catalog builtinCatalog() {
+        Catalog snapshot = builtin;
+        if (snapshot != null) {
+            return snapshot;
+        }
+        Map<String, SkillManifest> manifests = new LinkedHashMap<>(BuiltInSkillRepository.MANIFESTS);
+        snapshot =
+                new Catalog(
+                        Collections.unmodifiableSet(new LinkedHashSet<>(manifests.keySet())),
+                        Collections.unmodifiableMap(manifests),
+                        Long.MAX_VALUE);
+        builtin = snapshot;
+        return snapshot;
+    }
+
+    /** 目录阶段只解析 frontmatter，不读伴生文件包；文件数在正文加载后按需补充。 */
+    private SkillManifest manifestOf(String id, String markdown) {
+        Map<String, Object> metadata = Map.of();
+        String content = markdown == null ? "" : markdown;
+        String description = "";
+        try {
+            MarkdownSkillParser.ParsedMarkdown parsed = MarkdownSkillParser.parse(markdown);
+            if (parsed != null) {
+                if (parsed.hasFrontmatter()
+                        && parsed.getContent() != null
+                        && !parsed.getContent().isBlank()) {
+                    content = parsed.getContent();
+                }
+                if (parsed.getMetadata() != null) {
+                    metadata = parsed.getMetadata();
+                    Object value = metadata.get("description");
+                    if (value != null) {
+                        description = value.toString().trim();
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            log.warn("[Skill] 解析 Nacos 技能 {} 元数据失败，按纯文本建立目录：{}", id, e.getMessage());
+        }
+        return SkillManifests.forId(id, description, content, metadata, SOURCE);
+    }
+
+    /** 正文已缓存时才补上 hasResources，避免目录阶段多读一次文件包。 */
+    private SkillManifest enrich(SkillManifest manifest) {
+        Entry entry;
+        synchronized (cache) {
+            entry = cache.get(manifest.id());
+        }
+        if (entry == null || entry.skill() == null) {
+            return manifest;
+        }
+        return manifest.withHasResources(!entry.skill().getResources().isEmpty());
+    }
+
     private AgentSkill cachedSkill(String id) {
+        Entry entry = cachedEntry(id);
+        return entry == null ? null : entry.skill();
+    }
+
+    private Entry cachedEntry(String id) {
         long now = clock.getAsLong();
-        Entry entry = cache.get(id);
+        Entry entry;
+        synchronized (cache) {
+            entry = cache.get(id);
+        }
         if (entry != null && now - entry.fetchedAt() < ttlMillis) {
-            return entry.skill();
+            SkillMetrics.contentLoaded(SOURCE, true, entry.chars());
+            return entry;
         }
         String dataId = id + ".md";
         Optional<String> body;
@@ -204,8 +343,10 @@ public final class NacosSkillRepository implements AgentSkillRepository {
                         "[Skill] 读取 Nacos 配置 {} 异常，沿用上次成功加载的版本：{}",
                         dataId,
                         e.getMessage());
-                cache.put(id, new Entry(now, entry.skill()));
-                return entry.skill();
+                Entry refreshed = new Entry(now, entry.skill(), entry.chars());
+                put(id, refreshed);
+                SkillMetrics.contentLoaded(SOURCE, false, refreshed.chars());
+                return refreshed;
             }
             log.warn("[Skill] 读取 Nacos 配置 {} 异常：{}", dataId, e.getMessage());
             body = Optional.empty();
@@ -214,7 +355,10 @@ public final class NacosSkillRepository implements AgentSkillRepository {
         if (skill != null) {
             skill = withResources(skill);
         }
-        cache.put(id, new Entry(now, skill));
+        long chars = skill == null ? 0 : skill.getSkillContent().length();
+        Entry fresh = new Entry(now, skill, chars);
+        put(id, fresh);
+        SkillMetrics.contentLoaded(SOURCE, false, chars);
         if (skill == null) {
             if (missingWarned.add(id)) {
                 log.warn("[Skill] Nacos 未提供 {}，技能 {} 回退代码内置版本", dataId, id);
@@ -226,7 +370,26 @@ public final class NacosSkillRepository implements AgentSkillRepository {
                 log.info("[Skill] 从 Nacos 加载技能 {}（{} 字）", id, skill.getSkillContent().length());
             }
         }
-        return skill;
+        return fresh;
+    }
+
+    /** 访问顺序 LRU：先按条数再按字符数淘汰最久未用条目。 */
+    private void put(String id, Entry entry) {
+        synchronized (cache) {
+            Entry previous = cache.remove(id);
+            if (previous != null) {
+                cachedChars -= previous.chars();
+            }
+            cache.put(id, entry);
+            cachedChars += entry.chars();
+            Iterator<Map.Entry<String, Entry>> it = cache.entrySet().iterator();
+            while ((cache.size() > MAX_CACHED_ENTRIES || cachedChars > MAX_CACHED_CHARS)
+                    && it.hasNext()) {
+                Map.Entry<String, Entry> eldest = it.next();
+                cachedChars -= eldest.getValue().chars();
+                it.remove();
+            }
+        }
     }
 
     private AgentSkill parse(String id, String markdown) {

@@ -66,7 +66,9 @@ public record TeamPlan(
             String agentId,
             String name,
             String condition,
-            String conditionValue) {
+            String conditionValue,
+            List<String> outputs,
+            List<String> acceptance) {
 
         public PlanNode {
             id = id == null ? "" : id;
@@ -76,19 +78,42 @@ public record TeamPlan(
             name = name == null ? "" : name;
             condition = condition == null ? "" : condition.trim().toUpperCase(Locale.ROOT);
             conditionValue = conditionValue == null ? "" : conditionValue;
+            outputs = outputs == null ? List.of() : List.copyOf(outputs);
+            acceptance = acceptance == null ? List.of() : List.copyOf(acceptance);
         }
 
         public static PlanNode start(String id) {
-            return new PlanNode(id, FlowNode.TYPE_START, "", "", "开始", "", "");
+            return new PlanNode(
+                    id, FlowNode.TYPE_START, "", "", "开始", "", "", List.of(), List.of());
         }
 
         public static PlanNode end(String id) {
-            return new PlanNode(id, FlowNode.TYPE_END, "", "", "结束", "", "");
+            return new PlanNode(
+                    id, FlowNode.TYPE_END, "", "", "结束", "", "", List.of(), List.of());
         }
 
         public static PlanNode agent(String id, TeamRole role, String agentId, String name) {
+            return agent(id, role, agentId, name, List.of(), List.of());
+        }
+
+        /** 计划步骤的产物与验收标准；dev-team 的任务清单据此生成 tasks.json。 */
+        public static PlanNode agent(
+                String id,
+                TeamRole role,
+                String agentId,
+                String name,
+                List<String> outputs,
+                List<String> acceptance) {
             return new PlanNode(
-                    id, FlowNode.TYPE_AGENT, role.name(), agentId, name, "", "");
+                    id,
+                    FlowNode.TYPE_AGENT,
+                    role.name(),
+                    agentId,
+                    name,
+                    "",
+                    "",
+                    outputs,
+                    acceptance);
         }
     }
 
@@ -117,10 +142,35 @@ public record TeamPlan(
             Map<TeamRole, String> bindings,
             String rationale,
             List<String> warnings) {
+        return instantiate(
+                planId,
+                taskType,
+                template,
+                bindings,
+                Map.of(),
+                Map.of(),
+                rationale,
+                warnings);
+    }
+
+    /** 带产物与验收标准的实例化；未提供时保持空列表，不阻断原有薪酬团队计划。 */
+    public static TeamPlan instantiate(
+            String planId,
+            String taskType,
+            TeamTemplate template,
+            Map<TeamRole, String> bindings,
+            Map<TeamRole, List<String>> outputsByRole,
+            Map<TeamRole, List<String>> acceptanceByRole,
+            String rationale,
+            List<String> warnings) {
         List<PlanNode> nodes = new ArrayList<>();
         nodes.add(PlanNode.start("start"));
         Map<TeamRole, String> roleToNode = new LinkedHashMap<>();
         Map<String, String> roleToAgent = new LinkedHashMap<>();
+        Map<TeamRole, List<String>> outputs =
+                outputsByRole == null ? Map.of() : outputsByRole;
+        Map<TeamRole, List<String>> acceptance =
+                acceptanceByRole == null ? Map.of() : acceptanceByRole;
         int index = 1;
         for (TeamRole role : template.slots()) {
             String nodeId = "n" + index;
@@ -134,7 +184,9 @@ public record TeamPlan(
                             nodeId,
                             role,
                             agentId,
-                            circled(index) + " " + role.label()));
+                            circled(index) + " " + role.label(),
+                            outputs.getOrDefault(role, List.of()),
+                            acceptance.getOrDefault(role, List.of())));
             index++;
         }
         nodes.add(PlanNode.end("end"));

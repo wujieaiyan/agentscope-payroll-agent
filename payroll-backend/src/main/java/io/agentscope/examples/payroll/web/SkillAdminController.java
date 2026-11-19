@@ -17,11 +17,13 @@ import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.skill.SkillFilePackage;
 import io.agentscope.examples.payroll.skill.SkillImportService;
 import io.agentscope.examples.payroll.skill.SkillInitRequirements;
+import io.agentscope.examples.payroll.skill.SkillMetrics;
 import io.agentscope.examples.payroll.support.Permissions;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -45,6 +47,9 @@ import org.springframework.web.multipart.MultipartFile;
 @RestController
 @RequestMapping("/api/admin/skills")
 public class SkillAdminController {
+
+    static final int DEFAULT_PAGE_SIZE = 50;
+    static final int MAX_PAGE_SIZE = 200;
 
     private final NacosSkillRegistry registry;
     private final NacosAgentRegistry agentRegistry;
@@ -84,22 +89,33 @@ public class SkillAdminController {
                         : gateway;
     }
 
-    /** 列表同时返回存储状态，Nacos 未启用时前端按只读展示内置技能。 */
+    /**
+     * 列表同时返回存储状态与规模指标；支持关键字/来源过滤、排序与分页。
+     * 默认每页 50 条，最多 200 条，避免技能规模化后一次渲染全部条目。
+     */
     @GetMapping
     @RequirePermission(Permissions.SKILL_MANAGE)
-    public ApiResponse list(@RequestParam(required = false) String keyword) {
-        List<SkillSummary> skills = registry.list();
-        if (keyword != null && !keyword.isBlank()) {
-            String needle = keyword.trim().toLowerCase(Locale.ROOT);
-            skills = skills.stream()
-                    .filter(skill -> contains(skill.id(), needle)
-                            || contains(skill.description(), needle))
-                    .toList();
-        }
+    public ApiResponse list(
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String source,
+            @RequestParam(required = false) String sort) {
+        List<SkillSummary> all = registry.list();
+        List<SkillSummary> matched = sortSummaries(filterSummaries(all, keyword, source), sort);
+        int pageNo = page == null || page < 1 ? 1 : page;
+        int pageSize = size == null || size < 1 ? DEFAULT_PAGE_SIZE : Math.min(size, MAX_PAGE_SIZE);
+        long fromLong = (long) (pageNo - 1) * pageSize;
+        int from = (int) Math.min(fromLong, matched.size());
+        int to = Math.min(from + pageSize, matched.size());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("writable", registry.writable());
         result.put("location", registry.location());
-        result.put("skills", skills);
+        result.put("total", matched.size());
+        result.put("page", pageNo);
+        result.put("size", pageSize);
+        result.put("stats", scaleStats(all));
+        result.put("skills", matched.subList(from, to));
         return ApiResponse.ok(result);
     }
 
@@ -364,6 +380,64 @@ public class SkillAdminController {
         auditService.record(
                 "skill.delete", "skill", id, meta(before), Map.of("deleted", id));
         return ApiResponse.ok(Map.of("deleted", id));
+    }
+
+    private static List<SkillSummary> filterSummaries(
+            List<SkillSummary> skills, String keyword, String source) {
+        String needle =
+                keyword == null || keyword.isBlank()
+                        ? null
+                        : keyword.trim().toLowerCase(Locale.ROOT);
+        String sourceFilter = source == null || source.isBlank() ? null : source.trim();
+        return skills.stream()
+                .filter(skill -> sourceFilter == null
+                        || (skill.source() != null && skill.source().equalsIgnoreCase(sourceFilter)))
+                .filter(skill -> needle == null
+                        || contains(skill.id(), needle)
+                        || contains(skill.description(), needle))
+                .toList();
+    }
+
+    private static List<SkillSummary> sortSummaries(List<SkillSummary> skills, String sort) {
+        String key = sort == null || sort.isBlank() ? "id" : sort.trim().toLowerCase(Locale.ROOT);
+        Comparator<SkillSummary> byId =
+                Comparator.comparing(SkillSummary::id, String.CASE_INSENSITIVE_ORDER);
+        Comparator<SkillSummary> comparator =
+                switch (key) {
+                    case "id" -> byId;
+                    case "updated" ->
+                            Comparator.comparingLong(SkillSummary::updatedAt).reversed().thenComparing(byId);
+                    case "size" ->
+                            Comparator.comparingInt(SkillSummary::contentLength).reversed().thenComparing(byId);
+                    default ->
+                            throw new PayrollException(
+                                    "不支持的排序字段：" + sort + "（可选 id/updated/size）");
+                };
+        return skills.stream().sorted(comparator).toList();
+    }
+
+    /** 规模指标：技能总数、已绑定智能体数、被绑定技能数、正文总字节、目录构建耗时、缓存命中率。 */
+    private Map<String, Object> scaleStats(List<SkillSummary> all) {
+        Set<String> known = all.stream().map(SkillSummary::id).collect(Collectors.toSet());
+        List<AgentDefinition> agents = agentRegistry.list();
+        Set<String> bound =
+                agents.stream()
+                        .filter(agent -> agent.skillIds() != null)
+                        .flatMap(agent -> agent.skillIds().stream())
+                        .filter(known::contains)
+                        .collect(Collectors.toSet());
+        long boundAgents =
+                agents.stream()
+                        .filter(agent -> agent.skillIds() != null && !agent.skillIds().isEmpty())
+                        .count();
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("totalSkills", all.size());
+        stats.put("boundAgents", boundAgents);
+        stats.put("boundSkills", bound.size());
+        stats.put("contentBytes", all.stream().mapToLong(SkillSummary::contentLength).sum());
+        stats.put("catalogBuildMillis", SkillMetrics.lastCatalogBuildMillis());
+        stats.put("cacheHitRatio", SkillMetrics.contentCacheHitRatio());
+        return stats;
     }
 
     private SandboxGateway.SkillData queryData(String id) {

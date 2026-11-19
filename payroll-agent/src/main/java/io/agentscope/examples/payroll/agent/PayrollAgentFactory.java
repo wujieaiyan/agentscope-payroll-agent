@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelCreationContext;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
@@ -12,15 +13,31 @@ import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.devteam.DevContextBudget;
+import io.agentscope.examples.payroll.devteam.DevEditSession;
+import io.agentscope.examples.payroll.devteam.DevGuardMonitor;
+import io.agentscope.examples.payroll.devteam.DevModelSettings;
+import io.agentscope.examples.payroll.devteam.DevPathPolicy;
+import io.agentscope.examples.payroll.devteam.DevRoleContract;
+import io.agentscope.examples.payroll.agent.model.OpenAiCompatibleChatModel;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
+import io.agentscope.examples.payroll.model.ModelConfigException;
+import io.agentscope.examples.payroll.model.ModelConnection;
+import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
 import io.agentscope.examples.payroll.model.OllamaThinkingModel;
 import io.agentscope.examples.payroll.service.KbSkillClient;
+import io.agentscope.examples.payroll.service.ModelCredentialService;
+import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.service.KbSkillGateway;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.SandboxClient;
 import io.agentscope.examples.payroll.service.SandboxGateway;
+import io.agentscope.examples.payroll.skill.PayrollSkillCatalog;
 import io.agentscope.examples.payroll.skill.RoleSkills;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.skill.SkillExecutions;
+import io.agentscope.examples.payroll.skill.SkillManifest;
+import io.agentscope.examples.payroll.skill.SkillMetrics;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
@@ -30,13 +47,19 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,15 +75,28 @@ public final class PayrollAgentFactory {
     public static final String DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 
     private static final Logger log = LoggerFactory.getLogger(PayrollAgentFactory.class);
-    private static final String OLLAMA_PREFIX = "ollama:";
     private static final int DEFAULT_OLLAMA_NUM_CTX = 8192;
     private static final int DEFAULT_OLLAMA_NUM_PREDICT = 1024;
     private static final double DEFAULT_OLLAMA_TEMPERATURE = 0.1;
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    private static final int MODEL_CACHE_MAX = 16;
+
     private static final AgentCache AGENTS = new AgentCache();
-    private static volatile Model sharedModel;
-    private static volatile String sharedModelId;
+    /** 每个逻辑缓存的最近一次定义/模型签名，用于区分技能变化与模型变化导致的重建。 */
+    private static final Map<String, String[]> LAST_BUILD = new ConcurrentHashMap<>();
+    /** 连接版本进缓存键：连接改模型/地址/参数即重建，多面共用同一上限。 */
+    private static final Map<String, Model> MODELS =
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Model> eldest) {
+                    return size() > MODEL_CACHE_MAX;
+                }
+            };
+    private static volatile ModelConnectionRegistry modelRegistry = ModelConnectionRegistry.shared();
+    private static volatile ModelCredentialService modelCredentials;
+    private static volatile ModelOutboundPolicy modelOutboundPolicy =
+            ModelOutboundPolicy.fromEnvironment();
 
     private static final Set<String> CALCULATOR_TOOLS =
             Set.of(
@@ -103,11 +139,6 @@ public final class PayrollAgentFactory {
             若加载失败，直接说明“角色技能未加载”，并按下方绝对规则作答。
             禁止在正文中输出工具调用名称、JSON 参数或“请加载技能”之类的指令。
             """;
-
-    /** 预加载技能正文的展示上限，避免超长技能挤占上下文。 */
-    private static final int MAX_SKILL_CONTENT_CHARS = 8_000;
-
-    private static final int MAX_SKILL_BLOCK_CHARS = 24_000;
 
     /** 自定义技能智能体的通用规则：不复用薪酬口径，避免把非薪酬角色拉回核算场景。 */
     private static final String GENERAL_RULES =
@@ -331,14 +362,15 @@ public final class PayrollAgentFactory {
      * 智能体之间不存在跨角色加载技能的问题；会话历史由传入的 {@link RuntimeContext} 隔离。
      */
     public static Team sharedTeam(PayrollEngine engine, AgentDefinition activeAgent) {
-        String key =
-                "team|"
-                        + runtimeKey(engine)
-                        + "|"
-                        + (isPipeline(activeAgent) ? "pipeline" : definitionSignature(activeAgent))
-                        + "|"
-                        + modelId();
-        return AGENTS.get(key, () -> createTeam(new PayrollTools(engine), activeAgent));
+        String logical = "team|" + runtimeKey(engine);
+        String definition =
+                isPipeline(activeAgent) ? "pipeline" : definitionSignature(activeAgent);
+        String model = modelKey(activeAgent);
+        String key = logical + "|" + definition + "|" + model;
+        return AGENTS.get(
+                key,
+                () -> createTeam(new PayrollTools(engine), activeAgent),
+                () -> noteAgentRebuild(logical, definition, model));
     }
 
     /** 流程节点按智能体定义复用；节点级会话隔离由调用方的 RuntimeContext 保证。 */
@@ -351,19 +383,16 @@ public final class PayrollAgentFactory {
      */
     public static NodeAgent sharedFlowNodeAgent(
             PayrollEngine engine, AgentDefinition agent, boolean kbSearch) {
-        String key =
-                "node|"
-                        + runtimeKey(engine)
-                        + "|"
-                        + definitionSignature(agent)
-                        + "|"
-                        + modelId()
-                        + (kbSearch ? "|kb" : "");
+        String logical = "node|" + runtimeKey(engine);
+        String definition = definitionSignature(agent);
+        String model = modelKey(agent);
+        String key = logical + "|" + definition + "|" + model + (kbSearch ? "|kb" : "");
         return AGENTS.get(
                 key,
                 () ->
                         createFlowNodeAgent(
-                                new PayrollTools(engine), agent, sharedModel(), kbSearch));
+                                new PayrollTools(engine), agent, controlModel(agent.model()), kbSearch),
+                () -> noteAgentRebuild(logical, definition, model));
     }
 
     /**
@@ -377,8 +406,31 @@ public final class PayrollAgentFactory {
         if (gateway == null) {
             return null;
         }
-        String key = "kb|" + runtimeKey(engine) + "|" + modelId();
-        return AGENTS.get(key, () -> createKbAgent(sharedModel(), gateway));
+        String logical = "kb|" + runtimeKey(engine);
+        String model = modelKey(null);
+        return AGENTS.get(
+                logical + "|" + model,
+                () -> createKbAgent(sharedModel(), gateway),
+                () -> noteAgentRebuild(logical, "kb", model));
+    }
+
+    /**
+     * 记录智能体缓存重建原因（规格 4.7）：模型连接版本变化优先归为 model，其次技能/定义
+     * 指纹变化归为 skill，首次构建与空闲淘汰后的重建归为 initial/other。
+     */
+    private static void noteAgentRebuild(String logical, String definition, String model) {
+        String[] previous = LAST_BUILD.put(logical, new String[] {definition, model});
+        String reason;
+        if (previous == null) {
+            reason = "initial";
+        } else if (!previous[1].equals(model)) {
+            reason = "model";
+        } else if (!previous[0].equals(definition)) {
+            reason = "skill";
+        } else {
+            reason = "other";
+        }
+        SkillMetrics.agentCacheRebuild(reason);
     }
 
     private static HarnessAgent createKbAgent(Model model, KbSkillGateway gateway) {
@@ -439,17 +491,70 @@ public final class PayrollAgentFactory {
                 + "|"
                 + agent.capabilities()
                 + "|"
+                + settingsFingerprint(agent.model())
+                + "|"
                 + skillFingerprint(agent.skillIds());
     }
 
-    /** 技能正文、资源与执行开关参与缓存签名：任一变化都必须让旧的系统提示词与工具集失效。 */
+    /**
+     * 智能体缓存键里的模型段：解析后的连接版本，而不是原始设置。
+     * 页面改动连接地址/参数会让版本号变化，从而让旧智能体与其模型实例一起失效。
+     */
+    private static String modelKey(AgentDefinition agent) {
+        AgentModelSettings settings =
+                agent == null || agent.model() == null
+                        ? AgentModelSettings.none()
+                        : agent.model();
+        try {
+            return modelRegistry.resolveControl(settings).versionKey();
+        } catch (RuntimeException e) {
+            // 解析失败时保留可见差异，真正的失败仍由构建模型时抛出。
+            return "invalid|" + settingsFingerprint(settings);
+        }
+    }
+
+    private static String settingsFingerprint(AgentModelSettings settings) {
+        if (settings == null || settings.isEmpty()) {
+            return "";
+        }
+        return settings.connectionId()
+                + ':' + settings.model()
+                + ':' + settings.numCtx()
+                + ':' + settings.numPredict()
+                + ':' + settings.temperature()
+                + ':' + settings.timeoutSeconds();
+    }
+
+    /**
+     * 技能正文哈希、资源与执行开关参与缓存签名：任一变化都必须让旧的系统提示词与工具集失效。
+     * 目录仓库直接取 manifest 哈希，避免每次签名都重新拉取全部技能正文。
+     */
     private static String skillFingerprint(List<String> skillIds) {
         if (skillIds == null || skillIds.isEmpty()) {
             return "";
         }
         AgentSkillRepository repository = SkillRepositories.shared();
+        PayrollSkillCatalog catalog =
+                repository instanceof PayrollSkillCatalog candidate ? candidate : null;
         StringBuilder fingerprint = new StringBuilder();
         for (String skillId : new LinkedHashSet<>(skillIds)) {
+            if (catalog != null) {
+                Optional<SkillManifest> manifest = catalog.manifest(skillId);
+                if (manifest.isPresent()) {
+                    SkillManifest value = manifest.get();
+                    fingerprint.append(skillId)
+                            .append(':')
+                            .append(value.source())
+                            .append(':')
+                            .append(value.contentHash())
+                            .append(':')
+                            .append(value.hasResources() ? "res" : "")
+                            .append(':')
+                            .append(value.executionEnabled() ? "exec" : "")
+                            .append(';');
+                    continue;
+                }
+            }
             AgentSkill skill = repository.getSkill(skillId);
             String content = skill == null || skill.getSkillContent() == null
                     ? "missing"
@@ -467,7 +572,11 @@ public final class PayrollAgentFactory {
     }
 
     public static Team createTeam(PayrollTools tools, AgentDefinition activeAgent) {
-        Model model = sharedModel();
+        Model model =
+                controlModel(
+                        activeAgent == null
+                                ? AgentModelSettings.none()
+                                : activeAgent.model());
         AgentSkillRepository skillRepository = SkillRepositories.shared();
         HarnessAgent summarizer =
                 createAgent(
@@ -550,6 +659,7 @@ public final class PayrollAgentFactory {
         List<AgentSkill> skills = boundSkills(skillRepository, agent);
         AgentSkill primary = skills.get(0);
         boolean payrollRole = isPayrollRole(agent.skillIds());
+        Optional<String> devRole = devRole(agent);
         Set<String> allowed = flowTools(agent.skillIds());
         Toolkit toolkit = toolkit(tools, allowed, agent.name(), primary);
         if (SkillReadTools.hasResources(skills)) {
@@ -577,6 +687,8 @@ public final class PayrollAgentFactory {
         if (scriptsRunnable) {
             prompt = prompt + "\n" + SkillRunTools.guidance(skills, skillExecutionTimeoutMs());
         }
+        Path projectRoot = devRole.isPresent() ? devProjectRoot() : null;
+        prompt = withDevBriefing(prompt, devRole.orElse(null));
         HarnessAgent nodeAgent =
                 createAgent(
                         "FlowNode_" + agent.id(),
@@ -587,7 +699,10 @@ public final class PayrollAgentFactory {
                         12,
                         // 自定义角色：技能正文已注入提示词，不再注册动态加载工具。
                         payrollRole ? skillRepository : null,
-                        payrollRole ? agent.skillIds() : List.of());
+                        payrollRole ? agent.skillIds() : List.of(),
+                        devRole.orElse(null),
+                        projectRoot,
+                        devRole.isPresent() ? devContextBudget() : null);
         if (kbSearch) {
             log.info(
                     "[流程节点] 知识库检索：{}（{}），工具={}",
@@ -596,6 +711,100 @@ public final class PayrollAgentFactory {
                     toolkit.getToolNames());
         }
         return new NodeAgent(nodeAgent, mcpClients);
+    }
+
+    /** 任务中心的研发任务规则：写入被限定在工作区，结果由系统统一快照。 */
+    private static final String DEV_TASK_RULES =
+            """
+            ## 研发任务执行规则（任务中心）
+            1. 在隔离工作区内使用文件工具读改文件；只改任务要求的文件，禁止触碰路径白名单之外、
+               `.git/`、`data/` 与密钥文件。
+            2. 修改前先读取现有实现与测试；定位代码用 search_code_index/grep/glob，
+               禁止臆造文件内容或接口字段。
+            3. 结束后用一到三句话总结改动文件、未完成项与需要人工确认的风险；
+               未实际执行的构建或测试必须明确写“未执行”。
+            4. 产物由系统在任务结束后统一快照为 diff，禁止在正文中输出补丁全文。
+            """;
+
+    /**
+     * 研发任务执行（P1-2）：按角色技能与交接契约构建智能体；传入编辑会话时可写隔离工作区。
+     *
+     * <p>写权限仍由 {@link HarnessAgentSupport} 依据 {@link DevPathPolicy} 二次限制，
+     * 会话只决定文件工具与工作区根目录。编码面模型独立于控制面（P1-6）：写任务必须使用
+     * {@code PAYROLL_DEV_MODEL}，未配置时直接失败，绝不回落到控制面模型生成补丁。
+     */
+    public static HarnessAgent createDevTaskAgent(
+            String role, String ownerAgent, DevEditSession session) {
+        return createDevTaskAgent(role, ownerAgent, session, null);
+    }
+
+    /**
+     * 任务中心执行入口：{@code guard} 非空时由文件系统登记护栏命中，
+     * 运行器在任务收尾统一判定 fail-closed。
+     */
+    public static HarnessAgent createDevTaskAgent(
+            String role,
+            String ownerAgent,
+            DevEditSession session,
+            DevGuardMonitor guard) {
+        DevPathPolicy.RolePaths paths =
+                DevPathPolicy.role(role)
+                        .orElseThrow(() -> new PayrollException("未知研发角色：" + role));
+        DevRoleContract contract =
+                DevRoleContract.of(paths.role())
+                        .orElseThrow(() -> new PayrollException("缺少研发角色契约：" + role));
+        AgentSkillRepository repository = SkillRepositories.shared();
+        AgentSkill skill = repository.getSkill(paths.role());
+        if (skill == null) {
+            throw new PayrollException(
+                    "研发角色技能未发布：" + paths.role() + "；请先在技能管理中发布后再执行任务");
+        }
+        DevModelSettings devSettings = DevModelSettings.fromEnvironment();
+        String prompt =
+                GENERAL_RULES
+                        + "\n"
+                        + skillBlock(List.of(skill), devSettings.numCtx(), devSettings.numPredict())
+                        + SkillReadTools.guidance(List.of(skill))
+                        + contract.renderBriefing()
+                        + "\n"
+                        + DEV_TASK_RULES;
+        Model model = selectDevModel(devSettings, session != null);
+        Toolkit toolkit = new Toolkit();
+        if (SkillReadTools.hasResources(List.of(skill))) {
+            toolkit.registerTool(new SkillReadTools(List.of(skill)));
+        }
+        Path projectRoot =
+                session != null ? session.workspace().root() : devProjectRoot();
+        if (paths.readEnabled()) {
+            toolkit.registerTool(new DevCodeIndexTools(projectRoot));
+        }
+        HarnessAgent agent =
+                createAgent(
+                        "DevTask_" + paths.role(),
+                        contract.displayName()
+                                + "："
+                                + (ownerAgent == null || ownerAgent.isBlank()
+                                        ? "研发任务执行"
+                                        : ownerAgent),
+                        prompt,
+                        model,
+                        toolkit,
+                        24,
+                        null,
+                        List.of(),
+                        paths.role(),
+                        projectRoot,
+                        devContextBudget(),
+                        session,
+                        guard);
+        log.info(
+                "[开发域] 任务智能体已构建：role={}，owner={}，工作区={}，写模式={}，工具={}",
+                paths.role(),
+                ownerAgent,
+                projectRoot,
+                session != null,
+                agent.getToolkit().getToolNames());
+        return agent;
     }
 
     /** 管理员指定的非计算类智能体：技能决定可用工具，单智能体直接面向 HR 作答。 */
@@ -655,6 +864,9 @@ public final class PayrollAgentFactory {
         if (scriptsRunnable) {
             promptText = promptText + "\n" + SkillRunTools.guidance(boundSkills, skillExecutionTimeoutMs());
         }
+        Optional<String> devRole = devRole(activeAgent);
+        Path projectRoot = devRole.isPresent() ? devProjectRoot() : null;
+        promptText = withDevBriefing(promptText, devRole.orElse(null));
         HarnessAgent agent =
                 createAgent(
                         "PayrollActiveAgent",
@@ -665,7 +877,10 @@ public final class PayrollAgentFactory {
                         12,
                         // 技能正文已预加载，移除 load_skill_through_path，避免小模型编造技能 id。
                         null,
-                        List.of());
+                        List.of(),
+                        devRole.orElse(null),
+                        projectRoot,
+                        devRole.isPresent() ? devContextBudget() : null);
         return new Team(agent, null, null, summarizer, mcpClients, activeAgent, false);
     }
 
@@ -760,10 +975,17 @@ public final class PayrollAgentFactory {
      * 编造技能 id 或把伪工具调用写进正文。
      */
     static String activeAgentPrompt(AgentDefinition agent, List<AgentSkill> skills) {
+        int[] params = skillBudgetParams(agent);
+        return activeAgentPrompt(agent, skills, params[0], params[1]);
+    }
+
+    /** 按已解析模型窗口构建提示词：预算不足时技能正文降级为目录，技能不会静默消失。 */
+    static String activeAgentPrompt(
+            AgentDefinition agent, List<AgentSkill> skills, int contextWindow, int numPredict) {
         String description = agent.description() == null ? "" : agent.description();
         return GENERAL_RULES
                 + "\n"
-                + skillBlock(skills)
+                + skillBlock(skills, contextWindow, numPredict, skillFocus(agent))
                 + SkillReadTools.guidance(skills)
                 + """
                 ## 基本职责
@@ -775,34 +997,57 @@ public final class PayrollAgentFactory {
                         .formatted(agent.name(), description);
     }
 
+    /** 解析控制面模型的有效窗口与生成预留，供技能预算使用。 */
+    private static int[] skillBudgetParams(AgentDefinition agent) {
+        AgentModelSettings settings =
+                agent == null || agent.model() == null
+                        ? AgentModelSettings.none()
+                        : agent.model();
+        int numCtx = DEFAULT_OLLAMA_NUM_CTX;
+        int numPredict = DEFAULT_OLLAMA_NUM_PREDICT;
+        try {
+            ModelConnection connection = modelRegistry.resolveControl(settings);
+            numCtx = connection.numCtx(numCtx);
+            numPredict = connection.numPredict(numPredict);
+        } catch (RuntimeException e) {
+            // 模型未配置时按默认窗口计算预算，真正的失败仍由构建模型时抛出。
+        }
+        return new int[] {numCtx, numPredict};
+    }
+
+    /** 关联文本：智能体名称与描述决定绑定技能的相关度排序（规格 4.3 目录收敛）。 */
+    private static String skillFocus(AgentDefinition agent) {
+        if (agent == null) {
+            return null;
+        }
+        String name = agent.name() == null ? "" : agent.name();
+        String description = agent.description() == null ? "" : agent.description();
+        return name + " " + description;
+    }
+
     /** 把绑定技能正文拼成系统提示词片段；同名技能只保留第一份。 */
     private static String skillBlock(List<AgentSkill> skills) {
-        StringBuilder block = new StringBuilder("## 已加载角色技能（必须遵循）\n");
-        int total = 0;
-        Set<String> seen = new LinkedHashSet<>();
-        for (AgentSkill skill : skills) {
-            if (skill == null || !seen.add(skill.getSkillId())) {
-                continue;
-            }
-            String content = skill.getSkillContent() == null ? "" : skill.getSkillContent().strip();
-            if (content.isEmpty()) {
-                continue;
-            }
-            if (content.length() > MAX_SKILL_CONTENT_CHARS) {
-                content = content.substring(0, MAX_SKILL_CONTENT_CHARS)
-                        + "\n（技能内容过长，已截断，请按上述规则执行）";
-            }
-            if (total + content.length() > MAX_SKILL_BLOCK_CHARS) {
-                break;
-            }
-            block.append("\n### ")
-                    .append(skill.getSkillId())
-                    .append("\n")
-                    .append(content)
-                    .append("\n");
-            total += content.length();
-        }
-        return block.toString();
+        int[] params = skillBudgetParams(null);
+        return skillBlock(skills, params[0], params[1]);
+    }
+
+    /** 技能正文按上下文预算贪心注入，放不下的技能转为目录行并记录日志。 */
+    private static String skillBlock(List<AgentSkill> skills, int contextWindow, int numPredict) {
+        return skillBlock(skills, contextWindow, numPredict, null);
+    }
+
+    private static String skillBlock(
+            List<AgentSkill> skills, int contextWindow, int numPredict, String focus) {
+        SkillPromptBudget.Result result =
+                SkillPromptBudget.build(skills, contextWindow, numPredict, focus);
+        log.info(
+                "[Skill] 提示词技能预算：窗口={}，生成预留={}，可用={} tokens，注入={}，目录={}",
+                contextWindow,
+                numPredict,
+                result.budgetTokens(),
+                result.injectedIds(),
+                result.catalogIds());
+        return result.block();
     }
 
     /** 薪酬三个内置角色需要动态技能来激活业务工具，自定义角色则改为正文预注入。 */
@@ -815,6 +1060,74 @@ public final class PayrollAgentFactory {
                 || skillIds.contains(RoleSkills.ACCOUNTANT);
     }
 
+    /** 研发域角色识别：智能体 id 或绑定的技能 id 命中九角色之一。 */
+    static Optional<String> devRole(AgentDefinition agent) {
+        if (agent == null) {
+            return Optional.empty();
+        }
+        Optional<DevPathPolicy.RolePaths> byId = DevPathPolicy.role(agent.id());
+        if (byId.isPresent()) {
+            return Optional.of(byId.get().role());
+        }
+        if (agent.skillIds() != null) {
+            for (String skillId : agent.skillIds()) {
+                Optional<DevPathPolicy.RolePaths> bySkill = DevPathPolicy.role(skillId);
+                if (bySkill.isPresent()) {
+                    return Optional.of(bySkill.get().role());
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** 研发仓库根：环境变量优先，其次系统属性，最后取工作目录；不可用时返回 null（fail-closed）。 */
+    static Path devProjectRoot() {
+        String configured = System.getenv("PAYROLL_DEV_PROJECT_ROOT");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getProperty("payroll.dev-team.project-root");
+        }
+        if (configured == null || configured.isBlank()) {
+            configured = System.getProperty("user.dir");
+        }
+        try {
+            Path root = Path.of(configured).toAbsolutePath().normalize();
+            if (Files.isDirectory(root)) {
+                return root;
+            }
+            log.warn("[开发域] 项目根目录不存在，只读文件工具不启用：{}", root);
+        } catch (RuntimeException e) {
+            log.warn("[开发域] 项目根目录配置非法，只读文件工具不启用：{}", configured);
+        }
+        return null;
+    }
+
+    /**
+     * 研发域上下文预算（P0-9）：编码模型可用时按其窗口计算，否则按控制面窗口计算，
+     * 保证压缩触发点不会高于实际可用窗口。
+     */
+    static DevContextBudget devContextBudget() {
+        try {
+            DevModelSettings dev = DevModelSettings.fromEnvironment();
+            if (dev.writeCapable()) {
+                return DevContextBudget.of(dev);
+            }
+        } catch (RuntimeException e) {
+            log.warn("[开发域] 编码模型配置非法，按控制面窗口计算上下文预算：{}", e.getMessage());
+        }
+        return DevContextBudget.of(
+                intEnv("PAYROLL_OLLAMA_NUM_CTX", DEFAULT_OLLAMA_NUM_CTX),
+                intEnv("PAYROLL_OLLAMA_NUM_PREDICT", DEFAULT_OLLAMA_NUM_PREDICT));
+    }
+
+    private static String withDevBriefing(String prompt, String devRole) {
+        if (devRole == null) {
+            return prompt;
+        }
+        return DevRoleContract.of(devRole)
+                .map(contract -> prompt + "\n\n" + contract.renderBriefing())
+                .orElse(prompt);
+    }
+
     /** CLI 的 --extract 模式仍使用单智能体做结构化意图抽取。 */
     public static HarnessAgent createIntentAgent(PayrollTools tools) {
         Toolkit toolkit = new Toolkit();
@@ -823,7 +1136,7 @@ public final class PayrollAgentFactory {
                 "PayrollIntentAgent",
                 "薪酬意图抽取智能体：把自然语言解析为结构化意图",
                 INTENT_PROMPT,
-                buildModel(modelId()),
+                controlModel(AgentModelSettings.none()),
                 toolkit,
                 6);
     }
@@ -839,7 +1152,7 @@ public final class PayrollAgentFactory {
                 name,
                 name,
                 sysPrompt,
-                sharedModel(),
+                utilityModel(),
                 new Toolkit(),
                 Math.max(1, maxIters));
     }
@@ -883,17 +1196,138 @@ public final class PayrollAgentFactory {
             int maxIters,
             AgentSkillRepository skillRepository,
             List<String> skillIds) {
+        return createAgent(
+                name,
+                description,
+                sysPrompt,
+                model,
+                toolkit,
+                maxIters,
+                skillRepository,
+                skillIds,
+                null,
+                null);
+    }
+
+    private static HarnessAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            List<String> skillIds,
+            String devRole,
+            Path projectRoot) {
+        return createAgent(
+                name,
+                description,
+                sysPrompt,
+                model,
+                toolkit,
+                maxIters,
+                skillRepository,
+                skillIds,
+                devRole,
+                projectRoot,
+                null);
+    }
+
+    private static HarnessAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            List<String> skillIds,
+            String devRole,
+            Path projectRoot,
+            DevContextBudget budget) {
+        return createAgent(
+                name,
+                description,
+                sysPrompt,
+                model,
+                toolkit,
+                maxIters,
+                skillRepository,
+                skillIds,
+                devRole,
+                projectRoot,
+                budget,
+                null);
+    }
+
+    /** 绑定任务编辑会话的研发智能体：文件工具可写，范围限定在隔离工作区。 */
+    private static HarnessAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            List<String> skillIds,
+            String devRole,
+            Path projectRoot,
+            DevContextBudget budget,
+            DevEditSession editSession) {
+        return createAgent(
+                name,
+                description,
+                sysPrompt,
+                model,
+                toolkit,
+                maxIters,
+                skillRepository,
+                skillIds,
+                devRole,
+                projectRoot,
+                budget,
+                editSession,
+                null);
+    }
+
+    private static HarnessAgent createAgent(
+            String name,
+            String description,
+            String sysPrompt,
+            Model model,
+            Toolkit toolkit,
+            int maxIters,
+            AgentSkillRepository skillRepository,
+            List<String> skillIds,
+            String devRole,
+            Path projectRoot,
+            DevContextBudget budget,
+            DevEditSession editSession,
+            DevGuardMonitor guard) {
         AgentSkillRepository scoped =
                 skillRepository != null && !skillIds.isEmpty()
                         ? SkillRepositories.scoped(skillRepository, skillIds)
                         : null;
         HarnessAgent agent =
                 HarnessAgentSupport.build(
-                        name, description, sysPrompt, model, toolkit, maxIters, scoped);
+                        name,
+                        description,
+                        sysPrompt,
+                        model,
+                        toolkit,
+                        maxIters,
+                        scoped,
+                        devRole,
+                        projectRoot,
+                        budget,
+                        editSession,
+                        guard);
         log.debug(
-                "[harness] 智能体已构建：{}，技能={}，工具={}",
+                "[harness] 智能体已构建：{}，技能={}，研发角色={}，工具={}",
                 name,
                 skillIds,
+                devRole,
                 agent.getToolkit().getToolNames());
         return agent;
     }
@@ -932,27 +1366,94 @@ public final class PayrollAgentFactory {
         return io.agentscope.examples.payroll.support.ModelEnv.modelId();
     }
 
-    /** 进程级共享模型：构建时会探测 Ollama，所有智能体复用同一次探测结果。 */
-    public static Model sharedModel() {
-        String modelId = modelId();
-        Model model = sharedModel;
-        if (model != null && modelId.equals(sharedModelId)) {
-            return model;
-        }
+    /**
+     * 由 Spring 装配注入模型注册表、凭证服务与出网策略；未注入时使用环境变量派生的默认实现。
+     */
+    public static void configureModels(
+            ModelConnectionRegistry registry,
+            ModelCredentialService credentials,
+            ModelOutboundPolicy policy) {
         synchronized (PayrollAgentFactory.class) {
-            if (sharedModel == null || !modelId.equals(sharedModelId)) {
-                sharedModel = buildModel(modelId);
-                sharedModelId = modelId;
-            }
-            return sharedModel;
+            modelRegistry = registry == null ? ModelConnectionRegistry.shared() : registry;
+            modelCredentials = credentials;
+            modelOutboundPolicy =
+                    policy == null ? ModelOutboundPolicy.fromEnvironment() : policy;
+            MODELS.clear();
         }
     }
 
-    /** 清空共享模型与智能体缓存；仅用于测试或应用关闭。 */
+    /** 控制面共享模型：按「智能体绑定 > 页面默认 > PAYROLL_MODEL」解析。 */
+    public static Model sharedModel() {
+        return controlModel(AgentModelSettings.none());
+    }
+
+    /** 控制面模型：可按智能体级覆盖解析；连接版本进入缓存键。 */
+    public static Model controlModel(AgentModelSettings settings) {
+        return cachedModel(modelRegistry.resolveControl(settings), "控制面");
+    }
+
+    /** 轻量面模型：意图/计划 JSON；默认复用控制面连接。 */
+    public static Model utilityModel() {
+        return cachedModel(modelRegistry.resolveUtility(), "轻量面");
+    }
+
+    /**
+     * 编码面模型：{@code PAYROLL_DEV_*} 优先，未设置时用页面 coding 默认；
+     * 不满足 32768 上下文或未声明 tools 时返回 null，由 {@link #selectDevModel} 处理。
+     */
+    static Model devModel(DevModelSettings settings) {
+        Optional<ModelConnection> resolved = modelRegistry.resolveCoding();
+        if (resolved.isEmpty()) {
+            return null;
+        }
+        ModelConnection connection = resolved.get();
+        if (!writeCapable(connection)) {
+            return null;
+        }
+        return cachedModel(connection, "编码面");
+    }
+
+    private static boolean writeCapable(ModelConnection connection) {
+        return connection.numCtx(0) >= DevModelSettings.MIN_CONTEXT
+                && connection.declares(ModelConnection.CAP_TOOLS);
+    }
+
+    /**
+     * 模型选择（P1-6）：写模式必须有编码面模型，缺失直接失败；只读任务优先用编码面模型，
+     * 未配置时回落控制面模型（只读能力不涉及补丁生成）。
+     */
+    static Model selectDevModel(DevModelSettings settings, boolean writable) {
+        Model candidate = devModel(settings);
+        if (candidate != null) {
+            return candidate;
+        }
+        if (writable) {
+            String reason;
+            if (settings != null && settings.disabledReason().isPresent()) {
+                reason = settings.disabledReason().get();
+            } else if (modelRegistry.envCodingLocked()) {
+                reason = "环境变量编码模型未就绪";
+            } else {
+                reason =
+                        "未配置编码面模型（需上下文 ≥"
+                                + DevModelSettings.MIN_CONTEXT
+                                + " 且声明 tools）";
+            }
+            throw new PayrollException(
+                    "无法执行写代码任务："
+                            + reason
+                            + "；请设置 "
+                            + DevModelSettings.ENV_MODEL
+                            + " 或在模型配置页设置编码面默认连接");
+        }
+        log.info("[开发域] 编码模型未配置，只读任务使用控制面模型：{}", modelId());
+        return sharedModel();
+    }
+
+    /** 清空模型与智能体缓存；仅用于测试或应用关闭。 */
     public static void resetRuntimeCache() {
         synchronized (PayrollAgentFactory.class) {
-            sharedModel = null;
-            sharedModelId = null;
+            MODELS.clear();
             AGENTS.clear();
         }
     }
@@ -966,27 +1467,108 @@ public final class PayrollAgentFactory {
         return env("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL);
     }
 
-    private static Model buildModel(String modelId) {
-        if (modelId.startsWith(OLLAMA_PREFIX)) {
-            return buildOllamaModel(modelId.substring(OLLAMA_PREFIX.length()).trim());
+    /** 按连接版本缓存模型实例；不同使用面共用同一池，连接任一字段变化即重建。 */
+    private static Model cachedModel(ModelConnection connection, String plane) {
+        if (connection == null) {
+            throw new ModelConfigException(
+                    ModelConfigException.CONNECTION_UNAVAILABLE, plane + "模型连接不可用");
         }
-        if (modelId.startsWith("dashscope:")) {
-            String apiKey = System.getenv("DASHSCOPE_API_KEY");
-            if (apiKey == null || apiKey.isBlank()) {
-                throw new PayrollException(
-                        "未设置 DASHSCOPE_API_KEY，无法调用 DashScope 模型。"
-                                + "可改用默认的本地 Ollama 模型，或先运行 --demo 验证核算引擎。");
+        String key = plane + "|" + connection.versionKey();
+        synchronized (PayrollAgentFactory.class) {
+            Model cached = MODELS.get(key);
+            if (cached == null) {
+                cached = buildModel(connection, plane);
+                MODELS.put(key, cached);
             }
+            return cached;
         }
-        return ModelRegistry.resolve(modelId);
     }
 
-    private static Model buildOllamaModel(String modelName) {
+    private static Model buildModel(ModelConnection connection, String plane) {
+        if (connection.baseUrl() != null && !connection.baseUrl().isBlank()) {
+            modelOutboundPolicy.check(URI.create(connection.baseUrl()));
+        }
+        String apiKey = resolveApiKey(connection);
+        log.info(
+                "[多智能体] {}模型 connection={}，provider={}，model={}，地址={}",
+                plane,
+                connection.id(),
+                connection.provider(),
+                connection.model(),
+                connection.baseUrl());
+        return switch (connection.provider()) {
+            case ModelConnection.PROVIDER_OLLAMA -> buildOllamaModel(connection);
+            case ModelConnection.PROVIDER_DASHSCOPE -> buildDashscopeModel(connection, apiKey);
+            case ModelConnection.PROVIDER_OPENAI ->
+                    new OpenAiCompatibleChatModel(
+                            connection.model(),
+                            connection.baseUrl(),
+                            apiKey,
+                            connection.contextWindow(),
+                            connection.maxTokens(),
+                            connection.temperature(0.3),
+                            connection.timeoutSeconds(120),
+                            modelOutboundPolicy);
+            default ->
+                    throw new ModelConfigException(
+                            ModelConfigException.CAPABILITY_UNSUPPORTED,
+                            "不支持的模型提供方：" + connection.provider());
+        };
+    }
+
+    private static String resolveApiKey(ModelConnection connection) {
+        if (!connection.requiresApiKey()) {
+            return "";
+        }
+        ModelCredentialService credentials = modelCredentials;
+        if (credentials != null) {
+            return credentials.resolveApiKey(connection);
+        }
+        String envName = connection.apiKeyEnv();
+        if (envName == null || envName.isBlank()) {
+            throw new ModelConfigException(
+                    ModelConfigException.CREDENTIAL_MISSING,
+                    "连接「" + connection.name() + "」未配置密钥");
+        }
+        String value = System.getenv(envName);
+        if (value == null || value.isBlank()) {
+            throw new ModelConfigException(
+                    ModelConfigException.CREDENTIAL_MISSING, "环境变量 " + envName + " 未设置");
+        }
+        return value.trim();
+    }
+
+    private static Model buildOllamaModel(ModelConnection connection) {
+        String baseUrl =
+                connection.baseUrl() == null || connection.baseUrl().isBlank()
+                        ? ollamaBaseUrl()
+                        : connection.baseUrl();
+        return buildOllamaModel(
+                connection.model(),
+                baseUrl,
+                connection.numCtx(DEFAULT_OLLAMA_NUM_CTX),
+                connection.numPredict(DEFAULT_OLLAMA_NUM_PREDICT),
+                connection.temperature(DEFAULT_OLLAMA_TEMPERATURE));
+    }
+
+    /** DashScope 走框架扩展：连接上的密钥与地址通过 ModelCreationContext 传入。 */
+    private static Model buildDashscopeModel(ModelConnection connection, String apiKey) {
+        String id =
+                connection.model().startsWith("dashscope:")
+                        ? connection.model()
+                        : "dashscope:" + connection.model();
+        ModelCreationContext context =
+                ModelCreationContext.builder().apiKey(apiKey).baseUrl(connection.baseUrl()).build();
+        return ModelRegistry.resolve(id, context);
+    }
+
+    /** 按给定窗口与生成参数构建 Ollama 模型：控制面用环境变量，编码面用 {@code PAYROLL_DEV_*}。 */
+    private static Model buildOllamaModel(
+            String modelName, String baseUrl, int numCtx, int numPredict, double temperature) {
         if (modelName.isBlank()) {
             throw new PayrollException(
                     "PAYROLL_MODEL 格式错误，应为 ollama:<模型名>，例如 ollama:qwen2.5:3b-instruct");
         }
-        String baseUrl = ollamaBaseUrl();
         verifyOllamaModel(baseUrl, modelName);
         Set<String> capabilities = ollamaCapabilities(baseUrl, modelName);
         boolean supportsThinking = capabilities.contains("thinking");
@@ -999,16 +1581,10 @@ public final class PayrollAgentFactory {
 
         OllamaOptions.Builder builder =
                 OllamaOptions.builder()
-                        .numCtx(intEnv("PAYROLL_OLLAMA_NUM_CTX", DEFAULT_OLLAMA_NUM_CTX))
+                        .numCtx(numCtx)
                         // 限制单轮生成长度，避免小模型重复输出直到阶段超时。
-                        .numPredict(
-                                intEnv(
-                                        "PAYROLL_OLLAMA_NUM_PREDICT",
-                                        DEFAULT_OLLAMA_NUM_PREDICT))
-                        .temperature(
-                                doubleEnv(
-                                        "PAYROLL_OLLAMA_TEMPERATURE",
-                                        DEFAULT_OLLAMA_TEMPERATURE));
+                        .numPredict(numPredict)
+                        .temperature(temperature);
         ThinkOption thinkOption = ollamaThinkOption(modelName, supportsThinking);
         if (thinkOption != null) {
             builder.thinkOption(thinkOption);

@@ -38,6 +38,7 @@ const groups = [
   {
     title: '系统',
     items: [
+      { path: '/models', label: '模型配置', icon: 'M4 7h16M4 12h16M4 17h10M18 15v4M16 17h4', permission: 'agent:manage' },
       { path: '/users', label: '用户与角色', icon: 'M12 3l8 3v6c0 5-3.4 8.2-8 9-4.6-.8-8-4-8-9V6zM9 12l2 2 4-4' },
       { path: '/audit', label: '审计日志', icon: 'M4 5h16M4 12h10M4 19h16M18 10v4M18 10h3v4h-3', permission: 'audit:read' },
       { path: '/kb', label: '知识库', icon: 'M12 3l9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 16l9 5 9-5', permission: 'kb:read' },
