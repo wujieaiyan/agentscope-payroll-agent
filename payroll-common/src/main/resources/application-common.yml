@@ -80,7 +80,10 @@ payroll:
     # 事件流保留与单轮上限；续流窗口由 TTL 决定。
     turn-event-ttl-hours: "${PAYROLL_TURN_EVENT_TTL_HOURS:24}"
     turn-event-max: "${PAYROLL_TURN_EVENT_MAXLEN:10000}"
+    # 历史轮次清理：启动后最多 5 分钟首次执行，之后按周期删除超过保留天数的行；
+    # 周期 <= 0 关闭；只有 web/all 节点会执行，runtime 节点不重复扫库。
     turn-retention-days: "${PAYROLL_TURN_RETENTION_DAYS:90}"
+    turn-cleanup-interval-minutes: "${PAYROLL_TURN_CLEANUP_INTERVAL_MINUTES:360}"
     # 写操作确认：关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度核对。
     action-confirm:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
@@ -156,6 +159,12 @@ payroll:
     async-index: "${PAYROLL_MEMORY_ASYNC_INDEX:true}"
     # false=只召回当前会话（默认）；true=允许跨会话召回同一用户的历史问题。
     cross-session: "${PAYROLL_MEMORY_CROSS_SESSION:false}"
+    # 用户级工作偏好（对外「我的工作偏好」）：默认关闭；runtime/all 抽取，web/all 清理凭证。
+    profile:
+      enabled: "${PAYROLL_PROFILE_MEMORY_ENABLED:false}"
+      max-items-per-extraction: "${PAYROLL_PROFILE_MAX_ITEMS:3}"
+      inject-max-items: "${PAYROLL_PROFILE_INJECT_MAX_ITEMS:10}"
+      inject-max-chars: "${PAYROLL_PROFILE_INJECT_MAX_CHARS:600}"
   # 语义缓存：默认关闭；只缓存 AGENT 路径无工具调用的稳定问答。
   semantic-cache:
     enabled: "${PAYROLL_SEMANTIC_CACHE_ENABLED:false}"
@@ -186,6 +195,10 @@ payroll:
     answer-model: "${PAYROLL_KB_ANSWER_MODEL:qwen2.5:3b-instruct}"
     answer-timeout: "${PAYROLL_KB_ANSWER_TIMEOUT:120s}"
     task-threads: "${PAYROLL_KB_TASK_THREADS:2}"
+    # 单个入库任务链最多重试次数，达到上限后仅保留终态等待人工排查。
+    task-max-retries: "${PAYROLL_KB_TASK_MAX_RETRIES:3}"
+    # 启动时恢复重启遗留的排队/运行中任务；关闭后遗留任务保持原状。
+    recovery-enabled: "${PAYROLL_KB_RECOVERY_ENABLED:true}"
     # 扫描件兜底：无文字层页面按页渲染后交给 Tesseract；max-pages=0 表示不限页数。
     ocr:
       enabled: "${PAYROLL_KB_OCR_ENABLED:true}"

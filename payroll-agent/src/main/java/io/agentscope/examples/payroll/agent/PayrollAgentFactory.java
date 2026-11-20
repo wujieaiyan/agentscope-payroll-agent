@@ -39,6 +39,7 @@ import io.agentscope.examples.payroll.skill.SkillExecutions;
 import io.agentscope.examples.payroll.skill.SkillManifest;
 import io.agentscope.examples.payroll.skill.SkillMetrics;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
+import io.agentscope.examples.payroll.usage.UsageModelCatalog;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
 import io.agentscope.extensions.model.ollama.options.ThinkOption;
@@ -1379,6 +1380,7 @@ public final class PayrollAgentFactory {
             modelOutboundPolicy =
                     policy == null ? ModelOutboundPolicy.fromEnvironment() : policy;
             MODELS.clear();
+            UsageModelCatalog.clear();
         }
     }
 
@@ -1455,6 +1457,7 @@ public final class PayrollAgentFactory {
         synchronized (PayrollAgentFactory.class) {
             MODELS.clear();
             AGENTS.clear();
+            UsageModelCatalog.clear();
         }
     }
 
@@ -1479,6 +1482,7 @@ public final class PayrollAgentFactory {
             if (cached == null) {
                 cached = buildModel(connection, plane);
                 MODELS.put(key, cached);
+                UsageModelCatalog.register(cached, plane, connection.provider());
             }
             return cached;
         }

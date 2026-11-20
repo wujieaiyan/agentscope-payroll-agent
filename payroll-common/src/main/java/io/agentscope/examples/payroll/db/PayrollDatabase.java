@@ -174,6 +174,56 @@ public final class PayrollDatabase {
                 WHERE deadline_at IS NULL AND finished_at IS NULL
             """,
             """
+            CREATE INDEX IF NOT EXISTS idx_chat_turns_user
+                ON chat_turns (user_id, status, started_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_profile_items (
+                item_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                category VARCHAR(24) NOT NULL,
+                item_key VARCHAR(64) NOT NULL,
+                item_value VARCHAR(120) NOT NULL,
+                confidence DOUBLE NOT NULL DEFAULT 0,
+                source VARCHAR(16) NOT NULL,
+                source_turn_id VARCHAR(36),
+                evidence VARCHAR(200),
+                status VARCHAR(16) NOT NULL,
+                injected_count INT NOT NULL DEFAULT 0,
+                last_injected_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_user_key
+                ON user_profile_items (user_id, category, item_key)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_profile_user_status
+                ON user_profile_items (user_id, status, updated_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_profile_extractions (
+                extraction_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                target_turn_id VARCHAR(36) NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                attempts INT NOT NULL DEFAULT 0,
+                detail VARCHAR(200),
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_extraction
+                ON user_profile_extractions (user_id, target_turn_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_profile_extraction_status
+                ON user_profile_extractions (status, updated_at)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS chat_fencing (
                 session_id BIGINT PRIMARY KEY,
                 fencing_token BIGINT NOT NULL
@@ -760,6 +810,47 @@ public final class PayrollDatabase {
             """
             CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_run
                 ON chat_tool_traces (run_id, node_id)
+            """,
+            // 模型用量事实：每次模型调用一行，看板按时间/模型/使用面/智能体/用户聚合。
+            """
+            CREATE TABLE IF NOT EXISTS llm_usage (
+                usage_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                user_id VARCHAR(64),
+                session_id VARCHAR(64),
+                agent_id VARCHAR(128),
+                agent_name VARCHAR(128),
+                role VARCHAR(64),
+                stage_key VARCHAR(64),
+                run_id BIGINT,
+                model VARCHAR(128),
+                provider VARCHAR(32),
+                plane VARCHAR(32),
+                prompt_tokens INT NOT NULL DEFAULT 0,
+                completion_tokens INT NOT NULL DEFAULT 0,
+                cached_tokens INT NOT NULL DEFAULT 0,
+                total_tokens INT NOT NULL DEFAULT 0,
+                latency_ms BIGINT NOT NULL DEFAULT 0,
+                success BOOLEAN NOT NULL DEFAULT TRUE,
+                error_type VARCHAR(64),
+                reply_id VARCHAR(64)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_time
+                ON llm_usage (occurred_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_model
+                ON llm_usage (model, occurred_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_user
+                ON llm_usage (user_id, occurred_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_session
+                ON llm_usage (session_id, occurred_at)
             """);
 
     private static final Map<String, PayrollPolicy> DEMO_CITY_POLICIES = demoCityPolicies();

@@ -75,6 +75,7 @@ public final class ChatSessionManager implements AutoCloseable {
     private final Set<String> remoteExecuting = ConcurrentHashMap.newKeySet();
     private final Map<String, Heartbeat> executing = new ConcurrentHashMap<>();
     private final ScheduledExecutorService maintenance;
+    private final int turnRetentionDays;
     private final long staleMillis;
     private final Duration turnDeadline;
     private final long progressTimeoutMillis;
@@ -232,7 +233,10 @@ public final class ChatSessionManager implements AutoCloseable {
                 nodeId,
                 heartbeatSeconds,
                 DEFAULT_TURN_DEADLINE_MINUTES,
-                DEFAULT_PROGRESS_TIMEOUT_SECONDS);
+                DEFAULT_PROGRESS_TIMEOUT_SECONDS,
+                // 保留时长由部署配置显式给出，简化构造器默认不清理。
+                0,
+                0);
     }
 
     public ChatSessionManager(
@@ -251,7 +255,9 @@ public final class ChatSessionManager implements AutoCloseable {
             String nodeId,
             int heartbeatSeconds,
             int turnDeadlineMinutes,
-            int progressTimeoutSeconds) {
+            int progressTimeoutSeconds,
+            int turnRetentionDays,
+            int turnCleanupIntervalMinutes) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
@@ -274,6 +280,7 @@ public final class ChatSessionManager implements AutoCloseable {
         this.turnDeadline = Duration.ofMinutes(Math.max(1, turnDeadlineMinutes));
         this.progressTimeoutMillis =
                 Math.max(30_000L, Math.max(1, progressTimeoutSeconds) * 1000L);
+        this.turnRetentionDays = Math.max(0, turnRetentionDays);
         this.maintenance =
                 Executors.newSingleThreadScheduledExecutor(
                         runnable -> {
@@ -288,6 +295,14 @@ public final class ChatSessionManager implements AutoCloseable {
                 TimeUnit.MILLISECONDS);
         this.maintenance.scheduleWithFixedDelay(
                 this::scanStaleTurns, 60_000L, 60_000L, TimeUnit.MILLISECONDS);
+        long cleanupMillis = Math.max(0L, turnCleanupIntervalMinutes) * 60_000L;
+        if (this.turnRetentionDays > 0 && cleanupMillis > 0) {
+            this.maintenance.scheduleWithFixedDelay(
+                    this::cleanupExpiredTurns,
+                    Math.min(cleanupMillis, 5 * 60_000L),
+                    cleanupMillis,
+                    TimeUnit.MILLISECONDS);
+        }
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -1090,6 +1105,23 @@ public final class ChatSessionManager implements AutoCloseable {
         busy.remove(heartbeat.sessionId());
         cancelRun(activeRuns.remove(heartbeat.sessionId()), heartbeat.sessionId(), reason);
         log.warn("[轮次] 看门狗终止轮次：turnId={}，原因={}", turnId, reason);
+    }
+
+    /** 按保留天数清理历史轮次；DELETE 幂等，重启补跑不会产生额外副作用。 */
+    public int cleanupExpiredTurns() {
+        if (turnStore == null || turnRetentionDays <= 0) {
+            return 0;
+        }
+        try {
+            int deleted = turnStore.cleanup(turnRetentionDays);
+            if (deleted > 0) {
+                log.info("[轮次] 清理历史轮次 {} 条（保留 {} 天）", deleted, turnRetentionDays);
+            }
+            return deleted;
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 清理历史轮次失败：{}", e.getMessage());
+            return 0;
+        }
     }
 
     private void scanStaleTurns() {

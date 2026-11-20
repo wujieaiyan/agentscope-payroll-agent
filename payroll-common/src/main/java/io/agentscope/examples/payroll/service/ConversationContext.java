@@ -73,22 +73,31 @@ final class ConversationContext {
 
     /** 同时注入向量记忆片段；历史片段只作指代线索，金额仍必须重新计算。 */
     String augment(String question, String memoryBlock) {
+        return augment(question, memoryBlock, "");
+    }
+
+    /** 在同一位置注入偏好前缀块：偏好 → 摘要/历史 → 历史线索 → 本轮问题。 */
+    String augment(String question, String memoryBlock, String prefixBlock) {
+        String prefix = prefixBlock == null ? "" : prefixBlock.trim();
         String history = render();
         String memory = memoryBlock == null ? "" : memoryBlock.trim();
-        if (history.isBlank() && memory.isEmpty()) {
+        if (prefix.isEmpty() && history.isBlank() && memory.isEmpty()) {
             return question;
         }
-        StringBuilder builder = new StringBuilder();
-        if (!history.isBlank()) {
-            builder.append(history);
-        }
-        if (!memory.isEmpty()) {
-            if (!builder.isEmpty()) {
-                builder.append("\n\n");
-            }
-            builder.append(memory);
-        }
+        StringBuilder builder = new StringBuilder(prefix);
+        appendBlock(builder, history);
+        appendBlock(builder, memory);
         return builder.append("\n\n【本轮问题】\n").append(question).toString();
+    }
+
+    private static void appendBlock(StringBuilder builder, String block) {
+        if (block.isBlank()) {
+            return;
+        }
+        if (!builder.isEmpty()) {
+            builder.append("\n\n");
+        }
+        builder.append(block);
     }
 
     boolean needsCompression() {

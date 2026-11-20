@@ -27,6 +27,11 @@ import io.agentscope.examples.payroll.devteam.ProcessCommandLauncher;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
 import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
+import io.agentscope.examples.payroll.profile.UserProfileExtractor;
+import io.agentscope.examples.payroll.profile.UserProfileModelClient;
+import io.agentscope.examples.payroll.profile.UserProfileRecorder;
+import io.agentscope.examples.payroll.profile.UserProfileService;
+import io.agentscope.examples.payroll.profile.UserProfileStore;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.service.AgentStatsService;
@@ -42,6 +47,8 @@ import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.ShadowTeamService;
 import io.agentscope.examples.payroll.team.TeamLlmClient;
 import io.agentscope.examples.payroll.team.TeamSettings;
+import io.agentscope.examples.payroll.usage.LlmUsageRecorder;
+import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import io.agentscope.examples.payroll.web.NodeRoleFilter;
 import java.nio.file.Path;
 import java.util.Collections;
@@ -100,6 +107,18 @@ public class PayrollAgentConfiguration {
                     "[Model] 模型注册表已就绪：{}，页面密钥={}",
                     registry.location(),
                     credentials.secretKeyAvailable() ? "可用" : "不可用");
+        };
+    }
+
+    /**
+     * 用量记录器接线：本节点所有模型调用经 {@code onModelCall} 中间件落 {@code llm_usage}，
+     * 异步写入避免 JDBC 阻塞模型流；Web 端读取同一张表出看板。
+     */
+    @Bean
+    public ApplicationRunner llmUsageRecorderConfigurer(LlmUsageStore usageStore) {
+        return args -> {
+            LlmUsageRecorder.configure(usageStore);
+            log.info("[用量看板] 模型调用用量记录已启用：异步写入");
         };
     }
 
@@ -372,6 +391,35 @@ public class PayrollAgentConfiguration {
     @Bean
     public TeamLlmClient teamLlmClient() {
         return new TeamLlmClient();
+    }
+
+    @Bean
+    public UserProfileModelClient userProfileModelClient(TeamLlmClient teamLlmClient) {
+        return new TeamProfileModelClient(teamLlmClient);
+    }
+
+    @Bean
+    public UserProfileExtractor userProfileExtractor(
+            UserProfileModelClient userProfileModelClient,
+            @Value("${payroll.memory.profile.max-items-per-extraction:3}") int maxItems) {
+        return new UserProfileExtractor(userProfileModelClient, maxItems);
+    }
+
+    /** 抽取只在有对话执行的 runtime/all 节点启用，与轮次清理的 web/all 门禁相反。 */
+    @Bean
+    public UserProfileService userProfileService(
+            UserProfileStore userProfileStore,
+            UserProfileExtractor userProfileExtractor,
+            @Value("${payroll.memory.profile.enabled:false}") boolean enabled,
+            @Value("${payroll.node-role:runtime}") String nodeRole) {
+        boolean active = enabled && ("runtime".equals(nodeRole) || "all".equals(nodeRole));
+        log.info("[工作偏好] 抽取服务：{}", active ? "已启用（runtime/all）" : "未启用");
+        return new UserProfileService(userProfileStore, userProfileExtractor, active);
+    }
+
+    @Bean
+    public ApplicationRunner userProfileRecorderConfigurer(UserProfileService userProfileService) {
+        return args -> UserProfileRecorder.configure(userProfileService);
     }
 
     @Bean

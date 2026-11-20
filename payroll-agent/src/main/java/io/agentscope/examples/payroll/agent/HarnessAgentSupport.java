@@ -227,6 +227,7 @@ final class HarnessAgentSupport {
         } else {
             builder.disableFilesystemTools();
         }
+        builder.middleware(new UsageRecordingMiddleware());
         if (skillRepository != null) {
             builder.skillRepositories(List.of(skillRepository))
                     .middleware(new SkillToolGroupActivationMiddleware(skillRepository));

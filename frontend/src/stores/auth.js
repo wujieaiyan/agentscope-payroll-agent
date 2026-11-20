@@ -5,6 +5,7 @@ export const auth = reactive({
   loaded: false,
   user: null,
   authEnabled: false,
+  profileEnabled: false,
 });
 
 export async function loadMe() {
@@ -12,6 +13,7 @@ export async function loadMe() {
     const state = await api('/api/auth/me');
     auth.user = state ? state.user : null;
     auth.authEnabled = Boolean(state && state.auth_enabled);
+    auth.profileEnabled = Boolean(state && state.profile_enabled);
   } catch (error) {
     auth.user = null;
   } finally {
@@ -27,6 +29,7 @@ export async function login(username, password) {
   });
   auth.user = state.user;
   auth.authEnabled = Boolean(state.auth_enabled);
+  auth.profileEnabled = Boolean(state.profile_enabled);
   return state.user;
 }
 

@@ -18,17 +18,25 @@ import io.agentscope.examples.payroll.kb.KbModels.IngestTask;
 import io.agentscope.examples.payroll.service.AuditService;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-/** 入库任务队列：创建、查询、取消、重试与全量重建。 */
+/** 入库任务队列：创建、查询、取消、重试、启动恢复与全量重建。 */
 @Service
 public class KbTaskService {
+
+    private static final Logger log = LoggerFactory.getLogger(KbTaskService.class);
 
     private final KbTaskStore taskStore;
     private final KbDocumentStore documentStore;
@@ -39,6 +47,7 @@ public class KbTaskService {
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
     private final ExecutorService executor;
+    private final int maxRetries;
 
     public KbTaskService(
             KbTaskStore taskStore,
@@ -49,7 +58,8 @@ public class KbTaskService {
             H2AdminRepository adminRepository,
             AuditService auditService,
             ObjectMapper objectMapper,
-            @Qualifier("kbIngestExecutor") ExecutorService executor) {
+            @Qualifier("kbIngestExecutor") ExecutorService executor,
+            @Value("${payroll.kb.task-max-retries:3}") int maxRetries) {
         this.taskStore = taskStore;
         this.documentStore = documentStore;
         this.seriesService = seriesService;
@@ -59,6 +69,7 @@ public class KbTaskService {
         this.auditService = auditService;
         this.objectMapper = objectMapper;
         this.executor = executor;
+        this.maxRetries = Math.max(0, maxRetries);
     }
 
     public TaskView createIngest(
@@ -171,6 +182,10 @@ public class KbTaskService {
         if (task.status() != TaskStatus.FAILED && task.status() != TaskStatus.CANCELED) {
             throw new PayrollException("仅失败或已取消的任务可以重试");
         }
+        if (task.retryCount() >= maxRetries) {
+            throw new PayrollException(
+                    "已达到最大重试次数（" + maxRetries + " 次），请排查失败原因后重新导入文档");
+        }
         if (task.documentId() == null) {
             throw new PayrollException("任务缺少文档信息");
         }
@@ -193,12 +208,165 @@ public class KbTaskService {
         return view(created);
     }
 
+    /**
+     * 启动恢复：把上一实例遗留的未完成任务收敛到可继续状态。
+     *
+     * <p>同一文档存在多个活动任务时只保留任务号最大的一个；CANCELING 直接终态化；QUEUED
+     * 重新排队；RUNNING 因进程中断置为失败，未达重试上限时自动重建后续任务。
+     */
+    public RecoverySummary recoverInterrupted() {
+        List<IngestTask> actives = taskStore.findActiveTasks(2000);
+        if (actives.isEmpty()) {
+            return new RecoverySummary(0, 0, 0, 0, 0);
+        }
+        Map<Long, List<IngestTask>> byDocument = new LinkedHashMap<>();
+        List<IngestTask> orphan = new ArrayList<>();
+        for (IngestTask task : actives) {
+            if (task.documentId() == null) {
+                orphan.add(task);
+            } else {
+                byDocument.computeIfAbsent(task.documentId(), key -> new ArrayList<>()).add(task);
+            }
+        }
+        int queued = 0;
+        int retried = 0;
+        int exhausted = 0;
+        int canceled = 0;
+        int failed = 0;
+        Set<Long> seriesTouched = new HashSet<>();
+        for (IngestTask task : orphan) {
+            taskStore.markFailed(task.id(), "DOCUMENT_MISSING", "任务缺少文档信息，启动恢复时终止", null);
+            failed++;
+        }
+        for (Map.Entry<Long, List<IngestTask>> entry : byDocument.entrySet()) {
+            List<IngestTask> tasks = entry.getValue();
+            IngestTask current = tasks.get(tasks.size() - 1);
+            for (int i = 0; i < tasks.size() - 1; i++) {
+                taskStore.markFailed(
+                        tasks.get(i).id(),
+                        "DUPLICATE_TASK",
+                        "同一文档存在更新的入库任务，启动恢复时终止该重复任务",
+                        null);
+                failed++;
+            }
+            try {
+                Document document = documentStore.findById(entry.getKey()).orElse(null);
+                if (document == null || document.deletedAt() != null) {
+                    taskStore.markFailed(current.id(), "DOCUMENT_MISSING", "文档不存在或已删除", null);
+                    failed++;
+                    continue;
+                }
+                seriesTouched.add(document.seriesId());
+                switch (current.status()) {
+                    case CANCELING -> {
+                        taskStore.markCanceled(current.id());
+                        ingestService.cleanupArtifacts(document.id());
+                        documentStore.updateStatus(
+                                document.id(), DocStatus.PENDING, null, "入库任务已取消");
+                        canceled++;
+                    }
+                    case QUEUED -> {
+                        documentStore.updateStatus(document.id(), DocStatus.PENDING, null, null);
+                        executor.submit(() -> ingestService.run(current.id()));
+                        queued++;
+                    }
+                    case RUNNING -> {
+                        taskStore.markFailed(
+                                current.id(), "SERVICE_RESTART", "服务重启导致入库中断", null);
+                        ingestService.cleanupArtifacts(document.id());
+                        if (current.retryCount() < maxRetries) {
+                            IngestTask next =
+                                    insert(
+                                            document.seriesId(),
+                                            document.id(),
+                                            current.type(),
+                                            current.configVersionId(),
+                                            current.operatorId(),
+                                            current.id(),
+                                            current.retryCount() + 1);
+                            documentStore.updateStatus(
+                                    document.id(), DocStatus.PENDING, null, null);
+                            executor.submit(() -> ingestService.run(next.id()));
+                            retried++;
+                        } else {
+                            documentStore.updateStatus(
+                                    document.id(),
+                                    DocStatus.FAILED,
+                                    "RECOVERY_EXHAUSTED",
+                                    "服务重启后自动重试已达上限（"
+                                            + maxRetries
+                                            + " 次），请人工排查后重新导入");
+                            exhausted++;
+                        }
+                    }
+                    default -> {
+                    }
+                }
+            } catch (RuntimeException e) {
+                log.warn(
+                        "[知识库] 启动恢复任务失败：task={}，document={}，{}",
+                        current.id(),
+                        entry.getKey(),
+                        e.getMessage());
+                failed++;
+            }
+        }
+        for (long seriesId : seriesTouched) {
+            try {
+                seriesService.refreshCounters(seriesId);
+            } catch (RuntimeException e) {
+                log.warn("[知识库] 刷新知识库计数失败：series={}，{}", seriesId, e.getMessage());
+            }
+        }
+        RecoverySummary summary = new RecoverySummary(queued, retried, exhausted, canceled, failed);
+        if (summary.total() > 0) {
+            auditService.record(
+                    "kb.task.recover",
+                    "kb_ingest_task",
+                    "startup",
+                    null,
+                    Map.of(
+                            "queued", queued,
+                            "retried", retried,
+                            "exhausted", exhausted,
+                            "canceled", canceled,
+                            "failed", failed));
+            log.info(
+                    "[知识库] 启动恢复完成：重新排队 {}，自动重试 {}，达到上限 {}，取消 {}，终止 {}",
+                    queued,
+                    retried,
+                    exhausted,
+                    canceled,
+                    failed);
+        }
+        return summary;
+    }
+
+    /** 启动恢复结果计数，供日志与测试断言。 */
+    public record RecoverySummary(
+            int queued, int retried, int exhausted, int canceled, int failed) {
+        public int total() {
+            return queued + retried + exhausted + canceled + failed;
+        }
+    }
+
     private IngestTask insert(
             long seriesId,
             Long documentId,
             TaskType type,
             Long configVersionId,
             AuthUser user,
+            Long retryOf,
+            int retryCount) {
+        return insert(seriesId, documentId, type, configVersionId, user.id(), retryOf, retryCount);
+    }
+
+    private IngestTask insert(
+            long seriesId,
+            Long documentId,
+            TaskType type,
+            Long configVersionId,
+            long operatorId,
             Long retryOf,
             int retryCount) {
         String payload;
@@ -226,7 +394,7 @@ public class KbTaskService {
                         null,
                         null,
                         null,
-                        user.id(),
+                        operatorId,
                         null,
                         null,
                         null,

@@ -287,13 +287,18 @@ public class KbIngestService {
         if (document == null) {
             return;
         }
+        cleanupArtifacts(document.id());
+    }
+
+    /** 清理未完成入库留下的分块与索引；取消与启动恢复复用，避免计数和检索残留。 */
+    public void cleanupArtifacts(long documentId) {
         try {
-            chunkStore.deleteByDocument(document.id());
+            chunkStore.deleteByDocument(documentId);
         } catch (RuntimeException e) {
             log.warn("[知识库] 清理分块失败：{}", e.getMessage());
         }
         try {
-            elasticsearchService.deleteDocument(document.id());
+            elasticsearchService.deleteDocument(documentId);
         } catch (RuntimeException e) {
             log.warn("[知识库] 清理索引失败：{}", e.getMessage());
         }

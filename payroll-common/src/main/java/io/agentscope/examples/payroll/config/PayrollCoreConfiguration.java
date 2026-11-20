@@ -9,6 +9,8 @@ import io.agentscope.examples.payroll.db.H2ChatFeedbackStore;
 import io.agentscope.examples.payroll.db.ChatAttachmentStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2ChatTurnStore;
+import io.agentscope.examples.payroll.db.H2LlmUsageStore;
+import io.agentscope.examples.payroll.db.H2UserProfileStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.ModelCredentialStore;
@@ -17,6 +19,10 @@ import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
 import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
+import io.agentscope.examples.payroll.profile.ProfileMemory;
+import io.agentscope.examples.payroll.profile.UserProfileAdminService;
+import io.agentscope.examples.payroll.profile.UserProfileMaintenance;
+import io.agentscope.examples.payroll.profile.UserProfileStore;
 import io.agentscope.examples.payroll.service.ModelCredentialService;
 import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillSettings;
@@ -39,6 +45,7 @@ import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.InMemoryTurnEventBus;
+import io.agentscope.examples.payroll.service.LlmUsageService;
 import io.agentscope.examples.payroll.service.LoginRateLimiter;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollEngine;
@@ -60,6 +67,7 @@ import io.agentscope.examples.payroll.team.ShadowReportService;
 import io.agentscope.examples.payroll.team.TeamAdminService;
 import io.agentscope.examples.payroll.team.TeamMode;
 import io.agentscope.examples.payroll.team.TeamSettings;
+import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -334,6 +342,52 @@ public class PayrollCoreConfiguration {
     }
 
     @Bean
+    public UserProfileStore userProfileStore(PayrollDatabase database) {
+        return new H2UserProfileStore(database);
+    }
+
+    /** 注入读路径的静态装配；开关关闭时读取一律返回空块，自助接口另行按开关拒绝。 */
+    @Bean
+    public ApplicationRunner profileMemoryConfigurer(
+            UserProfileStore userProfileStore,
+            @Value("${payroll.memory.profile.enabled:false}") boolean enabled,
+            @Value("${payroll.memory.profile.inject-max-items:10}") int maxItems,
+            @Value("${payroll.memory.profile.inject-max-chars:600}") int maxChars) {
+        return args -> {
+            ProfileMemory.configure(userProfileStore, enabled, maxItems, maxChars);
+            log.info(
+                    "[工作偏好] 注入读路径：{}，上限 {} 条 / {} 字",
+                    enabled ? "已启用" : "已关闭（payroll.memory.profile.enabled=false）",
+                    maxItems,
+                    maxChars);
+        };
+    }
+
+    /** 抽取凭证随 chat_turns 同周期清理；只有 web/all 节点执行，runtime 不重复扫库。 */
+    @Bean(destroyMethod = "close")
+    public UserProfileMaintenance userProfileMaintenance(
+            UserProfileStore userProfileStore,
+            @Value("${payroll.memory.profile.enabled:false}") boolean enabled,
+            @Value("${payroll.chat.turn-retention-days:90}") int retentionDays,
+            @Value("${payroll.chat.turn-cleanup-interval-minutes:360}") int intervalMinutes,
+            @Value("${payroll.node-role:all}") String nodeRole) {
+        return new UserProfileMaintenance(
+                userProfileStore,
+                retentionDays,
+                intervalMinutes,
+                enabled && !"runtime".equals(nodeRole));
+    }
+
+    /** 自助接口服务：写操作按用户失效注入缓存，审计只落值哈希。 */
+    @Bean
+    public UserProfileAdminService userProfileAdminService(
+            UserProfileStore userProfileStore,
+            AuditService auditService,
+            @Value("${payroll.memory.profile.enabled:false}") boolean enabled) {
+        return new UserProfileAdminService(userProfileStore, auditService, enabled);
+    }
+
+    @Bean
     public H2AgentTeamStore agentTeamStore(PayrollDatabase database) {
         return new H2AgentTeamStore(database);
     }
@@ -470,7 +524,11 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.chat.turn-heartbeat-seconds:10}") int heartbeatSeconds,
             @Value("${payroll.chat.turn-max-minutes:30}") int turnMaxMinutes,
             @Value("${payroll.chat.turn-progress-timeout-seconds:300}")
-                    int progressTimeoutSeconds) {
+                    int progressTimeoutSeconds,
+            @Value("${payroll.chat.turn-retention-days:90}") int turnRetentionDays,
+            @Value("${payroll.chat.turn-cleanup-interval-minutes:360}")
+                    int turnCleanupIntervalMinutes,
+            @Value("${payroll.node-role:all}") String nodeRole) {
         return new ChatSessionManager(
                 chatStore,
                 chatFactoryProvider.getIfAvailable(),
@@ -487,7 +545,10 @@ public class PayrollCoreConfiguration {
                 nodeId,
                 heartbeatSeconds,
                 turnMaxMinutes,
-                progressTimeoutSeconds);
+                progressTimeoutSeconds,
+                // 清理只由 Web/all 节点执行，runtime 节点不重复扫库。
+                "runtime".equals(nodeRole) ? 0 : turnRetentionDays,
+                turnCleanupIntervalMinutes);
     }
 
     @Bean
@@ -508,6 +569,17 @@ public class PayrollCoreConfiguration {
             H2AuditStore auditStore,
             @Value("${payroll.audit.retention-days:180}") int retentionDays) {
         return new AuditService(auditStore, retentionDays);
+    }
+
+    /** 用量事实表：runtime 写入、Web 读取；同一份存储两端共享。 */
+    @Bean
+    public LlmUsageStore llmUsageStore(PayrollDatabase database) {
+        return new H2LlmUsageStore(database);
+    }
+
+    @Bean
+    public LlmUsageService llmUsageService(LlmUsageStore llmUsageStore) {
+        return new LlmUsageService(llmUsageStore);
     }
 
     /** 模型连接整份存 Nacos；Nacos 未启用时只提供环境变量派生的只读连接。 */

@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
+import io.agentscope.examples.payroll.profile.UserProfileRecorder;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
@@ -363,7 +364,11 @@ public class InternalTurnController {
                                     turn,
                                     reply -> {
                                         try {
-                                            return manager.completeTurn(turn, reply);
+                                            Long saved = manager.completeTurn(turn, reply);
+                                            if (saved != null) {
+                                                UserProfileRecorder.schedule(turn.userId());
+                                            }
+                                            return saved;
                                         } finally {
                                             finished.set(true);
                                         }

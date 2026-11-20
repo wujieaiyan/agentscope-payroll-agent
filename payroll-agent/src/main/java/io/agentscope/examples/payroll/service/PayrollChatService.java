@@ -43,6 +43,7 @@ import io.agentscope.examples.payroll.team.TeamPlan;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.SemanticCachePolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.profile.ProfileMemory;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
@@ -692,6 +693,8 @@ public final class PayrollChatService implements PayrollChat {
                                     ? "内置三段流水线"
                                     : "单个智能体");
 
+            // 画像必须在缓存查找之前读取：画像非空即视为个性化答复，缓存作用域追加用户维度。
+            ProfileMemory.Injection profile = ProfileMemory.load(userId, question);
             // 附件内容只进入执行输入，路由、缓存与历史仍按原始问题判断。
             String cacheScope =
                     ChatRouting.AGENT.equals(plannedPath)
@@ -703,6 +706,7 @@ public final class PayrollChatService implements PayrollChat {
                                     + modelId()
                                     + "|"
                                     + SemanticCacheContext.scope()
+                                    + profile.cacheSuffix()
                             : "";
             if (!cacheScope.isEmpty()) {
                 Optional<AnswerCache.Hit> cached = answerCache.lookup(cacheScope, question);
@@ -766,7 +770,12 @@ public final class PayrollChatService implements PayrollChat {
                 }
                 String calculatorInput =
                         context.augment(
-                                AttachmentContext.compose(question, attachmentText), memoryBlock);
+                                AttachmentContext.compose(question, attachmentText),
+                                memoryBlock,
+                                profile.block());
+                // D11=B：团队规划吃 question，执行节点吃 executionInput，两处都要带偏好。
+                String planningQuestion =
+                        profile.present() ? profile.block() + "\n\n" + question : question;
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
                 // 规格 6.4：不再按“制度类”硬编码绕过团队；仅当当前智能体已具备 kb:read，
@@ -797,7 +806,7 @@ public final class PayrollChatService implements PayrollChat {
                                     this,
                                     userId,
                                     sessionId,
-                                    question,
+                                    planningQuestion,
                                     calculatorInput,
                                     events,
                                     needKb);

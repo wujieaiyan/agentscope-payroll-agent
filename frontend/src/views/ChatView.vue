@@ -33,11 +33,13 @@ const sourceListModal = ref(null);
 const citationModal = ref(null);
 const attachments = ref([]);
 const attachmentInput = ref(null);
+const composerInput = ref(null);
 const attachmentBusy = ref(false);
 const draggingFiles = ref(false);
 const attachmentPreview = ref(null);
 const ATTACHMENT_ACCEPT = '.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
 const ATTACHMENT_EXT = ['docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
+const QUESTION_MAX = 2000;
 
 let controller = null;
 let turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
@@ -1585,6 +1587,36 @@ function useSuggestion(text) {
   send();
 }
 
+/** 把助手回答插入输入框当前光标处，保留已输入内容并自动补换行，便于继续编辑。 */
+function insertToComposer(message) {
+  const snippet = (message.content || '').trim();
+  if (!snippet) {
+    toast('这条回答没有可插入的内容', 'warning');
+    return;
+  }
+  const input = composerInput.value;
+  const start = input ? input.selectionStart : draft.value.length;
+  const end = input ? input.selectionEnd : draft.value.length;
+  const before = draft.value.slice(0, start);
+  const after = draft.value.slice(end);
+  const lead = before && !before.endsWith('\n') ? '\n' : '';
+  const tail = after && !after.startsWith('\n') ? '\n' : '';
+  draft.value = `${before}${lead}${snippet}${tail}${after}`;
+  const caret = before.length + lead.length + snippet.length;
+  nextTick(() => {
+    const target = composerInput.value;
+    if (!target) return;
+    target.focus();
+    target.setSelectionRange(caret, caret);
+    target.scrollTop = target.scrollHeight;
+  });
+  if (draft.value.length > QUESTION_MAX) {
+    toast(`已插入，当前 ${draft.value.length} 字，超过 ${QUESTION_MAX} 字上限，请删减后再发送`, 'warning');
+  } else {
+    toast('已插入输入框，可继续编辑后发送');
+  }
+}
+
 async function previewRoute() {
   const question = draft.value.trim() || lastUserQuestion();
   if (!question) {
@@ -1949,6 +1981,9 @@ onBeforeUnmount(() => {
                   {{ pathLabel(message.routing) }}
                 </button>
                 <button v-if="message.model" class="chip plain">{{ message.model }}</button>
+                <button class="chip" title="插入到输入框" @click="insertToComposer(message)">
+                  插入
+                </button>
                 <button class="chip" @click="openDetail(message, 'traces')">
                   计算依据{{ message.tools?.length ? `（${message.tools.length}）` : '' }}
                 </button>
@@ -2454,6 +2489,7 @@ onBeforeUnmount(() => {
             @click="pickAttachments"
           >＋</button>
           <textarea
+            ref="composerInput"
             v-model="draft"
             rows="1"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行；可上传 docx/xlsx/图片"
@@ -2467,7 +2503,7 @@ onBeforeUnmount(() => {
           <span class="left">
             <span>问题会按路由规则交给单个智能体或动态团队处理；附件内容仅作为资料引用</span>
           </span>
-          <span>{{ draft.length }} / 2000</span>
+          <span>{{ draft.length }} / {{ QUESTION_MAX }}</span>
         </div>
       </footer>
 
