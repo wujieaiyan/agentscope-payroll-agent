@@ -4,15 +4,19 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,6 +35,10 @@ public final class NacosAgentRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(NacosAgentRegistry.class);
 
+    /** 配置快照：items 为解析结果，revision 为原始文档内容指纹。 */
+    public record Snapshot<T>(List<T> items, String revision) {
+    }
+
     private final NacosSkillSettings settings;
     private final NacosConfigClient client;
     // 兼容前置：新增字段（如 model）时旧版本必须能读取新配置，未知字段直接忽略。
@@ -41,10 +49,13 @@ public final class NacosAgentRegistry {
                     .build();
     private final long ttlMillis;
 
-    private volatile List<AgentDefinition> cache;
+    private volatile Snapshot<AgentDefinition> cache;
     private volatile long fetchedAt;
 
     private volatile String cachedActiveAgent;
+    /** Nacos 显式配置的写操作确认开关；null 表示未配置，由调用方回退环境变量。 */
+    private volatile Boolean cachedActionConfirm;
+    private volatile String cachedSettingsRevision = ConfigRevision.ABSENT;
     private volatile long settingsFetchedAt;
 
     public NacosAgentRegistry() {
@@ -66,8 +77,26 @@ public final class NacosAgentRegistry {
     }
 
     public List<AgentDefinition> list() {
+        return snapshot().items();
+    }
+
+    /** 当前 agents 文档内容指纹（读路径，TTL 内缓存）。 */
+    public String revision() {
+        return snapshot().revision();
+    }
+
+    /** 当前 settings 文档内容指纹；未读取或读取失败时沿用上次已知值。 */
+    public String settingsRevision() {
+        if (!settings.enabled()) {
+            return ConfigRevision.ABSENT;
+        }
+        refreshSettings();
+        return cachedSettingsRevision;
+    }
+
+    private Snapshot<AgentDefinition> snapshot() {
         long now = System.currentTimeMillis();
-        List<AgentDefinition> snapshot = cache;
+        Snapshot<AgentDefinition> snapshot = cache;
         if (snapshot != null && now - fetchedAt < ttlMillis) {
             return snapshot;
         }
@@ -160,7 +189,14 @@ public final class NacosAgentRegistry {
 
     /** 设置全局核算智能体，只允许公开且已上架的智能体。 */
     public synchronized String setActiveAgent(String id) {
+        return setActiveAgent(id, null);
+    }
+
+    /** @param expectedRevision settings 文档指纹；null/空白跳过校验（滚动发布兼容） */
+    public synchronized String setActiveAgent(String id, String expectedRevision) {
         requireWritable();
+        SettingsSnapshot base = reloadSettingsForWrite();
+        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
         AgentDefinition agent =
                 list().stream()
                         .filter(a -> a.id().equals(id))
@@ -172,61 +208,159 @@ public final class NacosAgentRegistry {
         if (!AgentDefinition.VISIBILITY_PUBLIC.equals(agent.visibility())) {
             throw new PayrollException("只有公开的智能体才能用于薪酬核算");
         }
-        Map<String, String> payload = Map.of("calculationAgentId", id);
-        try {
-            String content = json.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
-            if (!client.publish(SETTINGS_DATA_ID, content)) {
-                throw new PayrollException(
-                        "写入 Nacos 配置 " + SETTINGS_DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
-            }
-        } catch (PayrollException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new PayrollException("序列化核算智能体配置失败：" + e.getMessage());
-        }
+        publishSettings(base, root -> root.put("calculationAgentId", id));
         cachedActiveAgent = id;
-        settingsFetchedAt = System.currentTimeMillis();
         log.info("[Agent] 核算智能体已设置为 {}（{}）", agent.name(), id);
         return id;
     }
 
     /** 取消全局核算智能体：对话回到内置三段流水线，与全局默认流程互斥。 */
     public synchronized void clearActiveAgent() {
+        clearActiveAgent(null);
+    }
+
+    public synchronized void clearActiveAgent(String expectedRevision) {
         requireWritable();
+        SettingsSnapshot base = reloadSettingsForWrite();
+        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
+        publishSettings(base, root -> root.put("calculationAgentId", ""));
+        cachedActiveAgent = "";
+        log.info("[Agent] 已取消全局核算智能体，对话回到内置流水线");
+    }
+
+    /** 写操作确认开关的 Nacos 覆盖值；Nacos 未启用或未配置该键时为空，由调用方回退环境变量。 */
+    public Optional<Boolean> actionConfirmOverride() {
+        if (!settings.enabled()) {
+            return Optional.empty();
+        }
+        refreshSettings();
+        return Optional.ofNullable(cachedActionConfirm);
+    }
+
+    /** 管理台切换写操作确认；读-改-写保留同一文件里的核算智能体配置。 */
+    public synchronized void setActionConfirm(boolean enabled) {
+        setActionConfirm(enabled, null);
+    }
+
+    public synchronized void setActionConfirm(boolean enabled, String expectedRevision) {
+        requireWritable();
+        SettingsSnapshot base = reloadSettingsForWrite();
+        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
+        publishSettings(base, root -> root.put("actionConfirm", enabled));
+        cachedActionConfirm = enabled;
+        log.info("[Agent] 写操作确认已{}（Nacos {}）", enabled ? "开启" : "关闭", SETTINGS_DATA_ID);
+    }
+
+    private synchronized void refreshSettings() {
+        long now = System.currentTimeMillis();
+        if (settingsFetchedAt > 0 && now - settingsFetchedAt < ttlMillis) {
+            return;
+        }
+        loadSettings(cachedActiveAgent);
+        settingsFetchedAt = now;
+    }
+
+    private String loadActiveAgentId(String fallback) {
+        loadSettings(fallback);
+        String current = cachedActiveAgent;
+        if (current != null) {
+            return current;
+        }
+        return fallback == null ? "" : fallback;
+    }
+
+    private void loadSettings(String fallback) {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                try {
+                    JsonNode root = json.readTree(fetched.entry().content());
+                    JsonNode confirm = root.path("actionConfirm");
+                    cachedActionConfirm = confirm.isBoolean() ? confirm.asBoolean() : null;
+                    cachedActiveAgent =
+                            root.path("calculationAgentId")
+                                    .asText(fallback == null ? "" : fallback)
+                                    .trim();
+                    cachedSettingsRevision =
+                            ConfigRevision.revisionOf(fetched.entry().content());
+                } catch (Exception e) {
+                    log.warn(
+                            "[Agent] 解析 Nacos 配置 {} 失败，沿用上次设置：{}",
+                            SETTINGS_DATA_ID,
+                            e.getMessage());
+                }
+            }
+            case ABSENT -> {
+                cachedActionConfirm = null;
+                cachedSettingsRevision = ConfigRevision.ABSENT;
+            }
+            case ERROR -> log.warn(
+                    "[Agent] 读取 Nacos 配置 {} 失败，沿用上次设置：{}",
+                    SETTINGS_DATA_ID,
+                    fetched.message());
+        }
+    }
+
+    private record SettingsSnapshot(ObjectNode root, String revision) {
+    }
+
+    /** 绕过 TTL 读取 settings 文档作为写入基线；读失败或解析失败抛 503。 */
+    private SettingsSnapshot reloadSettingsForWrite() {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                try {
+                    JsonNode parsed = json.readTree(fetched.entry().content());
+                    if (!(parsed instanceof ObjectNode root)) {
+                        throw new IllegalStateException("配置根节点不是 JSON 对象");
+                    }
+                    return new SettingsSnapshot(
+                            root, ConfigRevision.revisionOf(fetched.entry().content()));
+                } catch (Exception e) {
+                    throw new PayrollUnavailableException(
+                            "读取 " + SETTINGS_DATA_ID + " 失败：" + e.getMessage(), e);
+                }
+            }
+            case ABSENT -> {
+                return new SettingsSnapshot(json.createObjectNode(), ConfigRevision.ABSENT);
+            }
+            default -> throw new PayrollUnavailableException(
+                    "读取 " + SETTINGS_DATA_ID + " 失败：" + fetched.message());
+        }
+    }
+
+    private void requireRevision(String current, String expected, String dataId) {
+        if (expected == null || expected.isBlank()) {
+            log.warn("[Agent] 写入 {} 未携带 revision，跳过并发校验（revision_missing=true）", dataId);
+            return;
+        }
+        if (!current.equals(expected)) {
+            throw new PayrollConflictException("配置已被他人修改，请刷新后重试", current);
+        }
+    }
+
+    /** 在已读取的 settings 文档上只改目标键，保留未知键。 */
+    private void publishSettings(SettingsSnapshot base, Consumer<ObjectNode> mutator) {
+        ObjectNode root = base.root();
+        mutator.accept(root);
         try {
-            String content = json.writerWithDefaultPrettyPrinter()
-                    .writeValueAsString(Map.of("calculationAgentId", ""));
+            String content = json.writerWithDefaultPrettyPrinter().writeValueAsString(root);
             if (!client.publish(SETTINGS_DATA_ID, content)) {
                 throw new PayrollException(
                         "写入 Nacos 配置 " + SETTINGS_DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
             }
+            cachedSettingsRevision = ConfigRevision.revisionOf(content);
+            settingsFetchedAt = System.currentTimeMillis();
         } catch (PayrollException e) {
             throw e;
         } catch (Exception e) {
             throw new PayrollException("序列化核算智能体配置失败：" + e.getMessage());
         }
-        cachedActiveAgent = "";
-        settingsFetchedAt = System.currentTimeMillis();
-        log.info("[Agent] 已取消全局核算智能体，对话回到内置流水线");
-    }
-
-    private String loadActiveAgentId(String fallback) {
-        Optional<String> body = client.fetch(SETTINGS_DATA_ID);
-        if (body.isEmpty()) {
-            return fallback == null ? "" : fallback;
-        }
-        try {
-            return json.readTree(body.get()).path("calculationAgentId").asText("").trim();
-        } catch (Exception e) {
-            log.warn("[Agent] 解析 Nacos 配置 {} 失败，沿用上次核算智能体：{}",
-                    SETTINGS_DATA_ID, e.getMessage());
-            return fallback == null ? "" : fallback;
-        }
     }
 
     /** 新建或更新（按 id 匹配）。返回保存后的定义。 */
     public synchronized AgentDefinition save(AgentDefinition input, String operator) {
-        return save(input, operator, true);
+        return save(input, operator, null, true);
     }
 
     /**
@@ -234,8 +368,19 @@ public final class NacosAgentRegistry {
      */
     public synchronized AgentDefinition save(
             AgentDefinition input, String operator, boolean keepModelWhenEmpty) {
+        return save(input, operator, null, keepModelWhenEmpty);
+    }
+
+    /** @param expectedRevision agents 文档指纹；null/空白跳过校验（滚动发布兼容） */
+    public synchronized AgentDefinition save(
+            AgentDefinition input,
+            String operator,
+            String expectedRevision,
+            boolean keepModelWhenEmpty) {
         requireWritable();
-        List<AgentDefinition> agents = new ArrayList<>(list());
+        Snapshot<AgentDefinition> current = reloadForWrite();
+        requireRevision(current.revision(), expectedRevision, DATA_ID);
+        List<AgentDefinition> agents = new ArrayList<>(current.items());
         LocalDateTime now = LocalDateTime.now();
         int index = -1;
         for (int i = 0; i < agents.size(); i++) {
@@ -292,8 +437,14 @@ public final class NacosAgentRegistry {
     }
 
     public synchronized boolean delete(String id) {
+        return delete(id, null);
+    }
+
+    public synchronized boolean delete(String id, String expectedRevision) {
         requireWritable();
-        List<AgentDefinition> agents = new ArrayList<>(list());
+        Snapshot<AgentDefinition> current = reloadForWrite();
+        requireRevision(current.revision(), expectedRevision, DATA_ID);
+        List<AgentDefinition> agents = new ArrayList<>(current.items());
         boolean removed = agents.removeIf(agent -> agent.id().equals(id));
         if (removed) {
             persist(agents);
@@ -312,67 +463,110 @@ public final class NacosAgentRegistry {
      * 读取失败时保留上次成功目录：临时网络抖动不能让自定义智能体凭空消失，
      * 否则引用它的默认流程会校验失败并静默回退到薪酬链路。
      */
-    private List<AgentDefinition> load(List<AgentDefinition> previous) {
+    private Snapshot<AgentDefinition> load(Snapshot<AgentDefinition> previous) {
         if (!settings.enabled()) {
-            return builtinAgents();
+            return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
         }
-        Optional<String> body = client.fetch(DATA_ID);
-        if (body.isEmpty()) {
-            if (previous != null && !previous.isEmpty()) {
-                log.warn(
-                        "[Agent] Nacos 读取 {} 失败或内容为空，沿用上次成功加载的 {} 个智能体定义",
-                        DATA_ID,
-                        previous.size());
-                return previous;
-            }
-            log.info("[Agent] Nacos 未提供 {}，使用内置默认智能体", DATA_ID);
-            return builtinAgents();
-        }
-        try {
-            JsonNode root = json.readTree(body.get());
-            if (root == null || !root.isArray()) {
-                throw new IllegalStateException("配置根节点不是 JSON 数组");
-            }
-            List<AgentDefinition> agents = new ArrayList<>(root.size());
-            List<String> skipped = new ArrayList<>();
-            for (JsonNode node : root) {
-                try {
-                    AgentDefinition agent = json.treeToValue(node, AgentDefinition.class);
-                    if (agent == null || agent.id() == null || agent.id().isBlank()
-                            || agent.name() == null || agent.name().isBlank()) {
-                        skipped.add(node.path("id").asText("<无 id>"));
-                        continue;
-                    }
-                    agents.add(agent);
-                } catch (Exception perEntry) {
-                    // 单条结构异常只跳过该条，不能让整份配置失效。
-                    skipped.add(node.path("id").asText("<无 id>"));
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        switch (fetched.status()) {
+            case ERROR -> {
+                if (previous != null && !previous.items().isEmpty()) {
                     log.warn(
-                            "[Agent] 跳过无法解析的智能体配置（id={}）：{}",
-                            node.path("id").asText("<无 id>"),
-                            perEntry.getMessage());
+                            "[Agent] Nacos 读取 {} 失败，沿用上次成功加载的 {} 个智能体定义：{}",
+                            DATA_ID,
+                            previous.items().size(),
+                            fetched.message());
+                    return previous;
+                }
+                log.warn("[Agent] Nacos 读取 {} 失败，回退内置默认智能体：{}", DATA_ID, fetched.message());
+                return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
+            }
+            case ABSENT -> {
+                if (previous != null && !previous.items().isEmpty()) {
+                    log.warn(
+                            "[Agent] Nacos 未提供 {}，沿用上次成功加载的 {} 个智能体定义",
+                            DATA_ID,
+                            previous.items().size());
+                    return new Snapshot<>(previous.items(), ConfigRevision.ABSENT);
+                }
+                log.info("[Agent] Nacos 未提供 {}，使用内置默认智能体", DATA_ID);
+                return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
+            }
+            default -> {
+                String raw = fetched.entry().content();
+                try {
+                    return new Snapshot<>(parseAgents(raw), ConfigRevision.revisionOf(raw));
+                } catch (Exception e) {
+                    if (previous != null && !previous.items().isEmpty()) {
+                        log.warn(
+                                "[Agent] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 个智能体定义：{}",
+                                DATA_ID,
+                                previous.items().size(),
+                                e.getMessage());
+                        return previous;
+                    }
+                    log.warn("[Agent] 解析 Nacos 配置 {} 失败，回退内置默认智能体：{}", DATA_ID, e.getMessage());
+                    return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
                 }
             }
-            if (agents.isEmpty()) {
-                throw new IllegalStateException("没有可用的智能体配置（跳过 " + skipped.size() + " 条）");
-            }
-            if (!skipped.isEmpty()) {
-                log.warn("[Agent] 配置 {} 有 {} 条无效条目已跳过：{}", DATA_ID, skipped.size(), skipped);
-            }
-            log.info("[Agent] 从 Nacos 加载 {} 个智能体定义", agents.size());
-            return List.copyOf(agents);
-        } catch (Exception e) {
-            if (previous != null && !previous.isEmpty()) {
-                log.warn(
-                        "[Agent] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 个智能体定义：{}",
-                        DATA_ID,
-                        previous.size(),
-                        e.getMessage());
-                return previous;
-            }
-            log.warn("[Agent] 解析 Nacos 配置 {} 失败，回退内置默认智能体：{}", DATA_ID, e.getMessage());
-            return builtinAgents();
         }
+    }
+
+    /** 写前重读：解析失败或读取失败一律 503，禁止用旧数据写回。 */
+    private Snapshot<AgentDefinition> reloadForWrite() {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                String raw = fetched.entry().content();
+                try {
+                    return new Snapshot<>(parseAgents(raw), ConfigRevision.revisionOf(raw));
+                } catch (Exception e) {
+                    throw new PayrollUnavailableException(
+                            "读取 " + DATA_ID + " 失败：" + e.getMessage(), e);
+                }
+            }
+            case ABSENT -> {
+                return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
+            }
+            default -> throw new PayrollUnavailableException(
+                    "读取 " + DATA_ID + " 失败：" + fetched.message());
+        }
+    }
+
+    /** 解析智能体数组；根节点不是数组或没有可用条目时抛异常。 */
+    private List<AgentDefinition> parseAgents(String raw) throws Exception {
+        JsonNode root = json.readTree(raw);
+        if (root == null || !root.isArray()) {
+            throw new IllegalStateException("配置根节点不是 JSON 数组");
+        }
+        List<AgentDefinition> agents = new ArrayList<>(root.size());
+        List<String> skipped = new ArrayList<>();
+        for (JsonNode node : root) {
+            try {
+                AgentDefinition agent = json.treeToValue(node, AgentDefinition.class);
+                if (agent == null || agent.id() == null || agent.id().isBlank()
+                        || agent.name() == null || agent.name().isBlank()) {
+                    skipped.add(node.path("id").asText("<无 id>"));
+                    continue;
+                }
+                agents.add(agent);
+            } catch (Exception perEntry) {
+                // 单条结构异常只跳过该条，不能让整份配置失效。
+                skipped.add(node.path("id").asText("<无 id>"));
+                log.warn(
+                        "[Agent] 跳过无法解析的智能体配置（id={}）：{}",
+                        node.path("id").asText("<无 id>"),
+                        perEntry.getMessage());
+            }
+        }
+        if (agents.isEmpty()) {
+            throw new IllegalStateException("没有可用的智能体配置（跳过 " + skipped.size() + " 条）");
+        }
+        if (!skipped.isEmpty()) {
+            log.warn("[Agent] 配置 {} 有 {} 条无效条目已跳过：{}", DATA_ID, skipped.size(), skipped);
+        }
+        log.info("[Agent] 从 Nacos 加载 {} 个智能体定义", agents.size());
+        return List.copyOf(agents);
     }
 
     private void persist(List<AgentDefinition> agents) {
@@ -382,7 +576,7 @@ public final class NacosAgentRegistry {
                 throw new io.agentscope.examples.payroll.domain.PayrollException(
                         "写入 Nacos 配置 " + DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
             }
-            cache = List.copyOf(agents);
+            cache = new Snapshot<>(List.copyOf(agents), ConfigRevision.revisionOf(content));
             fetchedAt = System.currentTimeMillis();
             log.info("[Agent] 已保存智能体配置（共 {} 个）", agents.size());
         } catch (io.agentscope.examples.payroll.domain.PayrollException e) {

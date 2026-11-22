@@ -25,15 +25,26 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
     private final String model;
     private final int dim;
     private final Duration timeout;
+    private final EmbeddingCircuitBreaker breaker;
 
     public OllamaEmbeddingClient(
             String baseUrl, String model, int dim, Duration timeout) {
+        this(baseUrl, model, dim, timeout, null);
+    }
+
+    public OllamaEmbeddingClient(
+            String baseUrl,
+            String model,
+            int dim,
+            Duration timeout,
+            EmbeddingCircuitBreaker breaker) {
         String base = baseUrl == null ? "" : baseUrl.trim().replaceAll("/+$", "");
         this.embedUri = URI.create(base + "/api/embed");
         this.tagsUri = URI.create(base + "/api/tags");
         this.model = model;
         this.dim = dim;
         this.timeout = timeout == null ? Duration.ofSeconds(3) : timeout;
+        this.breaker = breaker;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     }
 
@@ -95,6 +106,9 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
 
     @Override
     public boolean available() {
+        if (breaker != null && breaker.isOpen()) {
+            return false;
+        }
         try {
             HttpRequest request =
                     HttpRequest.newBuilder(tagsUri)

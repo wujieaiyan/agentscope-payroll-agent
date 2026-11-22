@@ -37,6 +37,8 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
+                    <!-- 主构件保留普通 jar 供模块间编译；可执行包单独输出为 -exec.jar。 -->
+                    <classifier>exec</classifier>
                     <mainClass>io.agentscope.payroll.sandbox.SandboxApplication</mainClass>
                 </configuration>
             </plugin>

@@ -4,6 +4,8 @@ import { api } from '../../api/http';
 import { toast } from '../../stores/toast';
 
 const rows = ref([]);
+const revision = ref('');
+const settingsRevision = ref('');
 const meta = ref({ writable: false, location: '-' });
 const skillOptions = ref([]);
 const skillKeyword = ref('');
@@ -11,6 +13,7 @@ const SKILL_CHIP_LIMIT = 60;
 const modelOptions = ref([]);
 const modelMeta = ref({ secretKeyAvailable: false, envCodingLocked: false });
 const active = ref({ agentId: '', name: '', configured: '', available: true });
+const actionConfirm = ref({ enabled: false, source: 'ENV' });
 const stats = ref({ window_days: 0, record_count: 0, feedback_count: 0, agents: [] });
 const keyword = ref('');
 const statusFilter = ref('');
@@ -76,19 +79,27 @@ const hiddenSkillCount = computed(() => {
 async function load() {
   loading.value = true;
   try {
-    const [agents, metaValue, skills, activeValue, statsValue, models] = await Promise.all([
-      api('/api/admin/agents'),
-      api('/api/admin/agents/meta'),
-      api('/api/admin/agents/skills'),
-      api('/api/admin/agents/active'),
-      api('/api/admin/agent-stats'),
-      api('/api/admin/model-connections').catch(() => null),
-    ]);
-    rows.value = agents || [];
+    const [agents, metaValue, skills, activeValue, statsValue, confirmValue, models] =
+      await Promise.all([
+        api('/api/admin/agents'),
+        api('/api/admin/agents/meta'),
+        api('/api/admin/agents/skills'),
+        api('/api/admin/agents/active'),
+        api('/api/admin/agent-stats'),
+        api('/api/admin/agents/action-confirm').catch(() => null),
+        api('/api/admin/model-connections').catch(() => null),
+      ]);
+    rows.value = (agents && agents.agents) || [];
+    revision.value = (agents && agents.revision) || (metaValue && metaValue.revision) || '';
+    settingsRevision.value =
+      (agents && agents.settingsRevision) ||
+      (metaValue && metaValue.settingsRevision) ||
+      '';
     meta.value = metaValue || meta.value;
     skillOptions.value = skills || [];
     active.value = activeValue || active.value;
     stats.value = statsValue || stats.value;
+    if (confirmValue) actionConfirm.value = confirmValue;
     if (models) {
       modelOptions.value = (models.connections || []).filter((item) => item.enabled);
       modelMeta.value = {
@@ -144,6 +155,21 @@ function toggleSkill(id) {
   else form.skillIds.push(id);
 }
 
+function withRevision(path, value) {
+  if (!value) return path;
+  const joiner = path.includes('?') ? '&' : '?';
+  return `${path}${joiner}revision=${encodeURIComponent(value)}`;
+}
+
+async function handleWriteError(error) {
+  if (error.status === 409) {
+    toast('配置已被他人修改，已同步最新数据，请确认后重新提交', 'error');
+    await load();
+    return;
+  }
+  toast(error.message, 'error');
+}
+
 async function save() {
   if (saving.value) return;
   saving.value = true;
@@ -173,17 +199,20 @@ async function save() {
     };
     if (editing.value) {
       await api(
-        `/api/admin/agents/${encodeURIComponent(body.id)}?clearModel=${form.inheritModel}`,
+        withRevision(
+          `/api/admin/agents/${encodeURIComponent(body.id)}?clearModel=${form.inheritModel}`,
+          revision.value
+        ),
         { method: 'PUT', body }
       );
     } else {
-      await api('/api/admin/agents', { method: 'POST', body });
+      await api(withRevision('/api/admin/agents', revision.value), { method: 'POST', body });
     }
     toast('智能体已保存', 'success');
     showForm.value = false;
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   } finally {
     saving.value = false;
   }
@@ -199,32 +228,55 @@ function numberOrNull(value) {
 async function remove(row) {
   if (!window.confirm(`删除智能体「${row.name}」？正在被流程引用时请先解除引用。`)) return;
   try {
-    await api(`/api/admin/agents/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+    await api(withRevision(`/api/admin/agents/${encodeURIComponent(row.id)}`, revision.value), {
+      method: 'DELETE',
+    });
     toast('智能体已删除', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   }
 }
 
 async function activate(row) {
   if (!window.confirm(`将「${row.name}」设为全局核算智能体？会同时取消全局默认流程。`)) return;
   try {
-    await api(`/api/admin/agents/${encodeURIComponent(row.id)}/active`, { method: 'PUT' });
+    await api(
+      withRevision(`/api/admin/agents/${encodeURIComponent(row.id)}/active`, settingsRevision.value),
+      { method: 'PUT' }
+    );
     toast('已设为全局智能体', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   }
 }
 
 async function clearActive() {
   try {
-    await api('/api/admin/agents/active', { method: 'DELETE' });
+    await api(withRevision('/api/admin/agents/active', settingsRevision.value), {
+      method: 'DELETE',
+    });
     toast('已取消全局智能体，对话回到内置流水线', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
+  }
+}
+
+async function toggleActionConfirm() {
+  if (!meta.value.writable) return;
+  const next = !actionConfirm.value.enabled;
+  try {
+    const updated = await api(
+      withRevision('/api/admin/agents/action-confirm', settingsRevision.value),
+      { method: 'PUT', body: { enabled: next } }
+    );
+    actionConfirm.value = { ...actionConfirm.value, ...(updated || {}), enabled: next };
+    await load();
+    toast(next ? '写操作确认已开启' : '写操作确认已关闭', 'success');
+  } catch (error) {
+    await handleWriteError(error);
   }
 }
 
@@ -294,6 +346,29 @@ onMounted(load);
         <span v-if="!active.available" class="error-text">配置的智能体不可用，已阻断回退流水线</span>
         <span class="spacer"></span>
         <button class="ghost sm" :disabled="!active.configured" @click="clearActive">取消全局智能体</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <h3>写操作确认</h3>
+        <small>开启后所有写工具在对话中先生成确认卡片，点击确认才执行</small>
+      </div>
+      <div class="toolbar">
+        <span class="badge" :class="actionConfirm.enabled ? 'green' : 'orange'">
+          {{ actionConfirm.enabled ? '已开启' : '已关闭' }}
+        </span>
+        <span class="hint">
+          生效来源：{{ actionConfirm.source === 'NACOS' ? '管理台（Nacos）' : '环境变量' }}
+        </span>
+        <span class="spacer"></span>
+        <button
+          class="ghost sm"
+          :disabled="!meta.writable"
+          @click="toggleActionConfirm"
+        >
+          {{ actionConfirm.enabled ? '关闭确认' : '开启确认' }}
+        </button>
       </div>
     </div>
 

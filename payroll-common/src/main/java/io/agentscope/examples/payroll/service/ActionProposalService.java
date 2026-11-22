@@ -1,12 +1,15 @@
 package io.agentscope.examples.payroll.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.agent.ConfirmationTools;
+import io.agentscope.examples.payroll.agent.QuestionTools;
 import io.agentscope.examples.payroll.db.H2ActionProposalStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
+import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
@@ -52,9 +55,24 @@ public final class ActionProposalService {
 
     public ActionProposal confirm(
             AuthUser user, String proposalId, String idempotencyKey) {
+        return confirm(user, proposalId, idempotencyKey, Map.of());
+    }
+
+    /**
+     * @param answers 选择卡片的作答（问题 id → 选项或文本数组）；其他工具忽略该参数
+     */
+    public ActionProposal confirm(
+            AuthUser user,
+            String proposalId,
+            String idempotencyKey,
+            Map<String, Object> answers) {
         ActionProposal proposal = expireIfDue(requireOwned(user.id(), proposalId));
         if (!proposal.pending()) {
             return proposal;
+        }
+        Map<String, Object> confirmData = sanitizeAnswers(answers);
+        if (QuestionTools.REQUEST_INPUT.equals(proposal.toolName()) && confirmData.isEmpty()) {
+            throw new PayrollException("请先在卡片中完成选择再提交");
         }
         String permission = executor.requiredPermission(proposal.toolName());
         if (!user.can(permission)) {
@@ -79,7 +97,7 @@ public final class ActionProposalService {
         ActionProposal confirmed = requireOwned(user.id(), proposalId);
         long startedAt = System.nanoTime();
         try {
-            Object result = executor.execute(confirmed, user.id());
+            Object result = executor.execute(confirmed, user.id(), confirmData);
             String resultJson = JsonSupport.toJson(result);
             proposals.markExecuted(proposalId, resultJson);
             long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
@@ -250,6 +268,22 @@ public final class ActionProposalService {
             String status,
             String resultJson,
             String errorMessage) {
+        if (ConfirmationTools.REQUEST_CONFIRMATION.equals(proposal.toolName())
+                && ActionProposal.STATUS_EXECUTED.equals(status)) {
+            return "操作结果："
+                    + proposal.summary()
+                    + "\n状态："
+                    + status
+                    + "\n已确认，正在继续处理…";
+        }
+        if (QuestionTools.REQUEST_INPUT.equals(proposal.toolName())
+                && ActionProposal.STATUS_EXECUTED.equals(status)) {
+            return "操作结果："
+                    + proposal.summary()
+                    + "\n状态："
+                    + status
+                    + "\n已提交选择，正在继续处理…";
+        }
         StringBuilder text = new StringBuilder();
         text.append("操作结果：").append(proposal.summary()).append('\n');
         text.append("状态：").append(status);
@@ -259,6 +293,45 @@ public final class ActionProposalService {
             text.append("\n结果：").append(preview(resultJson));
         }
         return text.toString();
+    }
+
+    /** 卡片作答来自 HTTP 边界：只保留短字符串与字符串列表，未知类型直接丢弃。 */
+    private static Map<String, Object> sanitizeAnswers(Map<String, Object> answers) {
+        if (answers == null || answers.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> cleaned = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : answers.entrySet()) {
+            String key = entry.getKey() == null ? "" : entry.getKey().trim();
+            if (key.isEmpty() || key.length() > 64) {
+                continue;
+            }
+            Object value = entry.getValue();
+            if (value instanceof String text) {
+                String trimmed = text.trim();
+                if (!trimmed.isEmpty()) {
+                    cleaned.put(key, trimmed.length() <= 500 ? trimmed : trimmed.substring(0, 500));
+                }
+            } else if (value instanceof Iterable<?> iterable) {
+                List<String> items = new java.util.ArrayList<>();
+                for (Object item : iterable) {
+                    if (item == null) {
+                        continue;
+                    }
+                    String text = String.valueOf(item).trim();
+                    if (!text.isEmpty()) {
+                        items.add(text.length() <= 500 ? text : text.substring(0, 500));
+                    }
+                    if (items.size() >= 8) {
+                        break;
+                    }
+                }
+                if (!items.isEmpty()) {
+                    cleaned.put(key, items);
+                }
+            }
+        }
+        return cleaned;
     }
 
     private static String preview(String json) {

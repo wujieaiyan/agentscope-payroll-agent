@@ -18,6 +18,8 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
+import io.agentscope.examples.payroll.agent.ConfirmationTools;
+import io.agentscope.examples.payroll.agent.QuestionTools;
 import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
 import io.agentscope.examples.payroll.profile.ProfileMemory;
 import io.agentscope.examples.payroll.profile.UserProfileAdminService;
@@ -74,11 +76,16 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
@@ -291,7 +298,12 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.memory.min-score:0.55}") double minScore,
             @Value("${payroll.memory.max-inject-chars:1200}") int maxInjectChars,
             @Value("${payroll.memory.async-index:true}") boolean asyncIndex,
-            @Value("${payroll.memory.cross-session:false}") boolean crossSession) {
+            @Value("${payroll.memory.cross-session:false}") boolean crossSession,
+            @Value("${payroll.memory.recall-budget-ms:600}") int recallBudgetMs,
+            @Value("${payroll.memory.embed-breaker.failures:3}") int breakerFailures,
+            @Value("${payroll.memory.embed-breaker.window-seconds:60}") long breakerWindowSeconds,
+            @Value("${payroll.memory.embed-breaker.open-seconds:60}") long breakerOpenSeconds,
+            @Qualifier("memoryRecallExecutor") Executor recallExecutor) {
         return VectorMemoryService.start(
                 new VectorMemorySettings(
                         enabled,
@@ -307,7 +319,31 @@ public class PayrollCoreConfiguration {
                         minScore,
                         maxInjectChars,
                         asyncIndex,
-                        crossSession));
+                        crossSession,
+                        recallBudgetMs,
+                        breakerFailures,
+                        breakerWindowSeconds,
+                        breakerOpenSeconds),
+                recallExecutor);
+    }
+
+    /**
+     * 召回线程池：与索引线程池隔离，避免慢嵌入拖住写入；队列满直接拒绝，本轮不注入历史。
+     */
+    @Bean(name = "memoryRecallExecutor", destroyMethod = "shutdown")
+    public ExecutorService memoryRecallExecutor(
+            @Value("${payroll.memory.recall-threads:2}") int threads,
+            @Value("${payroll.memory.recall-queue-capacity:16}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
+        return new ThreadPoolExecutor(
+                poolSize,
+                poolSize,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(capacity),
+                payrollThreadFactory("payroll-memory-recall"),
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     @Bean
@@ -407,6 +443,25 @@ public class PayrollCoreConfiguration {
                             actions.putAll(contributor.localActions());
                             permissions.putAll(contributor.toolPermissions());
                         });
+        // 请求确认没有服务端副作用：确认后把 followup 原样交回前端，由前端作为新一轮输入发送。
+        actions.put(
+                ConfirmationTools.REQUEST_CONFIRMATION,
+                (params, userId) -> {
+                    Map<String, Object> result = new LinkedHashMap<>();
+                    result.put("status", "CONFIRMED");
+                    result.put("followup", params.getOrDefault("followup", ""));
+                    return result;
+                });
+        // 逐项选择同样没有副作用：把卡片问题与用户答案拼成下一轮用户输入。
+        actions.put(
+                QuestionTools.REQUEST_INPUT,
+                (params, userId) -> {
+                    Map<String, Object> result = new LinkedHashMap<>();
+                    result.put("status", "CONFIRMED");
+                    result.put("answers", params.getOrDefault("answers", Map.of()));
+                    result.put("followup", QuestionTools.followupText(params));
+                    return result;
+                });
         return new DefaultActionExecutor(actions, permissions);
     }
 
@@ -710,15 +765,33 @@ public class PayrollCoreConfiguration {
         return new ExcelImportService(repository);
     }
 
-    /** 流式对话线程池：SSE 与 runtime 内部执行都在独立线程中消费模型事件。 */
+    /**
+     * 流式对话线程池：SSE 与 runtime 内部执行都在独立线程中消费模型事件。
+     *
+     * <p>有界队列 + {@link ThreadPoolExecutor.AbortPolicy}：队列满时快速失败并返回 429，
+     * 不用 CallerRunsPolicy，避免 SSE 请求线程被占住拖垮 Tomcat。
+     */
     @Bean(name = "chatStreamExecutor", destroyMethod = "shutdown")
-    public ExecutorService chatStreamExecutor() {
-        return Executors.newFixedThreadPool(
-                4,
-                runnable -> {
-                    Thread thread = new Thread(runnable, "payroll-chat-stream");
-                    thread.setDaemon(true);
-                    return thread;
-                });
+    public ExecutorService chatStreamExecutor(
+            @Value("${payroll.chat.stream-threads:4}") int threads,
+            @Value("${payroll.chat.stream-queue-capacity:32}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
+        return new ThreadPoolExecutor(
+                poolSize,
+                poolSize,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(capacity),
+                payrollThreadFactory("payroll-chat-stream"),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private static ThreadFactory payrollThreadFactory(String name) {
+        return runnable -> {
+            Thread thread = new Thread(runnable, name);
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 }

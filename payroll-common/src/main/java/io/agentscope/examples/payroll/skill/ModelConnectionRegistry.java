@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.model.AgentModelSettings;
 import io.agentscope.examples.payroll.model.ModelCatalog;
 import io.agentscope.examples.payroll.model.ModelConfigException;
@@ -153,8 +154,13 @@ public final class ModelConnectionRegistry {
                     "连接 ID「" + input.id() + "」保留给环境变量映射，请使用其它 ID");
         }
         ModelConnection validated = input.validated();
-        ModelCatalog current = storedNow();
+        ModelCatalog current = reloadStrict();
         requireRevision(current, expectedRevision);
+        if (!validated.enabled() && isDefaultOf(current.defaults(), validated.id())) {
+            throw new ModelConfigException(
+                    ModelConfigException.INVALID_CONNECTION,
+                    "连接「" + validated.id() + "」仍是使用面默认值，请先切换默认连接再停用");
+        }
         ModelConnection saved =
                 new ModelConnection(
                         validated.id(),
@@ -206,12 +212,10 @@ public final class ModelConnectionRegistry {
     public synchronized ModelCatalog deleteConnection(
             String id, long expectedRevision, String operator) {
         requireWritable();
-        ModelCatalog current = storedNow();
+        ModelCatalog current = reloadStrict();
         requireRevision(current, expectedRevision);
         ModelDefaults defaults = current.defaults();
-        if (id.equals(defaults.control())
-                || id.equals(defaults.coding())
-                || id.equals(defaults.utility())) {
+        if (isDefaultOf(defaults, id)) {
             throw new ModelConfigException(
                     ModelConfigException.INVALID_CONNECTION,
                     "连接「" + id + "」仍是使用面默认值，请先切换默认连接再删除");
@@ -235,7 +239,7 @@ public final class ModelConnectionRegistry {
     public synchronized ModelCatalog saveDefaults(
             ModelDefaults defaults, long expectedRevision, String operator) {
         requireWritable();
-        ModelCatalog current = storedNow();
+        ModelCatalog current = reloadStrict();
         requireRevision(current, expectedRevision);
         ModelDefaults normalized =
                 defaults == null
@@ -284,12 +288,6 @@ public final class ModelConnectionRegistry {
                         current.connections()));
     }
 
-    /** 保存后主动失效本实例缓存；跨实例靠 TTL 收敛。 */
-    public synchronized void invalidate() {
-        cache = null;
-        fetchedAt = 0L;
-    }
-
     private ModelCatalog stored() {
         long now = System.currentTimeMillis();
         ModelCatalog snapshot = cache;
@@ -308,9 +306,29 @@ public final class ModelConnectionRegistry {
         }
     }
 
-    private synchronized ModelCatalog storedNow() {
-        invalidate();
-        return stored();
+    /** 写前严格重读：读取或解析失败抛 503，禁止用 TTL 旧目录覆盖远端配置。 */
+    private synchronized ModelCatalog reloadStrict() {
+        if (!settings.enabled()) {
+            return ModelCatalog.empty();
+        }
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                try {
+                    ModelCatalog parsed =
+                            json.readValue(fetched.entry().content(), ModelCatalog.class);
+                    return normalize(parsed);
+                } catch (Exception e) {
+                    throw new PayrollUnavailableException(
+                            "读取 " + DATA_ID + " 失败：" + e.getMessage(), e);
+                }
+            }
+            case ABSENT -> {
+                return ModelCatalog.empty();
+            }
+            default -> throw new PayrollUnavailableException(
+                    "读取 " + DATA_ID + " 失败：" + fetched.message());
+        }
     }
 
     private ModelCatalog load(ModelCatalog previous) {
@@ -322,13 +340,7 @@ public final class ModelConnectionRegistry {
             return previous == null ? ModelCatalog.empty() : previous;
         }
         try {
-            ModelCatalog parsed = json.readValue(body.get(), ModelCatalog.class);
-            ModelCatalog normalized =
-                    new ModelCatalog(
-                            parsed.version() <= 0 ? ModelCatalog.CURRENT_VERSION : parsed.version(),
-                            Math.max(0L, parsed.revision()),
-                            parsed.defaults(),
-                            parsed.connections());
+            ModelCatalog normalized = normalize(json.readValue(body.get(), ModelCatalog.class));
             log.info(
                     "[Model] 从 Nacos 加载 {} 个模型连接（revision {}）",
                     normalized.connections().size(),
@@ -342,6 +354,14 @@ public final class ModelConnectionRegistry {
             log.warn("[Model] 解析 {} 失败，仅使用环境变量连接：{}", DATA_ID, e.getMessage());
             return ModelCatalog.empty();
         }
+    }
+
+    private static ModelCatalog normalize(ModelCatalog parsed) {
+        return new ModelCatalog(
+                parsed.version() <= 0 ? ModelCatalog.CURRENT_VERSION : parsed.version(),
+                Math.max(0L, parsed.revision()),
+                parsed.defaults(),
+                parsed.connections());
     }
 
     private ModelCatalog persist(ModelCatalog next) {
@@ -377,6 +397,12 @@ public final class ModelConnectionRegistry {
                             + expected
                             + "），请刷新后重试");
         }
+    }
+
+    private static boolean isDefaultOf(ModelDefaults defaults, String id) {
+        return id.equals(defaults.control())
+                || id.equals(defaults.coding())
+                || id.equals(defaults.utility());
     }
 
     private ModelConnection available(ModelCatalog catalog, String id, String label) {

@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -12,6 +13,11 @@ import io.agentscope.examples.payroll.model.ModelConfigException;
 import io.agentscope.examples.payroll.model.ModelConnection;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -179,6 +185,64 @@ class ModelCredentialServiceTest {
                         ModelConfigException.class,
                         () -> locked.save("dash", "sk-page-secret", "admin"));
         assertEquals(ModelConfigException.SECRET_KEY_MISSING, error.code());
+    }
+
+    @Test
+    @DisplayName("环境变量凭证的版本是变量名，不暴露密钥")
+    void envCredentialVersionIsEnvName() {
+        assertEquals(
+                "env:PAYROLL_TEST_KEY",
+                service.versionOf(connection("dash", "", "PAYROLL_TEST_KEY")));
+        assertEquals("", service.versionOf(null));
+    }
+
+    @Test
+    @DisplayName("页面凭证版本取更新时间，5s 内命中缓存，保存后立即失效")
+    void storedCredentialVersionTracksUpdatedAt() {
+        service.save("dash", "sk-page-secret", "admin");
+        ModelConnection dash = connection("dash", "cred-dash", "");
+        setUpdatedAt("dash", LocalDateTime.of(2020, 1, 2, 3, 4, 5));
+        String cached = String.valueOf(epochSeconds(LocalDateTime.of(2020, 1, 2, 3, 4, 5)));
+
+        assertEquals(cached, service.versionOf(dash));
+
+        setUpdatedAt("dash", LocalDateTime.of(2030, 1, 2, 3, 4, 5));
+        assertEquals(cached, service.versionOf(dash), "5s 内应命中版本缓存");
+
+        service.save("dash", "sk-page-secret-2", "admin");
+        assertNotEquals(cached, service.versionOf(dash), "保存后应失效并返回新更新时间");
+    }
+
+    @Test
+    @DisplayName("清除凭证后版本变为 missing 且缓存失效")
+    void clearInvalidatesCachedVersion() {
+        service.save("dash", "sk-page-secret", "admin");
+        ModelConnection dash = connection("dash", "cred-dash", "");
+        setUpdatedAt("dash", LocalDateTime.of(2020, 1, 2, 3, 4, 5));
+        assertEquals(
+                String.valueOf(epochSeconds(LocalDateTime.of(2020, 1, 2, 3, 4, 5))),
+                service.versionOf(dash));
+
+        service.clear("dash");
+
+        assertEquals("missing", service.versionOf(dash));
+    }
+
+    private void setUpdatedAt(String connectionId, LocalDateTime updatedAt) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "UPDATE model_credential SET updated_at = ? WHERE connection_id = ?")) {
+            statement.setObject(1, updatedAt);
+            statement.setString(2, connectionId);
+            assertEquals(1, statement.executeUpdate());
+        } catch (SQLException e) {
+            throw new IllegalStateException("更新测试凭证时间失败", e);
+        }
+    }
+
+    private static long epochSeconds(LocalDateTime value) {
+        return value.toEpochSecond(ZoneOffset.UTC);
     }
 
     private static ModelConnection connection(

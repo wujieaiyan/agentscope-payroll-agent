@@ -9,7 +9,7 @@ ENV TZ=Asia/Shanghai \
 COPY --from=cli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /app
-COPY payroll-sandbox/target/payroll-sandbox.jar /app/app.jar
+COPY payroll-sandbox/target/payroll-sandbox-exec.jar /app/app.jar
 
 EXPOSE 8200
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

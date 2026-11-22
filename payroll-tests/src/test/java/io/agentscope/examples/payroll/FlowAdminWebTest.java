@@ -56,12 +56,16 @@ class FlowAdminWebTest {
         assertTrue(flows.contains("\"writable\""), flows);
         assertTrue(flows.contains("\"location\""), flows);
         assertTrue(flows.contains("\"flows\""), flows);
+        assertTrue(flows.contains("\"revision\":"), flows);
+        assertTrue(flows.contains("\"settingsRevision\":"), flows);
         assertTrue(flows.contains("payroll-default"), flows);
 
         String meta = get(admin, "/api/admin/flows/meta");
         assertTrue(meta.contains("\"writable\""), meta);
         assertTrue(meta.contains("\"agents\""), meta);
         assertTrue(meta.contains("\"status\""), meta);
+        assertTrue(meta.contains("\"revision\":"), meta);
+        assertTrue(meta.contains("\"settingsRevision\":"), meta);
     }
 
     @Test

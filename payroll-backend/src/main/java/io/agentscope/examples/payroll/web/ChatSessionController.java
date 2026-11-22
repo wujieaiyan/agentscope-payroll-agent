@@ -9,6 +9,7 @@ import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatTurn;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.kb.KbEnums.KbRole;
 import io.agentscope.examples.payroll.kb.KbEnums.SeriesStatus;
 import io.agentscope.examples.payroll.kb.KbModels;
@@ -36,6 +37,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -418,6 +420,10 @@ public class ChatSessionController {
                                     attachmentIds,
                                     cacheScope,
                                     channel));
+        } catch (RejectedExecutionException e) {
+            chatQuotaService.release(userId);
+            ChatStreamRejection.record(chatStreamExecutor);
+            throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;
@@ -488,10 +494,21 @@ public class ChatSessionController {
                         "[运行期] 提交失败，不做本机兜底：turnId={}，原因={}",
                         turn.turnId(),
                         e.getMessage());
-                manager.failTurn(turn, "智能体运行期不可达");
+                String failure;
+                String errorText;
+                if (e instanceof TooManyRequestsException) {
+                    failure = "运行时繁忙";
+                    errorText = "运行时繁忙，请稍后重试";
+                } else if (e instanceof PayrollUnavailableException) {
+                    failure = "运行时不可用";
+                    errorText = "运行时暂不可用，请稍后再试";
+                } else {
+                    failure = "智能体运行期不可达";
+                    errorText = "智能体运行期不可达，请稍后再试";
+                }
+                manager.failTurn(turn, failure);
                 finished.set(true);
-                channel.send(
-                        "error", ChatSse.payload("message", "智能体运行期不可达，请稍后再试"));
+                channel.send("error", ChatSse.payload("message", errorText));
                 channel.complete();
             }
         } catch (PayrollException e) {
@@ -566,8 +583,14 @@ public class ChatSessionController {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         ChatSse.Channel channel = ChatSse.attach(emitter);
         long from = Math.max(Math.max(0, afterSeq), parseEventId(lastEventId));
-        chatStreamExecutor.execute(
-                () -> resumeEvents(userId, sessionId, turnId, from, channel));
+        try {
+            chatStreamExecutor.execute(
+                    () -> resumeEvents(userId, sessionId, turnId, from, channel));
+        } catch (RejectedExecutionException e) {
+            ChatStreamRejection.record(chatStreamExecutor);
+            channel.send("error", ChatSse.payload("message", "当前续流请求过多，请稍后重试"));
+            channel.complete();
+        }
         return emitter;
     }
 

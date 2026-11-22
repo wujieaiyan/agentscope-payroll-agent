@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
 import io.agentscope.examples.payroll.domain.ActionProposal;
+import java.util.Map;
 
 /**
  * 提案执行器：确认后按工具名派发到既有领域服务或已配置的 MCP 服务。
@@ -14,4 +15,12 @@ public interface ActionExecutor {
 
     /** 执行提案并返回结果对象（由调用方序列化落库）；失败时抛出异常。 */
     Object execute(ActionProposal proposal, long userId);
+
+    /**
+     * 带用户补充数据的执行入口：仅卡片类工具（如 request_input 的 answers）使用，
+     * 默认实现忽略补充数据，避免外部执行器被动获得新语义。
+     */
+    default Object execute(ActionProposal proposal, long userId, Map<String, Object> confirmData) {
+        return execute(proposal, userId);
+    }
 }

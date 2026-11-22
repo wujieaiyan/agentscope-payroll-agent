@@ -10,11 +10,14 @@ import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.FlowValidator;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
+import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,12 +25,15 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /** 智能体流程编排接口：结构校验、全局默认流程与审计。 */
 @RestController
 @RequestMapping("/api/admin/flows")
 public class FlowAdminController {
+
+    private static final Logger log = LoggerFactory.getLogger(FlowAdminController.class);
 
     private static final int MAX_CAPABILITIES = 8;
     private static final int MAX_CAPABILITY_LENGTH = 24;
@@ -58,6 +64,8 @@ public class FlowAdminController {
         result.put("activeFlowId", flowRegistry.activeFlowId());
         result.put("writable", flowRegistry.writable());
         result.put("location", flowRegistry.location());
+        result.put("revision", flowRegistry.revision());
+        result.put("settingsRevision", flowRegistry.settingsRevision());
         return ApiResponse.ok(result);
     }
 
@@ -68,16 +76,22 @@ public class FlowAdminController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("writable", flowRegistry.writable());
         result.put("location", flowRegistry.location());
+        result.put("revision", flowRegistry.revision());
+        result.put("settingsRevision", flowRegistry.settingsRevision());
         result.put("agents", agentRegistry.list().stream().map(this::agentOption).toList());
         return ApiResponse.ok(result);
     }
 
     @PostMapping
     @RequirePermission(Permissions.FLOW_MANAGE)
-    public ApiResponse create(@RequestBody FlowDefinition input, HttpServletRequest request) {
+    public ApiResponse create(
+            @RequestBody FlowDefinition input,
+            @RequestParam(name = "revision", required = false) String revision,
+            HttpServletRequest request) {
+        AuditContext.markRevision(revision);
         FlowDefinition normalized = normalize(input, null);
         validate(normalized, false);
-        FlowDefinition saved = flowRegistry.save(normalized, operator(request));
+        FlowDefinition saved = flowRegistry.save(normalized, operator(request), revision);
         auditService.record("flow.create", "flow_definition", saved.id(), null, saved);
         return ApiResponse.ok(saved);
     }
@@ -87,20 +101,25 @@ public class FlowAdminController {
     public ApiResponse update(
             @PathVariable String id,
             @RequestBody FlowDefinition input,
+            @RequestParam(name = "revision", required = false) String revision,
             HttpServletRequest request) {
+        AuditContext.markRevision(revision);
         FlowDefinition before = find(id);
         FlowDefinition normalized = normalize(input, id);
         validate(normalized, false);
-        FlowDefinition saved = flowRegistry.save(normalized, operator(request));
+        FlowDefinition saved = flowRegistry.save(normalized, operator(request), revision);
         auditService.record("flow.update", "flow_definition", saved.id(), before, saved);
         return ApiResponse.ok(saved);
     }
 
     @DeleteMapping("/{id}")
     @RequirePermission(Permissions.FLOW_MANAGE)
-    public ApiResponse delete(@PathVariable String id) {
+    public ApiResponse delete(
+            @PathVariable String id,
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
         FlowDefinition before = find(id);
-        if (!flowRegistry.delete(id)) {
+        if (!flowRegistry.delete(id, revision)) {
             throw new PayrollException("流程不存在：" + id);
         }
         auditService.record(
@@ -108,35 +127,50 @@ public class FlowAdminController {
         return ApiResponse.ok(Map.of("deleted", id));
     }
 
-    /** 设为全局默认流程；激活前要求所有节点引用的智能体已上架，同时取消默认核算智能体。 */
+    /** 设为全局默认流程；先写流程再清智能体，清失败只告警（运行期以流程优先）。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.FLOW_MANAGE)
-    public ApiResponse activate(@PathVariable String id) {
+    public ApiResponse activate(
+            @PathVariable String id,
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
         FlowDefinition flow = find(id);
         validate(flow, true);
         String clearedAgent = agentRegistry.configuredAgentId();
-        if (clearedAgent == null) {
-            clearedAgent = "";
-        }
+        flowRegistry.setActiveFlow(id, revision);
+        String warning = "";
         if (!clearedAgent.isBlank()) {
-            agentRegistry.clearActiveAgent();
+            try {
+                agentRegistry.clearActiveAgent();
+            } catch (RuntimeException e) {
+                warning = "默认智能体未能取消，当前流程与智能体同时激活，运行期以流程优先：" + e.getMessage();
+                log.warn("[流程编排] 激活流程 {} 后清除默认智能体失败：{}", id, e.getMessage());
+            }
         }
-        flowRegistry.setActiveFlow(id);
-        auditService.record(
-                "flow.activate",
-                "flow_definition",
-                id,
-                null,
-                Map.of("activeFlowId", id, "clearedAgentId", clearedAgent));
-        return ApiResponse.ok(Map.of("activeFlowId", id, "clearedAgentId", clearedAgent));
+        Map<String, Object> audit = new LinkedHashMap<>();
+        audit.put("activeFlowId", id);
+        audit.put("clearedAgentId", clearedAgent);
+        if (!warning.isBlank()) {
+            audit.put("warning", warning);
+        }
+        auditService.record("flow.activate", "flow_definition", id, null, audit);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("activeFlowId", id);
+        result.put("clearedAgentId", clearedAgent);
+        if (!warning.isBlank()) {
+            result.put("warning", warning);
+        }
+        return ApiResponse.ok(result);
     }
 
     /** 取消全局默认流程：下一轮对话回到核算智能体或内置三段流水线。 */
     @DeleteMapping("/active")
     @RequirePermission(Permissions.FLOW_MANAGE)
-    public ApiResponse clearActive() {
+    public ApiResponse clearActive(
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
         String previous = flowRegistry.activeFlowId();
-        flowRegistry.clearActiveFlow();
+        flowRegistry.clearActiveFlow(revision);
         auditService.record(
                 "flow.clear-active",
                 "flow_definition",

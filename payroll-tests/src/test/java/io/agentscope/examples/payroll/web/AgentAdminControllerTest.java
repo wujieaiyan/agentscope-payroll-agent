@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -16,9 +20,11 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.RoleSkills;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
@@ -52,9 +58,9 @@ class AgentAdminControllerTest {
     @DisplayName("新建成功写入审计，前后快照完整")
     void createWritesAudit() {
         AgentDefinition saved = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
-        when(registry.save(any(), eq("system"))).thenReturn(saved);
+        when(registry.save(any(), eq("system"), any(), eq(true))).thenReturn(saved);
 
-        ApiResponse response = controller.create(agent(null, "个税顾问", null), request);
+        ApiResponse response = controller.create(agent(null, "个税顾问", null), null, request);
 
         assertSame(saved, response.data());
         verify(auditService)
@@ -64,7 +70,8 @@ class AgentAdminControllerTest {
     @Test
     @DisplayName("新建时归一化空白与重复字段")
     void createNormalizesInput() {
-        when(registry.save(any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(registry.save(any(), any(), any(), anyBoolean()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         AgentDefinition input =
                 new AgentDefinition(
                         null,
@@ -79,10 +86,10 @@ class AgentAdminControllerTest {
                         null,
                         null);
 
-        controller.create(input, request);
+        controller.create(input, null, request);
 
         ArgumentCaptor<AgentDefinition> captor = ArgumentCaptor.forClass(AgentDefinition.class);
-        verify(registry).save(captor.capture(), eq("system"));
+        verify(registry).save(captor.capture(), eq("system"), isNull(), eq(true));
         AgentDefinition saved = captor.getValue();
         assertEquals("个税顾问", saved.name());
         assertEquals("🤖", saved.avatar());
@@ -101,7 +108,9 @@ class AgentAdminControllerTest {
                         null, "  ", "🤖", "", List.of(), List.of(),
                         "PUBLIC", "ONLINE", null, null, null);
         PayrollException nameError =
-                assertThrows(PayrollException.class, () -> controller.create(blankName, request));
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.create(blankName, null, request));
         assertTrue(nameError.getMessage().contains("名称必填"), nameError.getMessage());
 
         AgentDefinition unknownSkill =
@@ -109,12 +118,15 @@ class AgentAdminControllerTest {
                         null, "顾问", "🤖", "", List.of(), List.of("ghost-skill"),
                         "PUBLIC", "ONLINE", null, null, null);
         PayrollException skillError =
-                assertThrows(PayrollException.class, () -> controller.create(unknownSkill, request));
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.create(unknownSkill, null, request));
         assertTrue(skillError.getMessage().contains("未知技能"), skillError.getMessage());
 
         AgentDefinition badStatus = agent(null, "顾问", "UNKNOWN");
         PayrollException statusError =
-                assertThrows(PayrollException.class, () -> controller.create(badStatus, request));
+                assertThrows(
+                        PayrollException.class, () -> controller.create(badStatus, null, request));
         assertTrue(statusError.getMessage().contains("状态取值非法"), statusError.getMessage());
 
         AgentDefinition badVisibility =
@@ -124,7 +136,7 @@ class AgentAdminControllerTest {
         PayrollException visibilityError =
                 assertThrows(
                         PayrollException.class,
-                        () -> controller.create(badVisibility, request));
+                        () -> controller.create(badVisibility, null, request));
         assertTrue(
                 visibilityError.getMessage().contains("可见范围取值非法"),
                 visibilityError.getMessage());
@@ -133,7 +145,8 @@ class AgentAdminControllerTest {
                 new AgentDefinition(
                         null, "顾问", "🤖", "x".repeat(201), List.of(), List.of(),
                         "PUBLIC", "ONLINE", null, null, null);
-        assertThrows(PayrollException.class, () -> controller.create(longDescription, request));
+        assertThrows(
+                PayrollException.class, () -> controller.create(longDescription, null, request));
 
         AgentDefinition tooManyTags =
                 new AgentDefinition(
@@ -148,15 +161,15 @@ class AgentAdminControllerTest {
                         null,
                         null,
                         null);
-        assertThrows(PayrollException.class, () -> controller.create(tooManyTags, request));
+        assertThrows(PayrollException.class, () -> controller.create(tooManyTags, null, request));
 
         AgentDefinition longAvatar =
                 new AgentDefinition(
                         null, "顾问", "x".repeat(41), "", List.of(), List.of(),
                         "PUBLIC", "ONLINE", null, null, null);
-        assertThrows(PayrollException.class, () -> controller.create(longAvatar, request));
+        assertThrows(PayrollException.class, () -> controller.create(longAvatar, null, request));
 
-        verify(registry, never()).save(any(), any());
+        verify(registry, never()).save(any(), any(), any(), anyBoolean());
         verify(auditService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -196,10 +209,14 @@ class AgentAdminControllerTest {
                         PayrollException.class,
                         () ->
                                 controller.update(
-                                        "missing", agent(null, "顾问", null), true, request));
+                                        "missing",
+                                        agent(null, "顾问", null),
+                                        true,
+                                        null,
+                                        request));
 
         assertTrue(error.getMessage().contains("智能体不存在"), error.getMessage());
-        verify(registry, never()).save(any(), any(), anyBoolean());
+        verify(registry, never()).save(any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -208,13 +225,14 @@ class AgentAdminControllerTest {
         AgentDefinition before = agent("agent-1", "旧名称", AgentDefinition.STATUS_ONLINE);
         AgentDefinition after = agent("agent-1", "新名称", AgentDefinition.STATUS_OFFLINE);
         when(registry.list()).thenReturn(List.of(before));
-        when(registry.save(any(), eq("system"), eq(false))).thenReturn(after);
+        when(registry.save(any(), eq("system"), any(), eq(false))).thenReturn(after);
 
         ApiResponse response =
                 controller.update(
                         "agent-1",
                         agent(null, "新名称", AgentDefinition.STATUS_OFFLINE),
                         true,
+                        null,
                         request);
 
         assertSame(after, response.data());
@@ -227,9 +245,9 @@ class AgentAdminControllerTest {
     void deleteWritesAudit() {
         AgentDefinition before = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
         when(registry.list()).thenReturn(List.of(before));
-        when(registry.delete("agent-1")).thenReturn(true);
+        when(registry.delete(eq("agent-1"), any())).thenReturn(true);
 
-        controller.delete("agent-1");
+        controller.delete("agent-1", null);
 
         verify(auditService)
                 .record(
@@ -239,8 +257,8 @@ class AgentAdminControllerTest {
                         before,
                         Map.of("deleted", "agent-1"));
 
-        when(registry.delete("agent-1")).thenReturn(false);
-        assertThrows(PayrollException.class, () -> controller.delete("agent-1"));
+        when(registry.delete(eq("agent-1"), any())).thenReturn(false);
+        assertThrows(PayrollException.class, () -> controller.delete("agent-1", null));
     }
 
     @Test
@@ -265,9 +283,9 @@ class AgentAdminControllerTest {
     void setActiveWritesAudit() {
         AgentDefinition before = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
         when(registry.list()).thenReturn(List.of(before));
-        when(registry.setActiveAgent("agent-1")).thenReturn("agent-1");
+        when(registry.setActiveAgent(eq("agent-1"), any())).thenReturn("agent-1");
 
-        ApiResponse response = controller.setActive("agent-1");
+        ApiResponse response = controller.setActive("agent-1", null);
 
         Map<?, ?> data = (Map<?, ?>) response.data();
         assertEquals("agent-1", data.get("activeAgentId"));
@@ -303,10 +321,10 @@ class AgentAdminControllerTest {
     void clearActiveWritesAudit() {
         when(registry.configuredAgentId()).thenReturn("agent-1");
 
-        ApiResponse response = controller.clearActive();
+        ApiResponse response = controller.clearActive(null);
 
         assertEquals(Map.of("activeAgentId", ""), response.data());
-        verify(registry).clearActiveAgent();
+        verify(registry).clearActiveAgent(isNull());
         verify(auditService)
                 .record(
                         eq("agent.clear-active"),
@@ -316,9 +334,133 @@ class AgentAdminControllerTest {
                         any());
     }
 
+    @Test
+    @DisplayName("写操作确认读取 Nacos 覆盖值并区分来源")
+    void actionConfirmReportsSource() {
+        when(registry.writable()).thenReturn(true);
+        when(registry.actionConfirmOverride()).thenReturn(java.util.Optional.of(true));
+
+        Map<?, ?> data = (Map<?, ?>) controller.actionConfirm().data();
+        assertEquals(true, data.get("enabled"));
+        assertEquals("NACOS", data.get("source"));
+        assertEquals(true, data.get("writable"));
+
+        when(registry.actionConfirmOverride()).thenReturn(java.util.Optional.empty());
+        data = (Map<?, ?>) controller.actionConfirm().data();
+        assertEquals(false, data.get("enabled"));
+        assertEquals("ENV", data.get("source"));
+    }
+
+    @Test
+    @DisplayName("切换写操作确认写入 Nacos 并记录审计")
+    void setActionConfirmWritesAudit() {
+        ApiResponse response =
+                controller.setActionConfirm(
+                        new AgentAdminController.ActionConfirmRequest(true), null);
+
+        assertEquals(Map.of("enabled", true, "source", "NACOS"), response.data());
+        verify(registry).setActionConfirm(true, null);
+        verify(auditService)
+                .record(
+                        eq("agent.action-confirm"),
+                        eq("agent_settings"),
+                        eq("actionConfirm"),
+                        eq(null),
+                        eq(Map.of("enabled", true)));
+    }
+
+    @Test
+    @DisplayName("切换写操作确认缺少 enabled 时按关闭处理")
+    void setActionConfirmDefaultsToDisabled() {
+        controller.setActionConfirm(null, null);
+
+        verify(registry).setActionConfirm(false, null);
+    }
+
+    @Test
+    @DisplayName("激活智能体先清默认流程，再写智能体设置")
+    void setActiveClearsFlowBeforeAgentWrite() {
+        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
+        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
+        AgentAdminController withFlow =
+                new AgentAdminController(
+                        registry, skillRepository, flowRegistry, authService, auditService);
+        AgentDefinition target = agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE);
+        when(registry.list()).thenReturn(List.of(target));
+        when(registry.setActiveAgent(eq("agent-1"), isNull())).thenReturn("agent-1");
+
+        Map<?, ?> data = (Map<?, ?>) withFlow.setActive("agent-1", null).data();
+
+        assertEquals("agent-1", data.get("activeAgentId"));
+        assertEquals("flow-1", data.get("clearedFlowId"));
+        var order = inOrder(flowRegistry, registry);
+        order.verify(flowRegistry).clearActiveFlow();
+        order.verify(registry).setActiveAgent("agent-1", null);
+    }
+
+    @Test
+    @DisplayName("清默认流程失败时不触碰智能体设置")
+    void setActiveAbortsWhenFlowClearFails() {
+        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
+        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
+        doThrow(new PayrollUnavailableException("配置中心不可用"))
+                .when(flowRegistry)
+                .clearActiveFlow();
+        AgentAdminController withFlow =
+                new AgentAdminController(
+                        registry, skillRepository, flowRegistry, authService, auditService);
+        when(registry.list())
+                .thenReturn(List.of(agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE)));
+
+        assertThrows(
+                PayrollUnavailableException.class, () -> withFlow.setActive("agent-1", null));
+        verify(registry, never()).setActiveAgent(any(), any());
+    }
+
+    @Test
+    @DisplayName("写智能体失败时恢复原默认流程")
+    void setActiveRestoresFlowWhenAgentWriteFails() {
+        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
+        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
+        AgentAdminController withFlow =
+                new AgentAdminController(
+                        registry, skillRepository, flowRegistry, authService, auditService);
+        when(registry.list())
+                .thenReturn(List.of(agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE)));
+        when(registry.setActiveAgent(any(), any())).thenThrow(new PayrollException("写智能体失败"));
+
+        PayrollException error =
+                assertThrows(PayrollException.class, () -> withFlow.setActive("agent-1", null));
+
+        assertTrue(error.getMessage().contains("写智能体失败"), error.getMessage());
+        verify(flowRegistry).setActiveFlow("flow-1");
+    }
+
+    @Test
+    @DisplayName("恢复默认流程也失败时返回 503 提示无激活模式")
+    void setActiveReportsUnavailableWhenRestoreFails() {
+        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
+        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
+        doThrow(new PayrollException("恢复失败")).when(flowRegistry).setActiveFlow(anyString());
+        AgentAdminController withFlow =
+                new AgentAdminController(
+                        registry, skillRepository, flowRegistry, authService, auditService);
+        when(registry.list())
+                .thenReturn(List.of(agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE)));
+        when(registry.setActiveAgent(any(), any())).thenThrow(new PayrollException("写智能体失败"));
+
+        PayrollUnavailableException error =
+                assertThrows(
+                        PayrollUnavailableException.class,
+                        () -> withFlow.setActive("agent-1", null));
+
+        assertTrue(error.getMessage().contains("无法恢复默认流程"), error.getMessage());
+    }
+
     private static List<AgentDefinition> ids(ApiResponse response) {
+        Map<?, ?> data = (Map<?, ?>) response.data();
         @SuppressWarnings("unchecked")
-        List<AgentDefinition> agents = (List<AgentDefinition>) response.data();
+        List<AgentDefinition> agents = (List<AgentDefinition>) data.get("agents");
         return agents;
     }
 

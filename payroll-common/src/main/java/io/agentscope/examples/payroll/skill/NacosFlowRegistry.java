@@ -1,18 +1,21 @@
 package io.agentscope.examples.payroll.skill;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
 import io.agentscope.examples.payroll.domain.FlowEdge;
 import io.agentscope.examples.payroll.domain.FlowNode;
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,7 +23,8 @@ import org.slf4j.LoggerFactory;
  * 智能体流程注册表：流程列表存储于 Nacos（dataId=payroll-flows.json），
  * 全局默认流程存储在 payroll-flow-settings.json，读路径带 TTL 缓存。
  *
- * <p>Nacos 未启用或配置缺失时回退内置“薪酬标准流程”；内置流程未激活时对话仍走既有链路。
+ * <p>写路径绕过 TTL 重读并校验内容指纹，设置文档按读-改-写保留未知键。
+ * Nacos 未启用或配置缺失时回退内置“薪酬标准流程”；内置流程未激活时对话仍走既有链路。
  */
 public final class NacosFlowRegistry {
 
@@ -30,15 +34,20 @@ public final class NacosFlowRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(NacosFlowRegistry.class);
 
+    /** 配置快照：items 为解析结果，revision 为原始文档内容指纹。 */
+    public record Snapshot<T>(List<T> items, String revision) {
+    }
+
     private final NacosSkillSettings settings;
     private final NacosConfigClient client;
     private final ObjectMapper json = JsonMapper.builder().addModule(new JavaTimeModule()).build();
     private final long ttlMillis;
 
-    private volatile List<FlowDefinition> cache;
+    private volatile Snapshot<FlowDefinition> cache;
     private volatile long fetchedAt;
 
     private volatile String cachedActiveFlowId;
+    private volatile String cachedSettingsRevision = ConfigRevision.ABSENT;
     private volatile long settingsFetchedAt;
 
     public NacosFlowRegistry() {
@@ -60,21 +69,21 @@ public final class NacosFlowRegistry {
     }
 
     public List<FlowDefinition> list() {
-        long now = System.currentTimeMillis();
-        List<FlowDefinition> snapshot = cache;
-        if (snapshot != null && now - fetchedAt < ttlMillis) {
-            return snapshot;
+        return snapshot().items();
+    }
+
+    /** 当前 flows 文档内容指纹（读路径，TTL 内缓存）。 */
+    public String revision() {
+        return snapshot().revision();
+    }
+
+    /** 当前 settings 文档内容指纹；未启用或读取失败时沿用上次已知值。 */
+    public String settingsRevision() {
+        if (!settings.enabled()) {
+            return ConfigRevision.ABSENT;
         }
-        synchronized (this) {
-            snapshot = cache;
-            if (snapshot != null && now - fetchedAt < ttlMillis) {
-                return snapshot;
-            }
-            snapshot = load(snapshot);
-            cache = snapshot;
-            fetchedAt = now;
-            return snapshot;
-        }
+        refreshSettings();
+        return cachedSettingsRevision;
     }
 
     public FlowDefinition find(String id) {
@@ -99,7 +108,8 @@ public final class NacosFlowRegistry {
             if (snapshot != null && now - settingsFetchedAt < ttlMillis) {
                 return snapshot;
             }
-            snapshot = loadActiveFlowId(snapshot);
+            loadSettings(snapshot);
+            snapshot = cachedActiveFlowId == null ? "" : cachedActiveFlowId;
             cachedActiveFlowId = snapshot;
             settingsFetchedAt = now;
             return snapshot;
@@ -120,25 +130,48 @@ public final class NacosFlowRegistry {
     }
 
     public synchronized void setActiveFlow(String id) {
+        setActiveFlow(id, null);
+    }
+
+    /** @param expectedRevision settings 文档指纹；null/空白跳过校验（滚动发布兼容） */
+    public synchronized void setActiveFlow(String id, String expectedRevision) {
         requireWritable();
+        SettingsSnapshot base = reloadSettingsForWrite();
+        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
         FlowDefinition flow = find(id);
         if (flow == null) {
             throw new PayrollException("流程不存在：" + id);
         }
-        publishSettings(id);
+        publishSettings(base, root -> root.put("activeFlowId", id));
+        cachedActiveFlowId = id;
         log.info("[流程编排] 默认流程已设置为 {}（{}）", flow.name(), id);
     }
 
     /** 取消全局默认流程：对话回到单个核算智能体或内置三段流水线。 */
     public synchronized void clearActiveFlow() {
+        clearActiveFlow(null);
+    }
+
+    public synchronized void clearActiveFlow(String expectedRevision) {
         requireWritable();
-        publishSettings("");
+        SettingsSnapshot base = reloadSettingsForWrite();
+        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
+        publishSettings(base, root -> root.put("activeFlowId", ""));
+        cachedActiveFlowId = "";
         log.info("[流程编排] 已取消全局默认流程，对话回到智能体链路");
     }
 
     public synchronized FlowDefinition save(FlowDefinition input, String operator) {
+        return save(input, operator, null);
+    }
+
+    /** @param expectedRevision flows 文档指纹；null/空白跳过校验（滚动发布兼容） */
+    public synchronized FlowDefinition save(
+            FlowDefinition input, String operator, String expectedRevision) {
         requireWritable();
-        List<FlowDefinition> flows = new ArrayList<>(list());
+        Snapshot<FlowDefinition> current = reloadForWrite();
+        requireRevision(current.revision(), expectedRevision, DATA_ID);
+        List<FlowDefinition> flows = new ArrayList<>(current.items());
         LocalDateTime now = LocalDateTime.now();
         int index = -1;
         for (int i = 0; i < flows.size(); i++) {
@@ -185,14 +218,20 @@ public final class NacosFlowRegistry {
     }
 
     public synchronized boolean delete(String id) {
+        return delete(id, null);
+    }
+
+    public synchronized boolean delete(String id, String expectedRevision) {
         requireWritable();
+        Snapshot<FlowDefinition> current = reloadForWrite();
+        requireRevision(current.revision(), expectedRevision, DATA_ID);
         if (DEFAULT_FLOW_ID.equals(id)) {
             throw new PayrollException("内置标准流程不能删除");
         }
         if (id.equals(activeFlowId())) {
             throw new PayrollException("默认流程不能删除，请先取消默认流程或把其他流程设为默认");
         }
-        List<FlowDefinition> flows = new ArrayList<>(list());
+        List<FlowDefinition> flows = new ArrayList<>(current.items());
         boolean removed = flows.removeIf(flow -> flow.id().equals(id));
         if (removed) {
             persist(flows);
@@ -200,15 +239,93 @@ public final class NacosFlowRegistry {
         return removed;
     }
 
-    private void publishSettings(String id) {
+    private synchronized void refreshSettings() {
+        long now = System.currentTimeMillis();
+        if (settingsFetchedAt > 0 && now - settingsFetchedAt < ttlMillis) {
+            return;
+        }
+        loadSettings(cachedActiveFlowId);
+        settingsFetchedAt = now;
+    }
+
+    private void loadSettings(String fallback) {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                try {
+                    JsonNode root = json.readTree(fetched.entry().content());
+                    cachedActiveFlowId =
+                            root.path("activeFlowId")
+                                    .asText(fallback == null ? "" : fallback)
+                                    .trim();
+                    cachedSettingsRevision =
+                            ConfigRevision.revisionOf(fetched.entry().content());
+                } catch (Exception e) {
+                    log.warn(
+                            "[流程编排] 解析 Nacos 配置 {} 失败，沿用上次设置：{}",
+                            SETTINGS_DATA_ID,
+                            e.getMessage());
+                }
+            }
+            case ABSENT -> cachedSettingsRevision = ConfigRevision.ABSENT;
+            case ERROR -> log.warn(
+                    "[流程编排] 读取 Nacos 配置 {} 失败，沿用上次设置：{}",
+                    SETTINGS_DATA_ID,
+                    fetched.message());
+        }
+    }
+
+    private record SettingsSnapshot(ObjectNode root, String revision) {
+    }
+
+    /** 绕过 TTL 读取 settings 文档作为写入基线；读失败或解析失败抛 503。 */
+    private SettingsSnapshot reloadSettingsForWrite() {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                try {
+                    JsonNode parsed = json.readTree(fetched.entry().content());
+                    if (!(parsed instanceof ObjectNode root)) {
+                        throw new IllegalStateException("配置根节点不是 JSON 对象");
+                    }
+                    return new SettingsSnapshot(
+                            root, ConfigRevision.revisionOf(fetched.entry().content()));
+                } catch (Exception e) {
+                    throw new PayrollUnavailableException(
+                            "读取 " + SETTINGS_DATA_ID + " 失败：" + e.getMessage(), e);
+                }
+            }
+            case ABSENT -> {
+                return new SettingsSnapshot(json.createObjectNode(), ConfigRevision.ABSENT);
+            }
+            default -> throw new PayrollUnavailableException(
+                    "读取 " + SETTINGS_DATA_ID + " 失败：" + fetched.message());
+        }
+    }
+
+    private void requireRevision(String current, String expected, String dataId) {
+        if (expected == null || expected.isBlank()) {
+            log.warn(
+                    "[流程编排] 写入 {} 未携带 revision，跳过并发校验（revision_missing=true）",
+                    dataId);
+            return;
+        }
+        if (!current.equals(expected)) {
+            throw new PayrollConflictException("配置已被他人修改，请刷新后重试", current);
+        }
+    }
+
+    /** 在已读取的 settings 文档上只改目标键，保留未知键。 */
+    private void publishSettings(SettingsSnapshot base, Consumer<ObjectNode> mutator) {
+        ObjectNode root = base.root();
+        mutator.accept(root);
         try {
-            String content = json.writerWithDefaultPrettyPrinter()
-                    .writeValueAsString(Map.of("activeFlowId", id));
+            String content = json.writerWithDefaultPrettyPrinter().writeValueAsString(root);
             if (!client.publish(SETTINGS_DATA_ID, content)) {
                 throw new PayrollException(
                         "写入 Nacos 配置 " + SETTINGS_DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
             }
-            cachedActiveFlowId = id;
+            cachedSettingsRevision = ConfigRevision.revisionOf(content);
             settingsFetchedAt = System.currentTimeMillis();
         } catch (PayrollException e) {
             throw e;
@@ -217,69 +334,107 @@ public final class NacosFlowRegistry {
         }
     }
 
-    /** 读取失败时沿用上次值，避免临时抖动让默认流程“消失”并回退到薪酬链路。 */
-    private String loadActiveFlowId(String fallback) {
-        Optional<String> body = client.fetch(SETTINGS_DATA_ID);
-        if (body.isEmpty()) {
-            if (fallback != null && !fallback.isBlank()) {
-                log.warn("[流程编排] 读取 {} 失败，沿用上次默认流程 {}", SETTINGS_DATA_ID, fallback);
-                return fallback;
-            }
-            return "";
+    private Snapshot<FlowDefinition> snapshot() {
+        long now = System.currentTimeMillis();
+        Snapshot<FlowDefinition> snapshot = cache;
+        if (snapshot != null && now - fetchedAt < ttlMillis) {
+            return snapshot;
         }
-        try {
-            return json.readTree(body.get()).path("activeFlowId").asText("").trim();
-        } catch (Exception e) {
-            if (fallback != null && !fallback.isBlank()) {
-                log.warn(
-                        "[流程编排] 解析 {} 失败，沿用上次默认流程 {}：{}",
-                        SETTINGS_DATA_ID,
-                        fallback,
-                        e.getMessage());
-                return fallback;
+        synchronized (this) {
+            snapshot = cache;
+            if (snapshot != null && now - fetchedAt < ttlMillis) {
+                return snapshot;
             }
-            log.warn("[流程编排] 解析 Nacos 配置 {} 失败，按未设置处理：{}",
-                    SETTINGS_DATA_ID, e.getMessage());
-            return "";
+            snapshot = load(snapshot);
+            cache = snapshot;
+            fetchedAt = now;
+            return snapshot;
         }
     }
 
-    private List<FlowDefinition> load(List<FlowDefinition> previous) {
+    /** 读取失败时沿用上次快照，避免临时抖动让流程列表“消失”。 */
+    private Snapshot<FlowDefinition> load(Snapshot<FlowDefinition> previous) {
         if (!settings.enabled()) {
-            return List.of(builtinFlow());
+            return new Snapshot<>(List.of(builtinFlow()), ConfigRevision.ABSENT);
         }
-        Optional<String> body = client.fetch(DATA_ID);
-        if (body.isEmpty()) {
-            if (previous != null && !previous.isEmpty()) {
-                log.warn(
-                        "[流程编排] Nacos 读取 {} 失败或内容为空，沿用上次成功加载的 {} 条流程定义",
-                        DATA_ID,
-                        previous.size());
-                return previous;
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        switch (fetched.status()) {
+            case ERROR -> {
+                if (previous != null && !previous.items().isEmpty()) {
+                    log.warn(
+                            "[流程编排] Nacos 读取 {} 失败，沿用上次成功加载的 {} 条流程定义：{}",
+                            DATA_ID,
+                            previous.items().size(),
+                            fetched.message());
+                    return previous;
+                }
+                log.warn("[流程编排] Nacos 读取 {} 失败，回退内置标准流程：{}", DATA_ID, fetched.message());
+                return new Snapshot<>(List.of(builtinFlow()), ConfigRevision.ABSENT);
             }
-            log.info("[流程编排] Nacos 未提供 {}，使用内置标准流程", DATA_ID);
-            return List.of(builtinFlow());
-        }
-        try {
-            List<FlowDefinition> flows =
-                    json.readValue(
-                            body.get(),
-                            json.getTypeFactory()
-                                    .constructCollectionType(List.class, FlowDefinition.class));
-            log.info("[流程编排] 从 Nacos 加载 {} 条流程定义", flows.size());
-            return List.copyOf(flows);
-        } catch (Exception e) {
-            if (previous != null && !previous.isEmpty()) {
-                log.warn(
-                        "[流程编排] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 条流程定义：{}",
-                        DATA_ID,
-                        previous.size(),
-                        e.getMessage());
-                return previous;
+            case ABSENT -> {
+                if (previous != null && !previous.items().isEmpty()) {
+                    log.warn(
+                            "[流程编排] Nacos 未提供 {}，沿用上次成功加载的 {} 条流程定义",
+                            DATA_ID,
+                            previous.items().size());
+                    return new Snapshot<>(previous.items(), ConfigRevision.ABSENT);
+                }
+                log.info("[流程编排] Nacos 未提供 {}，使用内置标准流程", DATA_ID);
+                return new Snapshot<>(List.of(builtinFlow()), ConfigRevision.ABSENT);
             }
-            log.warn("[流程编排] 解析 Nacos 配置 {} 失败，回退内置标准流程：{}", DATA_ID, e.getMessage());
-            return List.of(builtinFlow());
+            default -> {
+                String raw = fetched.entry().content();
+                try {
+                    return new Snapshot<>(parseFlows(raw), ConfigRevision.revisionOf(raw));
+                } catch (Exception e) {
+                    if (previous != null && !previous.items().isEmpty()) {
+                        log.warn(
+                                "[流程编排] 解析 Nacos 配置 {} 失败，沿用上次成功加载的 {} 条流程定义：{}",
+                                DATA_ID,
+                                previous.items().size(),
+                                e.getMessage());
+                        return previous;
+                    }
+                    log.warn("[流程编排] 解析 Nacos 配置 {} 失败，回退内置标准流程：{}",
+                            DATA_ID, e.getMessage());
+                    return new Snapshot<>(List.of(builtinFlow()), ConfigRevision.ABSENT);
+                }
+            }
         }
+    }
+
+    /** 写前重读：读取失败或解析失败一律 503，禁止用旧数据写回。 */
+    private Snapshot<FlowDefinition> reloadForWrite() {
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        switch (fetched.status()) {
+            case OK -> {
+                String raw = fetched.entry().content();
+                try {
+                    return new Snapshot<>(parseFlows(raw), ConfigRevision.revisionOf(raw));
+                } catch (Exception e) {
+                    throw new PayrollUnavailableException(
+                            "读取 " + DATA_ID + " 失败：" + e.getMessage(), e);
+                }
+            }
+            case ABSENT -> {
+                return new Snapshot<>(List.of(builtinFlow()), ConfigRevision.ABSENT);
+            }
+            default -> throw new PayrollUnavailableException(
+                    "读取 " + DATA_ID + " 失败：" + fetched.message());
+        }
+    }
+
+    private List<FlowDefinition> parseFlows(String raw) throws Exception {
+        List<FlowDefinition> flows =
+                json.readValue(
+                        raw,
+                        json.getTypeFactory()
+                                .constructCollectionType(List.class, FlowDefinition.class));
+        if (flows == null) {
+            throw new IllegalStateException("配置根节点不是 JSON 数组");
+        }
+        log.info("[流程编排] 从 Nacos 加载 {} 条流程定义", flows.size());
+        return List.copyOf(flows);
     }
 
     private void persist(List<FlowDefinition> flows) {
@@ -289,7 +444,7 @@ public final class NacosFlowRegistry {
                 throw new PayrollException(
                         "写入 Nacos 配置 " + DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
             }
-            cache = List.copyOf(flows);
+            cache = new Snapshot<>(List.copyOf(flows), ConfigRevision.revisionOf(content));
             fetchedAt = System.currentTimeMillis();
             log.info("[流程编排] 已保存流程配置（共 {} 条）", flows.size());
         } catch (PayrollException e) {

@@ -53,6 +53,9 @@ class AgentAdminWebTest {
         login(admin, "admin", ADMIN_PASSWORD);
 
         String agents = get(admin, "/api/admin/agents");
+        assertTrue(agents.contains("\"agents\":["), agents);
+        assertTrue(agents.contains("\"revision\":"), agents);
+        assertTrue(agents.contains("\"settingsRevision\":"), agents);
         assertTrue(agents.contains("\"payroll-calculator\""), agents);
         assertTrue(agents.contains("\"skillIds\""), agents);
         assertFalse(agents.contains("\"skill_ids\""), agents);
@@ -62,6 +65,8 @@ class AgentAdminWebTest {
         assertTrue(meta.contains("\"location\""), meta);
         assertTrue(meta.contains("\"tags\""), meta);
         assertTrue(meta.contains("\"activeAgentId\""), meta);
+        assertTrue(meta.contains("\"revision\":"), meta);
+        assertTrue(meta.contains("\"settingsRevision\":"), meta);
 
         String active = get(admin, "/api/admin/agents/active");
         assertTrue(active.contains("\"agentId\":\""), active);

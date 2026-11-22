@@ -113,7 +113,50 @@ class ActionGuardTest {
                 guard.intercept("Kb_Save_Config", Map.of("series_id", 7), false, false, false));
         assertNull(guard.intercept("disable_employee", Map.of(), false, false, false));
         assertEquals(
-                java.util.Set.of("kb_save_config", "skill_run"), guard.alwaysConfirmTools());
+                java.util.Set.of(
+                        "kb_save_config", "skill_run", "request_confirmation", "request_input"),
+                guard.alwaysConfirmTools());
+    }
+
+    @Test
+    @DisplayName("request_confirmation 在全局开关关闭时仍强制生成卡片并使用摘要")
+    void requestConfirmationForcedEvenWhenDisabled() {
+        ActionGuard guard = guard(ToolSafety.defaults(), false);
+
+        String result =
+                guard.intercept(
+                        "request_confirmation",
+                        Map.of(
+                                "summary", "开始生成 2026-11 工资条草稿",
+                                "detail", "将按当前考勤与绩效生成批次",
+                                "followup", "开始生成 2026-11 工资条草稿"),
+                        false,
+                        false,
+                        false);
+
+        assertNotNull(result);
+        Map<String, Object> payload =
+                JsonSupport.fromJson(result, new TypeReference<Map<String, Object>>() {});
+        assertEquals("PENDING_CONFIRM", payload.get("status"));
+        assertEquals("开始生成 2026-11 工资条草稿", guard.firstProposal().summary());
+        assertTrue(guard.finalReplyTemplate().contains("开始生成 2026-11 工资条草稿"));
+        assertTrue(guard.finalReplyTemplate().contains("请确认后我再继续"));
+    }
+
+    @Test
+    @DisplayName("request_confirmation 摘要为空时回退默认文案，超长时截断")
+    void requestConfirmationSummaryFallbackAndTruncate() {
+        ActionGuard empty = guard(ToolSafety.defaults(), false);
+        empty.intercept("request_confirmation", Map.of("summary", "  "), false, false, false);
+        assertEquals("需要你确认后继续", empty.firstProposal().summary());
+
+        ActionGuard longText = guard(ToolSafety.defaults(), false);
+        String text = "请确认".repeat(90);
+        longText.intercept(
+                "request_confirmation", Map.of("summary", text), false, false, false);
+        String summary = longText.firstProposal().summary();
+        assertEquals(201, summary.length());
+        assertTrue(summary.endsWith("…"));
     }
 
     @Test
@@ -172,6 +215,34 @@ class ActionGuardTest {
         assertEquals("张伟本月工资已核算完成。", guard.textBeforeProposal());
         assertTrue(guard.finalReplyTemplate().contains("请在下方卡片确认后执行"));
         assertFalse(guard.finalReplyTemplate().contains("已执行禁用"));
+    }
+
+    @Test
+    @DisplayName("request_confirmation 工具经 RuntimeContext 生成卡片并保留 followup")
+    void confirmationToolEmitsProposalWithFollowup() {
+        ActionGuard guard = guard(ToolSafety.defaults(), false);
+        io.agentscope.core.agent.RuntimeContext context =
+                io.agentscope.core.agent.RuntimeContext.builder()
+                        .userId("7")
+                        .sessionId("1001")
+                        .put(ActionGuard.class, guard)
+                        .build();
+
+        String result =
+                new ConfirmationTools()
+                        .requestConfirmation(
+                                "开始生成 2026-11 工资条草稿",
+                                "将按当前考勤与绩效生成批次",
+                                "开始生成 2026-11 工资条草稿",
+                                context);
+
+        Map<String, Object> payload =
+                JsonSupport.fromJson(result, new TypeReference<Map<String, Object>>() {});
+        assertEquals("PENDING_CONFIRM", payload.get("status"));
+        ActionProposal proposal = guard.firstProposal();
+        assertEquals("request_confirmation", proposal.toolName());
+        assertTrue(proposal.paramsJson().contains("开始生成 2026-11 工资条草稿"));
+        assertTrue(proposal.paramsJson().contains("followup"));
     }
 
     private ActionGuard guard(ToolSafety safety, boolean enabled) {

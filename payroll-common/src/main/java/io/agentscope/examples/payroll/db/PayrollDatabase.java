@@ -250,8 +250,18 @@ public final class PayrollDatabase {
                 text_chars INT NOT NULL DEFAULT 0,
                 status VARCHAR(16) NOT NULL,
                 error VARCHAR(500),
+                progress INT NOT NULL DEFAULT 0,
+                extraction_meta CLOB,
                 created_at TIMESTAMP NOT NULL
             )
+            """,
+            """
+            ALTER TABLE chat_attachments
+                ADD COLUMN IF NOT EXISTS progress INT NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE chat_attachments
+                ADD COLUMN IF NOT EXISTS extraction_meta CLOB
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_chat_attachments_message
@@ -669,8 +679,18 @@ public final class PayrollDatabase {
                 result VARCHAR(16) NOT NULL,
                 status_code INT,
                 message VARCHAR(500),
-                trace_id VARCHAR(64)
+                trace_id VARCHAR(64),
+                revision VARCHAR(64),
+                write_result VARCHAR(16)
             )
+            """,
+            """
+            ALTER TABLE audit_log
+                ADD COLUMN IF NOT EXISTS revision VARCHAR(64)
+            """,
+            """
+            ALTER TABLE audit_log
+                ADD COLUMN IF NOT EXISTS write_result VARCHAR(16)
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_audit_occurred

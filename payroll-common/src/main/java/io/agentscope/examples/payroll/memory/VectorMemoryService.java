@@ -7,11 +7,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,50 +38,76 @@ public final class VectorMemoryService implements AutoCloseable {
     private final VectorStore store;
     private final boolean ready;
     private final ExecutorService indexer;
+    private final Executor recallExecutor;
+    private final EmbeddingCircuitBreaker breaker;
 
     private VectorMemoryService(
             VectorMemorySettings settings,
             EmbeddingClient embeddings,
             VectorStore store,
             boolean ready,
-            ExecutorService indexer) {
+            ExecutorService indexer,
+            Executor recallExecutor,
+            EmbeddingCircuitBreaker breaker) {
         this.settings = settings;
         this.embeddings = embeddings;
         this.store = store;
         this.ready = ready;
         this.indexer = indexer;
+        this.recallExecutor = recallExecutor;
+        this.breaker = breaker;
     }
 
-    /** 供测试注入假实现：默认视为可用，asyncIndex=false 时同步执行。 */
+    /** 供测试注入假实现：默认视为可用，asyncIndex=false 时同步执行，召回在调用线程执行。 */
     VectorMemoryService(VectorMemorySettings settings, EmbeddingClient embeddings, VectorStore store) {
+        this(settings, embeddings, store, Runnable::run);
+    }
+
+    /** 供测试注入召回执行器，便于模拟拒绝与超时。 */
+    VectorMemoryService(
+            VectorMemorySettings settings,
+            EmbeddingClient embeddings,
+            VectorStore store,
+            Executor recallExecutor) {
         this(
-                settings == null
-                        ? new VectorMemorySettings(
-                                false, "", null, null, "", "", "", 0, null, 1, 0, 200, false)
-                        : settings,
+                settings == null ? defaultSettings() : settings,
                 embeddings,
                 store,
                 true,
-                newIndexer());
+                newIndexer(),
+                recallExecutor == null ? Runnable::run : recallExecutor,
+                newBreaker(settings == null ? defaultSettings() : settings));
+    }
+
+    private static VectorMemorySettings defaultSettings() {
+        return new VectorMemorySettings(
+                false, "", null, null, "", "", "", 0, null, 1, 0, 200, false);
     }
 
     /** 关闭状态的单例语义实例：所有方法退化为空操作，便于装配时无需判空。 */
     public static VectorMemoryService disabled() {
-        return new VectorMemoryService(null, null, null, false, null);
+        return new VectorMemoryService(null, null, null, false, null, null, null);
     }
 
     /** 探测嵌入模型与 ES；任一不可用则关闭向量能力，只记录明确提示。 */
     public static VectorMemoryService start(VectorMemorySettings settings) {
+        return start(settings, Runnable::run);
+    }
+
+    /** 探测嵌入模型与 ES；召回在有界执行器中运行并受预算约束。 */
+    public static VectorMemoryService start(VectorMemorySettings settings, Executor recallExecutor) {
         if (settings == null || !settings.enabled()) {
             log.info("[向量] 未启用（payroll.memory.enabled=false）");
             return disabled();
         }
+        EmbeddingCircuitBreaker breaker = newBreaker(settings);
         EmbeddingClient embeddings =
                 new OllamaEmbeddingClient(
                         settings.embeddingBaseUrl(),
                         settings.embeddingModel(),
                         settings.embeddingDim(),
-                        settings.embedTimeout());
+                        settings.embedTimeout(),
+                        breaker);
         if (!embeddings.available()) {
             log.warn(
                     "[向量] 嵌入模型 {} 不可用，向量记忆已禁用；请确认 ollama serve 已启动并执行 ollama pull {}",
@@ -105,13 +135,28 @@ public final class VectorMemoryService implements AutoCloseable {
             return disabled();
         }
         log.info(
-                "[向量] 已启用：index={}，model={}，dim={}，topK={}，minScore={}",
+                "[向量] 已启用：index={}，model={}，dim={}，topK={}，minScore={}，recallBudget={}ms",
                 settings.index(),
                 settings.embeddingModel(),
                 settings.embeddingDim(),
                 settings.topK(),
-                settings.minScore());
-        return new VectorMemoryService(settings, embeddings, store, true, newIndexer());
+                settings.minScore(),
+                settings.recallBudgetMs());
+        return new VectorMemoryService(
+                settings,
+                embeddings,
+                store,
+                true,
+                newIndexer(),
+                recallExecutor == null ? Runnable::run : recallExecutor,
+                breaker);
+    }
+
+    private static EmbeddingCircuitBreaker newBreaker(VectorMemorySettings settings) {
+        return new EmbeddingCircuitBreaker(
+                settings.breakerFailures(),
+                settings.breakerWindowSeconds(),
+                settings.breakerOpenSeconds());
     }
 
     public boolean ready() {
@@ -123,28 +168,67 @@ public final class VectorMemoryService implements AutoCloseable {
         if (!ready || userId <= 0 || question == null || question.isBlank()) {
             return "";
         }
+        if (!breaker.allow()) {
+            log.info("[向量] 召回跳过：嵌入熔断打开，user={}", userId);
+            return "";
+        }
         long scope = settings.crossSession() ? 0L : sessionId;
         long startedAt = System.currentTimeMillis();
+        FutureTask<String> task =
+                new FutureTask<>(() -> recallNow(userId, scope, question, startedAt));
         try {
-            float[] vector = embeddings.embed(question.trim());
-            List<VectorHit> hits =
-                    store.search(userId, scope, vector, settings.topK(), settings.minScore());
-            String block = render(hits, question);
-            log.info(
-                    "[向量] 召回完成：user={}，scope={}，命中={}，注入={}字，耗时={}ms",
-                    userId,
-                    scope <= 0 ? "user" : "session:" + scope,
-                    hits.size(),
-                    block.length(),
-                    System.currentTimeMillis() - startedAt);
+            recallExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            breaker.abandonProbe();
+            log.warn("[向量] 召回队列已满，本轮不注入历史：user={}", userId);
+            return "";
+        }
+        try {
+            String block = task.get(settings.recallBudgetMs(), TimeUnit.MILLISECONDS);
+            breaker.recordSuccess();
             return block;
-        } catch (RuntimeException e) {
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            breaker.recordFailure();
+            log.warn(
+                    "[向量] 召回超出预算，本轮不注入历史：user={}，budget={}ms，budget_exceeded=true，耗时={}ms",
+                    userId,
+                    settings.recallBudgetMs(),
+                    System.currentTimeMillis() - startedAt);
+            return "";
+        } catch (InterruptedException e) {
+            task.cancel(true);
+            breaker.abandonProbe();
+            Thread.currentThread().interrupt();
+            return "";
+        } catch (ExecutionException e) {
+            breaker.recordFailure();
             log.warn(
                     "[向量] 召回失败，本轮不注入历史：user={}，原因={}",
                     userId,
-                    e.getMessage());
+                    rootMessage(e));
             return "";
         }
+    }
+
+    private String recallNow(long userId, long scope, String question, long startedAt) {
+        float[] vector = embeddings.embed(question.trim());
+        List<VectorHit> hits =
+                store.search(userId, scope, vector, settings.topK(), settings.minScore());
+        String block = render(hits, question);
+        log.info(
+                "[向量] 召回完成：user={}，scope={}，命中={}，注入={}字，耗时={}ms",
+                userId,
+                scope <= 0 ? "user" : "session:" + scope,
+                hits.size(),
+                block.length(),
+                System.currentTimeMillis() - startedAt);
+        return block;
+    }
+
+    private static String rootMessage(ExecutionException e) {
+        Throwable cause = e.getCause();
+        return cause == null ? e.getMessage() : cause.getMessage();
     }
 
     /** 兼容旧调用：sessionId 未知时按用户范围召回。 */
@@ -158,11 +242,15 @@ public final class VectorMemoryService implements AutoCloseable {
         if (!ready || userId <= 0 || sessionId <= 0) {
             return;
         }
+        if (breaker.isOpen()) {
+            log.debug("[向量] 嵌入熔断打开，跳过问题索引：user={}，session={}", userId, sessionId);
+            return;
+        }
         String content = sanitize(question);
         if (content.replaceAll("\\s+", "").length() < MIN_QUESTION_CHARS) {
             return;
         }
-        submit(
+        submitEmbedding(
                 "索引问题",
                 () -> {
                     float[] vector = embeddings.embed(content);
@@ -184,11 +272,15 @@ public final class VectorMemoryService implements AutoCloseable {
         if (!ready || userId <= 0 || sessionId <= 0) {
             return;
         }
+        if (breaker.isOpen()) {
+            log.debug("[向量] 嵌入熔断打开，跳过摘要索引：user={}，session={}", userId, sessionId);
+            return;
+        }
         String content = sanitize(summary);
         if (content.isBlank()) {
             return;
         }
-        submit(
+        submitEmbedding(
                 "索引摘要",
                 () -> {
                     store.deleteSummaries(sessionId);
@@ -293,7 +385,23 @@ public final class VectorMemoryService implements AutoCloseable {
     }
 
     private void submit(String action, Runnable task) {
-        Runnable guarded = () -> runWithRetry(action, task);
+        dispatch(action, () -> runWithRetry(action, task));
+    }
+
+    /** 触达嵌入服务的任务：结果上报熔断器，便于连续失败后快速短路。 */
+    private void submitEmbedding(String action, Runnable task) {
+        dispatch(
+                action,
+                () -> {
+                    if (runWithRetry(action, task)) {
+                        breaker.recordSuccess();
+                    } else {
+                        breaker.recordFailure();
+                    }
+                });
+    }
+
+    private void dispatch(String action, Runnable guarded) {
         if (!settings.asyncIndex() || indexer == null) {
             guarded.run();
             return;
@@ -305,11 +413,11 @@ public final class VectorMemoryService implements AutoCloseable {
         }
     }
 
-    private static void runWithRetry(String action, Runnable task) {
+    private static boolean runWithRetry(String action, Runnable task) {
         for (int attempt = 1; attempt <= 2; attempt++) {
             try {
                 task.run();
-                return;
+                return true;
             } catch (RuntimeException e) {
                 if (attempt == 1) {
                     log.debug("[向量] {}失败，重试一次：{}", action, e.getMessage());
@@ -318,6 +426,7 @@ public final class VectorMemoryService implements AutoCloseable {
                 }
             }
         }
+        return false;
     }
 
     private String render(List<VectorHit> hits, String question) {

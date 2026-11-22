@@ -58,6 +58,7 @@ public final class AuditService {
                 context);
     }
 
+
     /** 登录失败等无法提交业务快照的事件。 */
     public void recordFailure(
             String action, String resourceType, String resourceId, int statusCode, String message) {
@@ -122,6 +123,19 @@ public final class AuditService {
         return store.purgeBefore(LocalDateTime.now().minusDays(retentionDays));
     }
 
+    /** 条件写入成功：revision 已标记但未显式标记写入结果时视为 OK。 */
+    private static String writeResult(AuditContext.State context) {
+        if (context == null) {
+            return null;
+        }
+        if (context.writeResult() != null) {
+            return context.writeResult();
+        }
+        return context.revision() == null || context.failureStatus() != null
+                ? null
+                : AuditEntry.WRITE_OK;
+    }
+
     private void persist(
             String action,
             String resourceType,
@@ -150,7 +164,9 @@ public final class AuditService {
                         result,
                         statusCode,
                         truncate(message, 500),
-                        context == null ? null : context.traceId());
+                        context == null ? null : context.traceId(),
+                        truncate(context == null ? null : context.revision(), 64),
+                        writeResult(context));
         try {
             store.insert(entry);
         } catch (RuntimeException e) {

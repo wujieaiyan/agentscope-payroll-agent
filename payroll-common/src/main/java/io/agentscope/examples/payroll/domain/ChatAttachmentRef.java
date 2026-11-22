@@ -8,5 +8,7 @@ public record ChatAttachmentRef(
         long sizeBytes,
         String status,
         int textChars,
-        String error) {
+        String error,
+        int progress,
+        ExtractionMeta extractionMeta) {
 }

@@ -148,6 +148,8 @@ onMounted(() => load(1));
           <div class="panel-row"><span class="k">动作</span><span class="v mono">{{ detail.action }}</span></div>
           <div class="panel-row"><span class="k">资源</span><span class="v mono">{{ detail.resource_type }}:{{ detail.resource_id }}</span></div>
           <div class="panel-row"><span class="k">结果</span><span class="v">{{ detail.result }} · HTTP {{ detail.status_code }}</span></div>
+          <div v-if="detail.write_result" class="panel-row"><span class="k">写入</span><span class="v">{{ detail.write_result }}</span></div>
+          <div v-if="detail.revision" class="panel-row"><span class="k">Revision</span><span class="v mono">{{ detail.revision }}</span></div>
           <div class="panel-row"><span class="k">来源</span><span class="v">{{ detail.ip }} · {{ detail.user_agent || '—' }}</span></div>
           <div v-if="detail.trace_id" class="panel-row"><span class="k">Trace</span><span class="v mono">{{ detail.trace_id }}</span></div>
           <div v-if="detail.message" class="panel-row"><span class="k">消息</span><span class="v">{{ detail.message }}</span></div>

@@ -4,6 +4,7 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.model.AgentModelSettings;
 import io.agentscope.examples.payroll.model.ModelConfigException;
 import io.agentscope.examples.payroll.model.ModelConnection;
@@ -15,15 +16,18 @@ import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.PayrollSkillCatalog;
 import io.agentscope.examples.payroll.skill.SkillManifest;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
+import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -55,6 +59,10 @@ public class AgentAdminController {
     private final AuthService authService;
     private final AuditService auditService;
     private final ModelConnectionRegistry modelRegistry;
+
+    /** Nacos 未配置 actionConfirm 时展示的环境默认值（与 runtime 的同名配置保持一致）。 */
+    @Value("${payroll.chat.action-confirm.enabled:false}")
+    private boolean actionConfirmFallback = false;
 
     @Autowired
     public AgentAdminController(
@@ -146,7 +154,11 @@ public class AgentAdminController {
         if (visibility != null && !visibility.isBlank()) {
             agents = agents.stream().filter(a -> a.visibility().equals(visibility)).toList();
         }
-        return ApiResponse.ok(agents);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("agents", agents);
+        result.put("revision", registry.revision());
+        result.put("settingsRevision", registry.settingsRevision());
+        return ApiResponse.ok(result);
     }
 
     /** 存储状态：是否可写（Nacos 启用）、配置位置与当前核算智能体。 */
@@ -156,6 +168,8 @@ public class AgentAdminController {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("writable", registry.writable());
         meta.put("location", registry.location());
+        meta.put("revision", registry.revision());
+        meta.put("settingsRevision", registry.settingsRevision());
         Set<String> tags = registry.list().stream()
                 .flatMap(a -> a.tags().stream())
                 .collect(Collectors.toCollection(java.util.TreeSet::new));
@@ -183,32 +197,54 @@ public class AgentAdminController {
     /** 管理员指定全局核算智能体；设置后自动取消全局默认流程，避免流程与智能体同时生效。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.AGENT_MANAGE)
-    public ApiResponse setActive(@PathVariable String id) {
-        AgentDefinition before = find(id);
-        String agentId = registry.setActiveAgent(id);
-        String clearedFlow = "";
-        if (flowRegistry != null) {
-            clearedFlow = flowRegistry.activeFlowId();
-            if (!clearedFlow.isBlank()) {
-                flowRegistry.clearActiveFlow();
-            }
+    public ApiResponse setActive(
+            @PathVariable String id,
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
+        find(id);
+        String previousFlow = flowRegistry == null ? "" : flowRegistry.activeFlowId();
+        if (flowRegistry != null && !previousFlow.isBlank()) {
+            // 先清流程：失败直接 503，不触碰智能体设置。
+            flowRegistry.clearActiveFlow();
+        }
+        String agentId;
+        try {
+            agentId = registry.setActiveAgent(id, revision);
+        } catch (RuntimeException e) {
+            restoreFlow(previousFlow, e);
+            throw e;
         }
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("activeAgentId", agentId);
-        audit.put("clearedFlowId", clearedFlow);
+        audit.put("clearedFlowId", previousFlow);
         auditService.record("agent.activate", "agent_definition", agentId, null, audit);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("activeAgentId", agentId);
-        result.put("clearedFlowId", clearedFlow);
+        result.put("clearedFlowId", previousFlow);
         return ApiResponse.ok(result);
+    }
+
+    /** 智能体设置写入失败时尽力恢复默认流程，避免两种激活模式同时失效。 */
+    private void restoreFlow(String previousFlow, RuntimeException cause) {
+        if (flowRegistry == null || previousFlow == null || previousFlow.isBlank()) {
+            return;
+        }
+        try {
+            flowRegistry.setActiveFlow(previousFlow);
+        } catch (RuntimeException restore) {
+            throw new PayrollUnavailableException(
+                    "激活智能体失败且无法恢复默认流程，当前无激活模式，请重试", restore);
+        }
     }
 
     /** 取消全局核算智能体：对话回到内置三段流水线。 */
     @DeleteMapping("/active")
     @RequirePermission(Permissions.AGENT_MANAGE)
-    public ApiResponse clearActive() {
+    public ApiResponse clearActive(
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
         String previous = registry.configuredAgentId();
-        registry.clearActiveAgent();
+        registry.clearActiveAgent(revision);
         auditService.record(
                 "agent.clear-active",
                 "agent_definition",
@@ -217,6 +253,38 @@ public class AgentAdminController {
                 Map.of("activeAgentId", ""));
         return ApiResponse.ok(Map.of("activeAgentId", ""));
     }
+
+    /** 写操作确认开关：Nacos 覆盖值优先，未配置时展示运行期环境默认值。 */
+    @GetMapping("/action-confirm")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse actionConfirm() {
+        Optional<Boolean> override = registry.actionConfirmOverride();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("enabled", override.orElse(actionConfirmFallback));
+        result.put("source", override.isPresent() ? "NACOS" : "ENV");
+        result.put("writable", registry.writable());
+        return ApiResponse.ok(result);
+    }
+
+    /** 切换写操作确认；写入 Nacos 设置文件，运行期按 TTL 生效，无需重启。 */
+    @PutMapping("/action-confirm")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse setActionConfirm(
+            @RequestBody ActionConfirmRequest request,
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
+        boolean enabled = request != null && Boolean.TRUE.equals(request.enabled());
+        registry.setActionConfirm(enabled, revision);
+        auditService.record(
+                "agent.action-confirm",
+                "agent_settings",
+                "actionConfirm",
+                null,
+                Map.of("enabled", enabled));
+        return ApiResponse.ok(Map.of("enabled", enabled, "source", "NACOS"));
+    }
+
+    public record ActionConfirmRequest(Boolean enabled) {}
 
     /** 可绑定技能清单，供编辑表单的技能多选；目录仓库只读 manifest，不拉取正文。 */
     @GetMapping("/skills")
@@ -233,9 +301,13 @@ public class AgentAdminController {
 
     @PostMapping
     @RequirePermission(Permissions.AGENT_MANAGE)
-    public ApiResponse create(@RequestBody AgentDefinition input, HttpServletRequest request) {
+    public ApiResponse create(
+            @RequestBody AgentDefinition input,
+            @RequestParam(name = "revision", required = false) String revision,
+            HttpServletRequest request) {
+        AuditContext.markRevision(revision);
         AgentDefinition validated = validate(input, null);
-        AgentDefinition saved = registry.save(validated, operator(request));
+        AgentDefinition saved = registry.save(validated, operator(request), revision, true);
         auditService.record("agent.create", "agent_definition", saved.id(), null, saved);
         return ApiResponse.ok(saved);
     }
@@ -246,10 +318,13 @@ public class AgentAdminController {
             @PathVariable String id,
             @RequestBody AgentDefinition input,
             @RequestParam(name = "clearModel", defaultValue = "false") boolean clearModel,
+            @RequestParam(name = "revision", required = false) String revision,
             HttpServletRequest request) {
+        AuditContext.markRevision(revision);
         AgentDefinition before = find(id);
         AgentDefinition validated = validate(input, id);
-        AgentDefinition saved = registry.save(validated, operator(request), !clearModel);
+        AgentDefinition saved =
+                registry.save(validated, operator(request), revision, !clearModel);
         auditService.record("agent.update", "agent_definition", saved.id(), before, saved);
         if (!before.model().equals(saved.model())) {
             auditService.record(
@@ -264,9 +339,12 @@ public class AgentAdminController {
 
     @DeleteMapping("/{id}")
     @RequirePermission(Permissions.AGENT_MANAGE)
-    public ApiResponse delete(@PathVariable String id) {
+    public ApiResponse delete(
+            @PathVariable String id,
+            @RequestParam(name = "revision", required = false) String revision) {
+        AuditContext.markRevision(revision);
         AgentDefinition before = find(id);
-        if (!registry.delete(id)) {
+        if (!registry.delete(id, revision)) {
             throw new PayrollException("智能体不存在：" + id);
         }
         auditService.record(

@@ -20,11 +20,13 @@ import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.web.ChatSse;
+import io.agentscope.examples.payroll.web.ChatStreamRejection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -148,13 +150,24 @@ public class InternalTurnController {
                 request.turnId(),
                 request.sessionId(),
                 request.ownerNode());
-        chatStreamExecutor.execute(
-                () ->
-                        execute(
-                                turn.get(),
-                                request.message(),
-                                request.attachmentText(),
-                                request.cacheScope()));
+        try {
+            chatStreamExecutor.execute(
+                    () ->
+                            execute(
+                                    turn.get(),
+                                    request.message(),
+                                    request.attachmentText(),
+                                    request.cacheScope()));
+        } catch (RejectedExecutionException e) {
+            ChatStreamRejection.record(chatStreamExecutor);
+            manager.failTurn(turn.get(), "执行队列已满");
+            manager.finishRemoteTurn(request.turnId());
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .body(
+                            Map.of(
+                                    "accepted", false,
+                                    "message", "执行队列已满，请稍后重试"));
+        }
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(Map.of("accepted", true, "turn_id", request.turnId()));
     }

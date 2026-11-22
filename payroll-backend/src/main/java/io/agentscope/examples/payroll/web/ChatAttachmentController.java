@@ -75,6 +75,15 @@ public class ChatAttachmentController {
                 .body(new FileSystemResource(file.path()));
     }
 
+    @PostMapping("/{attachmentId}/reparse")
+    public ApiResponse reparse(
+            @PathVariable long sessionId,
+            @PathVariable long attachmentId,
+            HttpServletRequest request) {
+        return ApiResponse.ok(
+                attachments.reparse(userId(request), sessionId, attachmentId));
+    }
+
     @DeleteMapping("/{attachmentId}")
     public ApiResponse delete(
             @PathVariable long sessionId,

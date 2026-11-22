@@ -6,6 +6,7 @@ import io.agentscope.examples.payroll.service.ActionProposalService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -49,13 +50,20 @@ public class ChatActionController {
             case "CONFIRM" ->
                     ApiResponse.ok(
                             actionProposalService.confirm(
-                                    user, proposalId, body.idempotencyKey()));
+                                    user,
+                                    proposalId,
+                                    body.idempotencyKey(),
+                                    body.answers()));
             case "CANCEL" ->
                     ApiResponse.ok(actionProposalService.cancel(user.id(), proposalId));
             default -> throw new PayrollException("不支持的操作决定：" + decision);
         };
     }
 
-    public record DecisionRequest(String decision, String idempotencyKey) {
+    /**
+     * @param answers 选择卡片的作答：问题 id → 选项或文本列表，仅 request_input 使用
+     */
+    public record DecisionRequest(
+            String decision, String idempotencyKey, Map<String, Object> answers) {
     }
 }

@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -71,14 +74,14 @@ class FlowAdminControllerTest {
                         "ignored",
                         LocalDateTime.now(),
                         LocalDateTime.now());
-        when(flowRegistry.save(any(), eq("system")))
+        when(flowRegistry.save(any(), eq("system"), any()))
                 .thenAnswer(invocation -> withId("flow-1", invocation.getArgument(0)));
 
-        ApiResponse response = controller.create(input, request);
+        ApiResponse response = controller.create(input, null, request);
 
         assertEquals("flow-1", ((FlowDefinition) response.data()).id());
         ArgumentCaptor<FlowDefinition> captor = ArgumentCaptor.forClass(FlowDefinition.class);
-        verify(flowRegistry).save(captor.capture(), eq("system"));
+        verify(flowRegistry).save(captor.capture(), eq("system"), isNull());
         FlowDefinition saved = captor.getValue();
         assertNull(saved.id());
         assertEquals("我的流程", saved.name());
@@ -111,9 +114,9 @@ class FlowAdminControllerTest {
 
         PayrollException error =
                 assertThrows(
-                        PayrollException.class, () -> controller.create(twoStarts, request));
+                        PayrollException.class, () -> controller.create(twoStarts, null, request));
         assertTrue(error.getMessage().contains("恰好包含一个开始节点"), error.getMessage());
-        verify(flowRegistry, never()).save(any(), any());
+        verify(flowRegistry, never()).save(any(), any(), any());
 
         FlowDefinition ghostAgent =
                 flow(
@@ -125,7 +128,7 @@ class FlowAdminControllerTest {
                         List.of(edge("e1", "start", "a"), edge("e2", "a", "end")));
         PayrollException agentError =
                 assertThrows(
-                        PayrollException.class, () -> controller.create(ghostAgent, request));
+                        PayrollException.class, () -> controller.create(ghostAgent, null, request));
         assertTrue(agentError.getMessage().contains("不存在"), agentError.getMessage());
     }
 
@@ -135,10 +138,11 @@ class FlowAdminControllerTest {
         FlowDefinition before = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(before);
         FlowDefinition input = flow("client-id", "新名称", standardNodes(), standardEdges());
-        when(flowRegistry.save(any(), eq("system")))
+        when(flowRegistry.save(any(), eq("system"), any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        FlowDefinition saved = (FlowDefinition) controller.update("flow-1", input, request).data();
+        FlowDefinition saved =
+                (FlowDefinition) controller.update("flow-1", input, null, request).data();
 
         assertEquals("flow-1", saved.id());
         assertEquals("新名称", saved.name());
@@ -150,15 +154,15 @@ class FlowAdminControllerTest {
     @DisplayName("不存在或不可删除的流程返回明确错误")
     void deleteRejectsMissingAndBuiltin() {
         when(flowRegistry.find("ghost")).thenReturn(null);
-        assertThrows(PayrollException.class, () -> controller.delete("ghost"));
+        assertThrows(PayrollException.class, () -> controller.delete("ghost", null));
 
         FlowDefinition builtin = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(builtin);
-        when(flowRegistry.delete("flow-1"))
+        when(flowRegistry.delete(eq("flow-1"), any()))
                 .thenThrow(new PayrollException("内置标准流程不能删除"));
 
         PayrollException error =
-                assertThrows(PayrollException.class, () -> controller.delete("flow-1"));
+                assertThrows(PayrollException.class, () -> controller.delete("flow-1", null));
         assertTrue(error.getMessage().contains("不能删除"), error.getMessage());
         verify(auditService, never()).record(any(), any(), any(), any(), any());
     }
@@ -168,9 +172,9 @@ class FlowAdminControllerTest {
     void deleteWritesAudit() {
         FlowDefinition before = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(before);
-        when(flowRegistry.delete("flow-1")).thenReturn(true);
+        when(flowRegistry.delete(eq("flow-1"), any())).thenReturn(true);
 
-        ApiResponse response = controller.delete("flow-1");
+        ApiResponse response = controller.delete("flow-1", null);
 
         assertEquals(Map.of("deleted", "flow-1"), response.data());
         verify(auditService)
@@ -189,12 +193,12 @@ class FlowAdminControllerTest {
         when(flowRegistry.find("flow-1")).thenReturn(online);
         when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
 
-        ApiResponse response = controller.activate("flow-1");
+        ApiResponse response = controller.activate("flow-1", null);
 
         assertEquals(
                 Map.of("activeFlowId", "flow-1", "clearedAgentId", "agent-x"),
                 response.data());
-        verify(flowRegistry).setActiveFlow("flow-1");
+        verify(flowRegistry).setActiveFlow(eq("flow-1"), isNull());
         verify(agentRegistry).clearActiveAgent();
         verify(auditService)
                 .record(
@@ -209,8 +213,55 @@ class FlowAdminControllerTest {
                         List.of(agent(RoleSkills.CALCULATOR, AgentDefinition.STATUS_OFFLINE),
                                 agent(RoleSkills.VALIDATOR, AgentDefinition.STATUS_ONLINE)));
         PayrollException error =
-                assertThrows(PayrollException.class, () -> controller.activate("flow-1"));
+                assertThrows(PayrollException.class, () -> controller.activate("flow-1", null));
         assertTrue(error.getMessage().contains("未上架"), error.getMessage());
+    }
+
+    @Test
+    @DisplayName("激活流程先写流程再清智能体")
+    void activateWritesFlowBeforeClearingAgent() {
+        FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
+        when(flowRegistry.find("flow-1")).thenReturn(flow);
+        when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
+
+        controller.activate("flow-1", null);
+
+        var order = inOrder(flowRegistry, agentRegistry);
+        order.verify(flowRegistry).setActiveFlow("flow-1", null);
+        order.verify(agentRegistry).clearActiveAgent();
+    }
+
+    @Test
+    @DisplayName("写流程失败时不清理智能体")
+    void activateAbortsWhenFlowWriteFails() {
+        FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
+        when(flowRegistry.find("flow-1")).thenReturn(flow);
+        when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
+        doThrow(new PayrollException("写流程失败"))
+                .when(flowRegistry)
+                .setActiveFlow(eq("flow-1"), any());
+
+        assertThrows(
+                PayrollException.class, () -> controller.activate("flow-1", null));
+        verify(agentRegistry, never()).clearActiveAgent();
+    }
+
+    @Test
+    @DisplayName("清理智能体失败时激活仍成功并给出告警")
+    void activateKeepsFlowWhenAgentClearFails() {
+        FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
+        when(flowRegistry.find("flow-1")).thenReturn(flow);
+        when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
+        doThrow(new PayrollException("写配置超时"))
+                .when(agentRegistry)
+                .clearActiveAgent();
+
+        Map<?, ?> data = (Map<?, ?>) controller.activate("flow-1", null).data();
+
+        assertEquals("flow-1", data.get("activeFlowId"));
+        assertEquals("agent-x", data.get("clearedAgentId"));
+        assertTrue(data.get("warning").toString().contains("写配置超时"), data.toString());
+        verify(flowRegistry).setActiveFlow("flow-1", null);
     }
 
     @Test

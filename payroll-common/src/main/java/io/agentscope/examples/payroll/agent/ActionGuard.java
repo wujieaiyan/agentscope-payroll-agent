@@ -40,11 +40,16 @@ public final class ActionGuard {
                     KbTools.REMOVE_MEMBER,
                     KbTools.MOVE_DIRECTORY,
                     KbTools.REBUILD_INDEX,
-                    SkillRunTools.SKILL_RUN);
+                    SkillRunTools.SKILL_RUN,
+                    ConfirmationTools.REQUEST_CONFIRMATION,
+                    QuestionTools.REQUEST_INPUT);
 
-    /** 配置清单不能覆盖的强制项：脚本执行永远需要确认（D4）。 */
+    /** 配置清单不能覆盖的强制项：脚本执行与显式请求确认永远需要确认（D4）。 */
     private static final Set<String> MANDATORY_ALWAYS_CONFIRM_TOOLS =
-            Set.of(SkillRunTools.SKILL_RUN);
+            Set.of(
+                    SkillRunTools.SKILL_RUN,
+                    ConfirmationTools.REQUEST_CONFIRMATION,
+                    QuestionTools.REQUEST_INPUT);
 
     private final long userId;
     private final long sessionId;
@@ -175,6 +180,12 @@ public final class ActionGuard {
         if (first == null) {
             return "";
         }
+        if (ConfirmationTools.REQUEST_CONFIRMATION.equals(first.toolName())) {
+            return "已生成待确认请求：" + first.summary() + "。请确认后我再继续，未确认前不会做任何改动。";
+        }
+        if (QuestionTools.REQUEST_INPUT.equals(first.toolName())) {
+            return "已生成待选择卡片：" + first.summary() + "。请逐项选择后提交，未提交前不会继续。";
+        }
         String impact =
                 switch (first.riskLevel()) {
                     case ActionProposal.RISK_AMOUNT -> "涉及金额";
@@ -243,6 +254,20 @@ public final class ActionGuard {
     }
 
     private static String summarize(String toolName, Map<String, Object> params) {
+        if (ConfirmationTools.REQUEST_CONFIRMATION.equals(toolName)
+                || QuestionTools.REQUEST_INPUT.equals(toolName)) {
+            Object summary =
+                    ConfirmationTools.REQUEST_CONFIRMATION.equals(toolName)
+                            ? params.get("summary")
+                            : params.get("title");
+            String text = summary == null ? "" : String.valueOf(summary).trim();
+            if (text.isEmpty()) {
+                return ConfirmationTools.REQUEST_CONFIRMATION.equals(toolName)
+                        ? "需要你确认后继续"
+                        : "需要你逐项选择后继续";
+            }
+            return text.length() > 200 ? text.substring(0, 200) + "…" : text;
+        }
         List<String> pairs = new ArrayList<>();
         for (Map.Entry<String, Object> entry : params.entrySet()) {
             Object value = entry.getValue();

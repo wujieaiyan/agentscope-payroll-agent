@@ -126,6 +126,11 @@ public record ModelConnection(
                 + String.join(",", capabilities);
     }
 
+    /** 连接版本 + 凭证版本：密钥轮换后必须重建模型实例。 */
+    public String versionKey(String credentialVersion) {
+        return versionKey() + "|cred:" + (credentialVersion == null ? "" : credentialVersion);
+    }
+
     /** 校验可保存的必填项；返回规范化后的连接。 */
     public ModelConnection validated() {
         if (id.isBlank() || !id.matches("[a-z0-9-]{1,64}")) {

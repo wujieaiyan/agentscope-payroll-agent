@@ -17,7 +17,7 @@ public final class H2AuditStore {
     private static final String COLUMNS =
             "audit_id, occurred_at, actor_id, actor_name, action, resource_type, resource_id, "
                     + "before_json, after_json, payload_json, ip, user_agent, result, status_code, "
-                    + "message, trace_id";
+                    + "message, trace_id, revision, write_result";
 
     private final PayrollDatabase database;
 
@@ -30,8 +30,8 @@ public final class H2AuditStore {
                 """
                 INSERT INTO audit_log (occurred_at, actor_id, actor_name, action, resource_type,
                     resource_id, before_json, after_json, payload_json, ip, user_agent, result,
-                    status_code, message, trace_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status_code, message, trace_id, revision, write_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = database.connection();
                 PreparedStatement statement =
@@ -51,6 +51,8 @@ public final class H2AuditStore {
             statement.setObject(13, entry.statusCode());
             statement.setString(14, entry.message());
             statement.setString(15, entry.traceId());
+            statement.setString(16, entry.revision());
+            statement.setString(17, entry.writeResult());
             statement.executeUpdate();
             try (ResultSet keys = statement.getGeneratedKeys()) {
                 return keys.next() ? keys.getLong(1) : 0L;
@@ -180,6 +182,8 @@ public final class H2AuditStore {
                 rs.getString("result"),
                 rs.getObject("status_code", Integer.class),
                 rs.getString("message"),
-                rs.getString("trace_id"));
+                rs.getString("trace_id"),
+                rs.getString("revision"),
+                rs.getString("write_result"));
     }
 }

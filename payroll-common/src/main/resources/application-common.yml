@@ -69,6 +69,9 @@ payroll:
       dir: "${PAYROLL_CHAT_ATTACHMENT_DIR:./data/chat-uploads}"
       max-files: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILES:5}"
       max-file-bytes: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILE_BYTES:20971520}"
+      # 附件解析线程数与等待队列容量；队列满时该附件直接置为失败，前端可重新识别。
+      parse-threads: "${PAYROLL_CHAT_ATTACHMENT_PARSE_THREADS:2}"
+      parse-capacity: "${PAYROLL_CHAT_ATTACHMENT_PARSE_CAPACITY:100}"
     # 同一会话跨实例互斥锁的过期时间；需大于单轮回答的最长耗时（SSE 超时 10 分钟）。
     session-lock-minutes: "${PAYROLL_CHAT_SESSION_LOCK_MINUTES:15}"
     # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
@@ -89,7 +92,7 @@ payroll:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
       ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
       # 命中清单的写工具无论 enabled 如何都先出确认提案；默认覆盖知识库 6 个写工具。
-      # skill_run 额外由代码强制加入（不可通过配置移除）。
+      # skill_run、request_confirmation 与 request_input 额外由代码强制加入（不可通过配置移除）。
       always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index,skill_run}"
     # 知识库 L0 确定性路由：enabled=false 时与旧 KbChatIntent 判定完全一致，便于灰度对比。
     kb-policy:
@@ -98,6 +101,25 @@ payroll:
       bound-candidate: "${PAYROLL_KB_POLICY_BOUND_CANDIDATE:false}"
       action-guard: "${PAYROLL_KB_POLICY_ACTION_GUARD:true}"
       follow-up-max-chars: "${PAYROLL_KB_POLICY_FOLLOW_UP_MAX_CHARS:20}"
+    # 方案 B（docs/kb-retrieval-as-context-spec.md）：need_kb 只决定是否提供材料，
+    # 不再把执行者改成 PayrollKbAgent；置 false 即回到改造前行为。
+    kb-executor:
+      enabled: "${PAYROLL_KB_EXECUTOR_ENABLED:false}"
+    # 检索即上下文：单智能体无 kb:read 时服务端预取一次 kb_search 并注入有界材料。
+    # B1 需在 #149（提示注入防护）完成后才可开启；关闭时只多一次布尔判断。
+    kb-context:
+      enabled: "${PAYROLL_KB_CONTEXT_ENABLED:false}"
+      max-results: "${PAYROLL_KB_CONTEXT_MAX_RESULTS:3}"
+      snippet-chars: "${PAYROLL_KB_CONTEXT_SNIPPET_CHARS:200}"
+      max-chars: "${PAYROLL_KB_CONTEXT_MAX_CHARS:900}"
+      min-score: "${PAYROLL_KB_CONTEXT_MIN_SCORE:0.0}"
+      min-overlap-terms: "${PAYROLL_KB_CONTEXT_MIN_OVERLAP_TERMS:1}"
+      timeout-ms: "${PAYROLL_KB_CONTEXT_TIMEOUT_MS:2000}"
+      # B2：只展示正文 [n] 实际引用的材料条目，保持注入序号不重排。
+      citation-filter:
+        enabled: "${PAYROLL_KB_CONTEXT_CITATION_FILTER_ENABLED:false}"
+      # B2：创作类问题提示词要求 need_kb=false，改变路由分布前需重跑金标。
+      creative-no-kb: "${PAYROLL_KB_CONTEXT_CREATIVE_NO_KB:false}"
   # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
   routing:
     enabled: "${PAYROLL_ROUTING_ENABLED:true}"
@@ -199,7 +221,7 @@ payroll:
     task-max-retries: "${PAYROLL_KB_TASK_MAX_RETRIES:3}"
     # 启动时恢复重启遗留的排队/运行中任务；关闭后遗留任务保持原状。
     recovery-enabled: "${PAYROLL_KB_RECOVERY_ENABLED:true}"
-    # 扫描件兜底：无文字层页面按页渲染后交给 Tesseract；max-pages=0 表示不限页数。
+    # 扫描件兜底：无文字层页面按页渲染后交给 OCR；max-pages=0 表示不限页数。
     ocr:
       enabled: "${PAYROLL_KB_OCR_ENABLED:true}"
       command: "${PAYROLL_KB_OCR_COMMAND:tesseract}"
@@ -208,6 +230,24 @@ payroll:
       dpi: "${PAYROLL_KB_OCR_DPI:300}"
       timeout-seconds: "${PAYROLL_KB_OCR_TIMEOUT:120}"
       max-pages: "${PAYROLL_KB_OCR_MAX_PAGES:0}"
+      # 档位链：rapidocr（主档，需 -Prapidocr 构建）→ tesseract（降级档）；
+      # 也可设为 rapidocr 或 tesseract 只用单档。每档结果先过质量门，未通过自动降级。
+      engine: "${PAYROLL_KB_OCR_ENGINE:chain}"
+      chain-order: "${PAYROLL_KB_OCR_CHAIN_ORDER:rapidocr,tesseract}"
+      cache-size: "${PAYROLL_KB_OCR_CACHE_SIZE:32}"
+      breaker-failures: "${PAYROLL_KB_OCR_BREAKER_FAILURES:3}"
+      breaker-cooldown-seconds: "${PAYROLL_KB_OCR_BREAKER_COOLDOWN:60}"
+      # 质量门阈值（黄金集校准）；min-cjk-ratio=0 表示不强制中文占比。
+      quality-gate:
+        min-chars: "${PAYROLL_KB_OCR_GATE_MIN_CHARS:8}"
+        min-alnum-ratio: "${PAYROLL_KB_OCR_GATE_MIN_ALNUM:0.5}"
+        min-cjk-ratio: "${PAYROLL_KB_OCR_GATE_MIN_CJK:0}"
+        min-confidence: "${PAYROLL_KB_OCR_GATE_MIN_CONFIDENCE:0}"
+      rapidocr:
+        enabled: "${PAYROLL_KB_OCR_RAPIDOCR_ENABLED:true}"
+        # 原生库与模型解压到该目录下的 ocrJava；默认落在系统临时目录。
+        model-dir: "${PAYROLL_KB_OCR_RAPIDOCR_MODEL_DIR:${java.io.tmpdir}}"
+        timeout-seconds: "${PAYROLL_KB_OCR_RAPIDOCR_TIMEOUT:60}"
     # 会话绑定知识库：单会话最多绑定库数；未绑定时默认检索的可读库上限；团队节点检索开关。
     chat:
       max-series: "${PAYROLL_KB_CHAT_MAX_SERIES:3}"

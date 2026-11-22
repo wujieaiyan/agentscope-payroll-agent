@@ -9,8 +9,11 @@ import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillDetail;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillSummary;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -198,6 +201,43 @@ class NacosSkillRegistryTest {
 
         // Nacos 为空时只需要列出正文；第二次 list() 命中 TTL 缓存。
         assertEquals(1, nacos.reads.get());
+    }
+
+    @Test
+    @DisplayName("列表失败时沿用上次成功快照，文件缓存不清空")
+    void keepsSnapshotAndFileCacheWhenListFails() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true, Duration.ofMillis(1));
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
+        assertEquals("# FAQ", registry.fileContent(AUDITOR, "references/faq.md"));
+        assertEquals(Set.of(AUDITOR), fileCacheKeys(registry));
+
+        nacos.failNextList.set(1);
+        Thread.sleep(5);
+        List<SkillSummary> skills = registry.list();
+
+        assertTrue(
+                skills.stream().anyMatch(skill -> skill.id().equals(AUDITOR)),
+                "列表失败时应沿用上次快照，自定义技能不应消失");
+        assertEquals(Set.of(AUDITOR), fileCacheKeys(registry), "文件缓存不应被整份清空");
+    }
+
+    @Test
+    @DisplayName("成功刷新后裁剪已删除技能的文件缓存")
+    void trimsFileCacheOnSuccessfulReload() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true, Duration.ofMillis(1));
+        registry.create(AUDITOR, "薪酬审计角色", roleContent("独立审计工资数据。"));
+        registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
+        registry.fileContent(AUDITOR, "references/faq.md");
+        assertEquals(Set.of(AUDITOR), fileCacheKeys(registry));
+
+        assertTrue(registry.delete(AUDITOR));
+        Thread.sleep(5);
+        registry.list();
+
+        assertTrue(fileCacheKeys(registry).isEmpty(), "删除技能后文件缓存应被裁掉");
     }
 
     @Test
@@ -515,6 +555,10 @@ class NacosSkillRegistryTest {
     }
 
     private NacosSkillRegistry registry(boolean enabled) {
+        return registry(enabled, Duration.ofSeconds(60));
+    }
+
+    private NacosSkillRegistry registry(boolean enabled, Duration ttl) {
         NacosSkillSettings settings =
                 new NacosSkillSettings(
                         enabled,
@@ -524,7 +568,15 @@ class NacosSkillRegistryTest {
                         "",
                         "",
                         Duration.ofSeconds(2),
-                        Duration.ofSeconds(60));
+                        ttl);
         return new NacosSkillRegistry(settings);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> fileCacheKeys(NacosSkillRegistry registry) throws Exception {
+        Field field = NacosSkillRegistry.class.getDeclaredField("fileCache");
+        field.setAccessible(true);
+        Map<String, ?> cache = (Map<String, ?>) field.get(registry);
+        return Set.copyOf(cache.keySet());
     }
 }

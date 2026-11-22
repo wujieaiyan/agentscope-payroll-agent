@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -311,6 +312,10 @@ public class PayrollWebController {
         }
         try {
             chatStreamExecutor.execute(() -> streamChat(message, userId, channel));
+        } catch (RejectedExecutionException e) {
+            chatQuotaService.release(userId);
+            ChatStreamRejection.record(chatStreamExecutor);
+            throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;

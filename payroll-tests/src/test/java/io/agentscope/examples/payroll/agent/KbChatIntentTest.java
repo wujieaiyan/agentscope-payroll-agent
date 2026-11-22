@@ -27,4 +27,14 @@ class KbChatIntentTest {
         assertFalse(KbChatIntent.matches(""));
         assertFalse(KbChatIntent.matches(null));
     }
+
+    @Test
+    @DisplayName("文学创作请求不因主题词命中而强制检索")
+    void creativeRequestsDoNotForceKnowledgeBase() {
+        assertFalse(KbChatIntent.matches("写一首关于加班的诗词"));
+        assertFalse(KbChatIntent.matches("帮我写一段加班的歌词"));
+        assertFalse(KbChatIntent.matches("以考勤为主题写一篇小说"));
+        assertTrue(KbChatIntent.matches("加班制度是怎么规定的"));
+        assertTrue(KbChatIntent.matches("请根据制度写一首关于年假的诗"));
+    }
 }

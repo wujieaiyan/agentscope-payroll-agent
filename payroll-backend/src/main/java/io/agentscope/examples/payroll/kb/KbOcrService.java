@@ -17,12 +17,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-/** 扫描页 OCR：把整页图片交给 Tesseract，按 TSV 行结构重建文本并过滤低置信度词。 */
+/** 扫描页 OCR：把整页图片交给 Tesseract，按 TSV 行结构重建文本；低置信度词只做标记。 */
 @Service
 public class KbOcrService {
 
     private static final Logger log = LoggerFactory.getLogger(KbOcrService.class);
     private static final int PROBE_TIMEOUT_SECONDS = 10;
+    /** TSV 置信度为 0-100；低于该值记入 lowConfidenceWords，供质量门与溯源参考。 */
+    private static final double LOW_CONFIDENCE_PERCENT = 60;
 
     private final boolean enabled;
     private final String command;
@@ -66,6 +68,11 @@ public class KbOcrService {
         return maxPages;
     }
 
+    /** 单页识别超时，供外部档位（ImageTextExtractor）复用同一配置。 */
+    public int timeoutSeconds() {
+        return timeoutSeconds;
+    }
+
     public boolean available() {
         Boolean cached = available;
         if (cached != null) {
@@ -97,11 +104,9 @@ public class KbOcrService {
     }
 
     /**
-     * 识别单页图片，返回按行重建的文本。
-     *
-     * @param minConfidence 词级置信度下限（0-1），低于该值的词会被剔除；全部低于时回退为不过滤。
+     * 识别单页图片；词级置信度只做统计标记，不再丢弃文本，是否可用交给质量门判定。
      */
-    public String recognize(BufferedImage image, String languages, double minConfidence)
+    public OcrText recognize(BufferedImage image, String languages)
             throws IOException, InterruptedException {
         Path workDir = Files.createTempDirectory("kb-ocr-");
         try {
@@ -109,11 +114,22 @@ public class KbOcrService {
             if (!ImageIO.write(image, "png", png.toFile())) {
                 throw new IOException("无法写出 OCR 临时图片");
             }
+            return recognizeFile(png, languages);
+        } finally {
+            deleteQuietly(workDir);
+        }
+    }
+
+    /** 直接识别磁盘上的图片，避免调用方已落盘时再做一次编码。 */
+    public OcrText recognizeFile(Path image, String languages)
+            throws IOException, InterruptedException {
+        Path workDir = Files.createTempDirectory("kb-ocr-");
+        try {
             Path stdout = workDir.resolve("out.tsv");
             Path stderr = workDir.resolve("err.txt");
             List<String> cmd = new ArrayList<>();
             cmd.add(command);
-            cmd.add(png.toString());
+            cmd.add(image.toString());
             cmd.add("stdout");
             cmd.add("-l");
             cmd.add(languages);
@@ -129,9 +145,14 @@ public class KbOcrService {
                             .redirectOutput(stdout.toFile())
                             .redirectError(stderr.toFile())
                             .start();
-            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            try {
+                if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    throw new IOException("OCR 超时（" + timeoutSeconds + "s）");
+                }
+            } catch (InterruptedException e) {
                 process.destroyForcibly();
-                throw new IOException("OCR 超时（" + timeoutSeconds + "s）");
+                throw e;
             }
             if (process.exitValue() != 0) {
                 String message =
@@ -140,7 +161,7 @@ public class KbOcrService {
                                 : "";
                 throw new IOException("OCR 进程退出码 " + process.exitValue() + "：" + message);
             }
-            return rebuildText(Files.readString(stdout, StandardCharsets.UTF_8), minConfidence);
+            return rebuildText(Files.readString(stdout, StandardCharsets.UTF_8));
         } finally {
             deleteQuietly(workDir);
         }
@@ -176,9 +197,9 @@ public class KbOcrService {
         };
     }
 
-    private static String rebuildText(String tsv, double minConfidence) {
+    private static OcrText rebuildText(String tsv) {
         if (tsv == null || tsv.isBlank()) {
-            return "";
+            return new OcrText("", 0, 0, 0);
         }
         List<Word> words = new ArrayList<>();
         for (String line : tsv.split("\\R")) {
@@ -202,17 +223,18 @@ public class KbOcrService {
                             text.strip()));
         }
         if (words.isEmpty()) {
-            return "";
-        }
-        double threshold = Math.max(0, Math.min(1, minConfidence)) * 100;
-        List<Word> kept = words.stream().filter(word -> word.confidence() >= threshold).toList();
-        if (kept.isEmpty()) {
-            kept = words;
+            return new OcrText("", 0, 0, 0);
         }
         StringBuilder text = new StringBuilder();
         String currentLine = null;
         String previous = null;
-        for (Word word : kept) {
+        double total = 0;
+        int lowConfidence = 0;
+        for (Word word : words) {
+            total += word.confidence();
+            if (word.confidence() < LOW_CONFIDENCE_PERCENT) {
+                lowConfidence++;
+            }
             String lineKey = word.block() + "/" + word.par() + "/" + word.line();
             if (!lineKey.equals(currentLine)) {
                 if (currentLine != null) {
@@ -227,7 +249,12 @@ public class KbOcrService {
             text.append(word.text());
             previous = word.text();
         }
-        return text.toString();
+        double confidence = total / words.size() / 100.0;
+        return new OcrText(text.toString(), words.size(), lowConfidence, confidence);
+    }
+
+    /** Tesseract 词级置信度统计结果；text 保留全部词，不再按置信度裁剪。 */
+    public record OcrText(String text, int words, int lowConfidenceWords, double confidence) {
     }
 
     private static int intOf(String value) {

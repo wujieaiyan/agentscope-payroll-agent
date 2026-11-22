@@ -5,6 +5,9 @@ import io.agentscope.examples.payroll.model.ModelConfigException;
 import io.agentscope.examples.payroll.model.ModelConnection;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -20,8 +23,14 @@ public final class ModelCredentialService {
 
     public record Metadata(boolean stored, LocalDateTime createdAt, LocalDateTime lastUsedAt) {}
 
+    /** 凭证版本缓存：只存时间戳或环境变量名，绝不缓存密钥本身。 */
+    private record CachedVersion(String value, long expiresAt) {}
+
+    private static final long VERSION_CACHE_MILLIS = 5_000L;
+
     private final ModelCredentialStore store;
     private final ModelCredentialCipher cipher;
+    private final Map<String, CachedVersion> versionCache = new HashMap<>();
 
     public ModelCredentialService(ModelCredentialStore store, ModelCredentialCipher cipher) {
         this.store = store;
@@ -45,13 +54,58 @@ public final class ModelCredentialService {
                 sealed.nonce(),
                 sealed.keyVersion(),
                 operator);
+        invalidateVersion(connectionId);
         log.info("[Model] 已保存连接 {} 的页面密钥（操作人 {}）", connectionId, operator);
         return "cred-" + connectionId;
     }
 
     public void clear(String connectionId) {
         store.delete(connectionId);
+        invalidateVersion(connectionId);
         log.info("[Model] 已清除连接 {} 的页面密钥", connectionId);
+    }
+
+    /**
+     * 凭证版本：环境变量模式返回变量名，页面密钥返回 updated_at 秒级时间戳。
+     *
+     * <p>只用于模型实例缓存键，不暴露密钥；结果缓存 5s，保存/清除时主动失效。
+     */
+    public String versionOf(ModelConnection connection) {
+        if (connection == null) {
+            return "";
+        }
+        if (connection.credentialRef() == null || connection.credentialRef().isBlank()) {
+            return connection.apiKeyEnv() == null ? "" : "env:" + connection.apiKeyEnv();
+        }
+        long now = System.currentTimeMillis();
+        synchronized (versionCache) {
+            CachedVersion cached = versionCache.get(connection.id());
+            if (cached != null && cached.expiresAt() > now) {
+                return cached.value();
+            }
+        }
+        // 凭证表主键是 connection.id()，不是展示用的 credentialRef。
+        String value =
+                store.find(connection.id())
+                        .map(
+                                credential ->
+                                        credential.updatedAt() == null
+                                                ? "missing"
+                                                : String.valueOf(
+                                                        credential
+                                                                .updatedAt()
+                                                                .toEpochSecond(ZoneOffset.UTC)))
+                        .orElse("missing");
+        synchronized (versionCache) {
+            versionCache.put(connection.id(), new CachedVersion(value, now + VERSION_CACHE_MILLIS));
+        }
+        return value;
+    }
+
+    private void invalidateVersion(String connectionId) {
+        synchronized (versionCache) {
+            versionCache.remove(connectionId);
+        }
     }
 
     /** 取连接可用的 API Key；Ollama 返回空串。 */

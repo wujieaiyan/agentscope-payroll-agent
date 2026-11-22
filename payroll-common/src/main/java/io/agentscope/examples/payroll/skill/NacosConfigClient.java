@@ -31,6 +31,48 @@ final class NacosConfigClient {
     record ConfigEntry(String dataId, String content, long updatedAt) {
     }
 
+    /** 单条配置读取结果：区分“没有该配置”和“读取失败”。 */
+    record FetchResult(Status status, ConfigEntry entry, String message) {
+
+        enum Status {
+            OK,
+            ABSENT,
+            ERROR
+        }
+
+        static FetchResult ok(ConfigEntry entry) {
+            return new FetchResult(Status.OK, entry, "");
+        }
+
+        static FetchResult absent(String dataId) {
+            return new FetchResult(Status.ABSENT, null, "配置 " + dataId + " 不存在");
+        }
+
+        static FetchResult error(String message) {
+            return new FetchResult(Status.ERROR, null, message);
+        }
+
+        boolean ok() {
+            return status == Status.OK;
+        }
+
+        Optional<String> content() {
+            return status == Status.OK ? Optional.of(entry.content()) : Optional.empty();
+        }
+    }
+
+    /** 配置列表读取结果：ok=false 表示 Nacos 不可用或返回格式错误。 */
+    record ListResult(boolean ok, List<ConfigEntry> entries, String warning) {
+
+        static ListResult ok(List<ConfigEntry> entries) {
+            return new ListResult(true, List.copyOf(entries), "");
+        }
+
+        static ListResult failed(String warning) {
+            return new ListResult(false, List.of(), warning);
+        }
+    }
+
     private final NacosSkillSettings settings;
     private final HttpClient http;
 
@@ -47,6 +89,10 @@ final class NacosConfigClient {
     }
 
     Optional<String> fetch(String dataId) {
+        return fetchResult(dataId).content();
+    }
+
+    FetchResult fetchResult(String dataId) {
         try {
             ensureToken();
             Map<String, String> params = new LinkedHashMap<>();
@@ -69,36 +115,81 @@ final class NacosConfigClient {
             if (response.statusCode() == 200) {
                 String body = response.body();
                 lastWarning = null;
-                return body == null || body.isBlank() ? Optional.empty() : Optional.of(body);
+                if (body == null || body.isBlank()) {
+                    return FetchResult.absent(dataId);
+                }
+                return FetchResult.ok(new ConfigEntry(dataId, body, 0));
             }
             if (response.statusCode() == 404) {
-                return Optional.empty();
+                return FetchResult.absent(dataId);
             }
             if (response.statusCode() == 403) {
                 accessToken = null;
                 tokenExpiresAt = 0;
             }
-            warnOnce("读取配置 " + dataId + " 失败：HTTP " + response.statusCode());
-            return Optional.empty();
+            String message = "读取配置 " + dataId + " 失败：HTTP " + response.statusCode();
+            warnOnce(message);
+            return FetchResult.error(message);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return Optional.empty();
+            return FetchResult.error("读取配置 " + dataId + " 被中断");
         } catch (IOException | RuntimeException e) {
-            warnOnce("读取 Nacos 配置 " + dataId + " 失败：" + rootMessage(e));
-            return Optional.empty();
+            String message = "读取 Nacos 配置 " + dataId + " 失败：" + rootMessage(e);
+            warnOnce(message);
+            return FetchResult.error(message);
         }
     }
 
     /** 按 dataId 模式列出配置（Nacos v1 模糊搜索），失败时返回空列表由调用方回退。 */
     List<ConfigEntry> list(String dataIdPattern) {
+        ListResult result = listResult(dataIdPattern);
+        return result.ok() ? result.entries() : List.of();
+    }
+
+    /** 全量翻页读取；任一页失败即整体失败，绝不返回部分结果。 */
+    ListResult listResult(String dataIdPattern) {
+        List<ConfigEntry> entries = new ArrayList<>();
+        int maxPages = Math.max(1, settings.listMaxPages());
+        int pageNo = 1;
+        while (true) {
+            ListResult page = fetchPage(dataIdPattern, pageNo, LIST_PAGE_SIZE);
+            if (!page.ok()) {
+                return ListResult.failed(page.warning());
+            }
+            entries.addAll(page.entries());
+            if (page.entries().size() < LIST_PAGE_SIZE) {
+                if (pageNo > 1) {
+                    log.info(
+                            "[Skill] 配置列表 {} 共 {} 条（{} 页）",
+                            dataIdPattern,
+                            entries.size(),
+                            pageNo);
+                }
+                return ListResult.ok(entries);
+            }
+            if (pageNo >= maxPages) {
+                String message =
+                        "配置列表 "
+                                + dataIdPattern
+                                + " 超过 "
+                                + (maxPages * LIST_PAGE_SIZE)
+                                + " 条，请手工清理";
+                warnOnce(message);
+                return ListResult.failed(message);
+            }
+            pageNo++;
+        }
+    }
+
+    private ListResult fetchPage(String dataIdPattern, int pageNo, int pageSize) {
         try {
             ensureToken();
             Map<String, String> params = new LinkedHashMap<>();
             params.put("search", "blur");
             params.put("dataId", dataIdPattern);
             params.put("group", settings.group());
-            params.put("pageNo", "1");
-            params.put("pageSize", String.valueOf(LIST_PAGE_SIZE));
+            params.put("pageNo", String.valueOf(pageNo));
+            params.put("pageSize", String.valueOf(pageSize));
             if (!settings.namespace().isBlank()) {
                 params.put("tenant", settings.namespace());
             }
@@ -115,9 +206,15 @@ final class NacosConfigClient {
                     http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if (response.statusCode() == 200) {
                 lastWarning = null;
-                JsonNode pageItems = JSON.readTree(response.body()).path("pageItems");
+                String body = response.body();
+                if (body == null || body.isBlank()) {
+                    return ListResult.ok(List.of());
+                }
+                JsonNode pageItems = JSON.readTree(body).path("pageItems");
                 if (!pageItems.isArray()) {
-                    return List.of();
+                    String message = "解析配置列表 " + dataIdPattern + " 失败：pageItems 不是数组";
+                    warnOnce(message);
+                    return ListResult.failed(message);
                 }
                 List<ConfigEntry> entries = new ArrayList<>(pageItems.size());
                 for (JsonNode item : pageItems) {
@@ -131,20 +228,25 @@ final class NacosConfigClient {
                                     item.path("content").asText(""),
                                     item.path("gmtModified").asLong(0)));
                 }
-                return List.copyOf(entries);
+                return ListResult.ok(entries);
+            }
+            if (response.statusCode() == 404) {
+                return ListResult.ok(List.of());
             }
             if (response.statusCode() == 403) {
                 accessToken = null;
                 tokenExpiresAt = 0;
             }
-            warnOnce("列出配置 " + dataIdPattern + " 失败：HTTP " + response.statusCode());
-            return List.of();
+            String message = "列出配置 " + dataIdPattern + " 失败：HTTP " + response.statusCode();
+            warnOnce(message);
+            return ListResult.failed(message);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return List.of();
+            return ListResult.failed("列出配置 " + dataIdPattern + " 被中断");
         } catch (IOException | RuntimeException e) {
-            warnOnce("列出 Nacos 配置 " + dataIdPattern + " 失败：" + rootMessage(e));
-            return List.of();
+            String message = "列出 Nacos 配置 " + dataIdPattern + " 失败：" + rootMessage(e);
+            warnOnce(message);
+            return ListResult.failed(message);
         }
     }
 

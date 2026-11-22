@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agentscope.examples.payroll.agent.QuestionTools;
 import io.agentscope.examples.payroll.db.H2ActionProposalStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.ChatMessage;
+import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
@@ -55,6 +57,17 @@ class ActionProposalServiceTest {
                                 (params, userId) -> {
                                     executions.incrementAndGet();
                                     throw new IllegalStateException("远端服务不可用");
+                                },
+                                QuestionTools.REQUEST_INPUT,
+                                (params, userId) -> {
+                                    executions.incrementAndGet();
+                                    return Map.of(
+                                            "status",
+                                            "CONFIRMED",
+                                            "answers",
+                                            params.getOrDefault("answers", Map.of()),
+                                            "followup",
+                                            QuestionTools.followupText(params));
                                 }),
                         Map.of("disable_employee", Permissions.EMPLOYEE_WRITE),
                         List::of);
@@ -188,7 +201,55 @@ class ActionProposalServiceTest {
         assertTrue(last.content().contains("远端服务不可用"));
     }
 
+    @Test
+    @DisplayName("选择卡片未作答时拒绝提交，作答清洗后执行并返回续问文案")
+    void questionCardRequiresAnswersBeforeExecution() {
+        ActionProposal proposal =
+                seed(
+                        QuestionTools.REQUEST_INPUT,
+                        ActionProposal.STATUS_PENDING,
+                        future(),
+                        "{\"title\":\"生成前拍板\",\"questions\":[{\"id\":\"q1\",\"question\":\"工资批次口径\"}]}",
+                        "生成前拍板");
+
+        assertThrows(
+                PayrollException.class,
+                () ->
+                        service.confirm(
+                                user(Set.of(Permissions.CHAT_USE)),
+                                proposal.proposalId(),
+                                null,
+                                Map.of()));
+        assertEquals(0, executions.get());
+        assertEquals(
+                ActionProposal.STATUS_PENDING,
+                proposals.find(proposal.proposalId()).orElseThrow().status());
+
+        ActionProposal executed =
+                service.confirm(
+                        user(Set.of(Permissions.CHAT_USE)),
+                        proposal.proposalId(),
+                        "answers-key",
+                        Map.of("q1", List.of("按自然月"), "junk", Map.of("ignored", true)));
+
+        assertEquals(ActionProposal.STATUS_EXECUTED, executed.status());
+        assertEquals(1, executions.get());
+        assertTrue(executed.resultJson().contains("按自然月"));
+        assertTrue(executed.resultJson().contains("请按以上选择继续"));
+        ChatMessage last = chatStore.messages(SESSION).get(chatStore.messages(SESSION).size() - 1);
+        assertTrue(last.content().contains("已提交选择，正在继续处理"));
+    }
+
     private ActionProposal seed(String tool, String status, LocalDateTime expiresAt) {
+        return seed(tool, status, expiresAt, "{\"id\":\"E-001\"}", "禁用员工 E-001");
+    }
+
+    private ActionProposal seed(
+            String tool,
+            String status,
+            LocalDateTime expiresAt,
+            String paramsJson,
+            String summary) {
         String proposalId = UUID.randomUUID().toString();
         ActionProposal proposal =
                 new ActionProposal(
@@ -198,8 +259,8 @@ class ActionProposalServiceTest {
                         0L,
                         "AGENT",
                         tool,
-                        "{\"id\":\"E-001\"}",
-                        "禁用员工 E-001",
+                        paramsJson,
+                        summary,
                         ActionProposal.RISK_NORMAL,
                         "DEFAULT_MUTATING",
                         status,

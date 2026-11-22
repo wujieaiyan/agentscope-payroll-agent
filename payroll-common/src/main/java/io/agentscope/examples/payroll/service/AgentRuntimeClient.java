@@ -1,6 +1,8 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import io.agentscope.examples.payroll.web.TooManyRequestsException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -105,6 +107,12 @@ public class AgentRuntimeClient {
                 }
                 if (response.statusCode() == 409) {
                     throw new IllegalStateException("轮次已被其它节点接管或已结束");
+                }
+                if (response.statusCode() == 429) {
+                    throw new TooManyRequestsException("运行时繁忙，请稍后重试");
+                }
+                if (response.statusCode() == 503) {
+                    throw new PayrollUnavailableException("运行时不可用");
                 }
                 last =
                         new IllegalStateException(

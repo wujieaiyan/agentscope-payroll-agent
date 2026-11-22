@@ -36,6 +36,10 @@ import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.service.KbChatSettings;
+import io.agentscope.examples.payroll.service.KbContextPrefetcher;
+import io.agentscope.examples.payroll.service.KbSkillClient;
+import io.agentscope.examples.payroll.service.KbSkillGateway;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.ModelCredentialService;
 import io.agentscope.examples.payroll.service.PayrollChatService;
@@ -473,19 +477,84 @@ public class PayrollAgentConfiguration {
             TeamLlmClient teamLlmClient,
             @Value("${payroll.router.enabled:true}") boolean enabled,
             @Value("${payroll.router.timeout-ms:10000}") long timeoutMs,
-            @Value("${payroll.router.min-confidence:0.55}") double minConfidence) {
+            @Value("${payroll.router.min-confidence:0.55}") double minConfidence,
+            @Value("${payroll.chat.kb-context.creative-no-kb:false}") boolean creativeNoKb,
+            @Value("${payroll.router.cache.enabled:true}") boolean cacheEnabled,
+            @Value("${payroll.router.cache.ttl-seconds:300}") long cacheTtlSeconds,
+            @Value("${payroll.router.cache.max-entries:512}") int cacheMaxEntries) {
         AgentRouter router =
                 new AgentRouter(
                         teamLlmClient,
                         enabled,
                         minConfidence,
-                        java.time.Duration.ofMillis(Math.max(500L, timeoutMs)));
+                        java.time.Duration.ofMillis(Math.max(500L, timeoutMs)),
+                        creativeNoKb,
+                        cacheEnabled,
+                        cacheTtlSeconds,
+                        cacheMaxEntries);
         log.info(
-                "[智能体路由] {}，超时={}ms，置信度阈值={}",
+                "[智能体路由] {}，超时={}ms，置信度阈值={}，创作类不检索={}，路由缓存={}（ttl={}s，max={}）",
                 router.enabled() ? "已启用" : "未启用",
                 Math.max(500L, timeoutMs),
-                minConfidence);
+                minConfidence,
+                creativeNoKb,
+                cacheEnabled ? "已启用" : "未启用",
+                cacheTtlSeconds,
+                cacheMaxEntries);
         return router;
+    }
+
+    /** 方案 B 的分阶段开关与材料预算；全部默认关闭。 */
+    @Bean
+    public KbChatSettings kbChatSettings(
+            @Value("${payroll.chat.kb-executor.enabled:false}") boolean executorEnabled,
+            @Value("${payroll.chat.kb-context.enabled:false}") boolean contextEnabled,
+            @Value("${payroll.chat.kb-context.max-results:3}") int maxResults,
+            @Value("${payroll.chat.kb-context.snippet-chars:200}") int snippetChars,
+            @Value("${payroll.chat.kb-context.max-chars:900}") int maxChars,
+            @Value("${payroll.chat.kb-context.min-score:0.0}") double minScore,
+            @Value("${payroll.chat.kb-context.min-overlap-terms:1}") int minOverlapTerms,
+            @Value("${payroll.chat.kb-context.timeout-ms:2000}") long timeoutMs,
+            @Value("${payroll.chat.kb-context.citation-filter.enabled:false}")
+                    boolean citationFilterEnabled,
+            @Value("${payroll.chat.kb-context.creative-no-kb:false}") boolean creativeNoKb) {
+        KbChatSettings settings =
+                new KbChatSettings(
+                        executorEnabled,
+                        contextEnabled,
+                        maxResults,
+                        snippetChars,
+                        maxChars,
+                        minScore,
+                        minOverlapTerms,
+                        timeoutMs,
+                        citationFilterEnabled,
+                        creativeNoKb);
+        log.info(
+                "[知识库][方案B] B0 执行者修复={}，B1 预取注入={}（上限 {} 条/{} 字，截止 {}ms），"
+                        + "B2 引用过滤={}，创作类不检索={}",
+                settings.executorEnabled(),
+                settings.contextEnabled(),
+                settings.maxResults(),
+                settings.maxChars(),
+                settings.timeoutMs(),
+                settings.citationFilterEnabled(),
+                settings.creativeNoKb());
+        return settings;
+    }
+
+    /** 预取复用与工具相同的内部通道；通道未配置或 B1 关闭时只返回空实现，不注册必然失败的能力。 */
+    @Bean
+    public KbContextPrefetcher kbContextPrefetcher(KbChatSettings kbChatSettings) {
+        KbSkillGateway gateway = KbSkillClient.fromEnvironment();
+        if (!kbChatSettings.contextEnabled()) {
+            return KbContextPrefetcher.disabled(kbChatSettings);
+        }
+        if (!gateway.enabled()) {
+            log.warn("[知识库][材料] 预取已开启，但 Web 地址或内部令牌未配置，本轮不预取");
+            return KbContextPrefetcher.disabled(kbChatSettings);
+        }
+        return new KbContextPrefetcher(gateway, kbChatSettings);
     }
 
     /** 语义路由设置：KB 语义与薪酬语义共用嵌入/ES 配置，仅索引与种子不同。 */
@@ -607,6 +676,8 @@ public class PayrollAgentConfiguration {
             AgentRouter router,
             @Qualifier("routeSemanticClassifier") SemanticRouteClassifier semantic,
             @Qualifier("payrollRouteAdvisor") PayrollRouteAdvisor payrollRouteAdvisor,
+            KbChatSettings kbChatSettings,
+            KbContextPrefetcher kbContextPrefetcher,
             @Value("${payroll.orchestrator:legacy}") String orchestrator,
             @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
             @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
@@ -663,7 +734,7 @@ public class PayrollAgentConfiguration {
                         agentRegistry::list,
                         activeTeamService,
                         routingEnabled,
-                        actionConfirmEnabled,
+                        () -> agentRegistry.actionConfirmOverride().orElse(actionConfirmEnabled),
                         actionProposalTtlMinutes,
                         toolSafety,
                         answerCache,
@@ -671,7 +742,9 @@ public class PayrollAgentConfiguration {
                         alwaysConfirmTools,
                         kbPolicy,
                         semantic,
-                        payrollRouteAdvisor);
+                        payrollRouteAdvisor,
+                        kbChatSettings,
+                        kbContextPrefetcher);
     }
 
     /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */

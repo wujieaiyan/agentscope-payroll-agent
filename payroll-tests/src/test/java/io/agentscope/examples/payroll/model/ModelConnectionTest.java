@@ -29,6 +29,17 @@ class ModelConnectionTest {
     }
 
     @Test
+    @DisplayName("凭证版本参与版本键，变化即视为需要重建")
+    void versionKeyIncludesCredentialVersion() {
+        ModelConnection base =
+                connection("dash", "qwen-max", 8192, 1024, 0.2, 120, List.of("stream"), true);
+
+        assertEquals(base.versionKey("v1"), base.versionKey("v1"));
+        assertNotEquals(base.versionKey("v1"), base.versionKey("v2"));
+        assertNotEquals(base.versionKey(null), base.versionKey("env:PAYROLL_KEY"));
+    }
+
+    @Test
     @DisplayName("智能体覆盖只改写显式提供的字段")
     void overlayOnlyTouchesExplicitFields() {
         ModelConnection base =

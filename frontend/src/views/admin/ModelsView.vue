@@ -36,6 +36,27 @@ const connections = computed(() => data.value.connections || []);
 const selectable = computed(() => connections.value.filter((item) => item.enabled));
 const editingEnv = computed(() => editing.value && form.origin === 'ENV');
 
+const planeLabels = { control: '控制面', coding: '编码面', utility: '轻量面' };
+
+function defaultPlanes(id) {
+  if (!id) return [];
+  const current = data.value.defaults || {};
+  return Object.keys(planeLabels)
+    .filter((plane) => current[plane] === id)
+    .map((plane) => planeLabels[plane]);
+}
+
+function staleDefault(id) {
+  return !!id && !selectable.value.some((item) => item.id === id);
+}
+
+const staleDefaults = computed(() => {
+  const current = data.value.defaults || {};
+  return Object.keys(planeLabels)
+    .filter((plane) => staleDefault(current[plane]))
+    .map((plane) => `${planeLabels[plane]}（${connectionName(current[plane])}）`);
+});
+
 function blank() {
   return {
     id: '',
@@ -78,7 +99,8 @@ function sourceClass(row) {
 function connectionName(id) {
   if (!id) return '未配置';
   const hit = connections.value.find((item) => item.id === id);
-  return hit ? `${hit.name}（${hit.model || '未填模型'}）` : id;
+  if (!hit) return id;
+  return `${hit.name}（${hit.model || '未填模型'}）${hit.enabled ? '' : ' · 已停用'}`;
 }
 
 async function load() {
@@ -306,6 +328,9 @@ onMounted(load);
           控制面
           <select v-model="defaults.control" :disabled="!data.writable">
             <option value="">跟随环境变量（PAYROLL_MODEL）</option>
+            <option v-if="staleDefault(defaults.control)" :value="defaults.control" disabled>
+              {{ connectionName(defaults.control) }}（请先切换）
+            </option>
             <option v-for="item in selectable" :key="item.id" :value="item.id">
               {{ item.name }} · {{ item.model }}
             </option>
@@ -316,6 +341,9 @@ onMounted(load);
           轻量面
           <select v-model="defaults.utility" :disabled="!data.writable">
             <option value="">跟随控制面</option>
+            <option v-if="staleDefault(defaults.utility)" :value="defaults.utility" disabled>
+              {{ connectionName(defaults.utility) }}（请先切换）
+            </option>
             <option v-for="item in selectable" :key="item.id" :value="item.id">
               {{ item.name }} · {{ item.model }}
             </option>
@@ -326,6 +354,9 @@ onMounted(load);
           编码面
           <select v-model="defaults.coding" :disabled="!data.writable || data.envCodingLocked">
             <option value="">未配置（写代码任务将失败）</option>
+            <option v-if="staleDefault(defaults.coding)" :value="defaults.coding" disabled>
+              {{ connectionName(defaults.coding) }}（请先切换）
+            </option>
             <option v-for="item in selectable" :key="item.id" :value="item.id">
               {{ item.name }} · {{ item.model }}
             </option>
@@ -334,6 +365,9 @@ onMounted(load);
           <span v-else class="hint">需上下文 ≥ 32768 且声明 tools</span>
         </label>
       </div>
+      <p v-if="staleDefaults.length" class="error-text">
+        仍被使用面引用的停用连接：{{ staleDefaults.join('、') }}。请先切换到启用中的连接，否则对应请求会直接报错。
+      </p>
       <div class="toolbar">
         <span class="spacer"></span>
         <button class="ghost" :disabled="!data.writable" @click="saveDefaults">保存默认</button>
@@ -356,7 +390,11 @@ onMounted(load);
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in connections" :key="row.id">
+          <tr
+            v-for="row in connections"
+            :key="row.id"
+            :class="{ 'row-warn': !row.enabled && defaultPlanes(row.id).length }"
+          >
             <td>
               <strong>{{ row.name }}</strong>
               <div class="hint mono">{{ row.id }}</div>
@@ -380,6 +418,13 @@ onMounted(load);
             <td>
               <span class="badge" :class="row.enabled ? 'green' : 'red'">
                 {{ row.enabled ? '启用' : '停用' }}
+              </span>
+              <span
+                v-if="!row.enabled && defaultPlanes(row.id).length"
+                class="badge red"
+                :title="`仍是${defaultPlanes(row.id).join('、')}的默认连接`"
+              >
+                仍是默认
               </span>
             </td>
             <td>

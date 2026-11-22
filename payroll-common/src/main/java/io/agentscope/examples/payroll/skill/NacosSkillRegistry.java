@@ -476,20 +476,34 @@ public final class NacosSkillRegistry {
             if (current != null && now - current.fetchedAt() < ttlMillis) {
                 return current;
             }
-            current = load();
+            current = load(current);
             snapshot = current;
             return current;
         }
     }
 
-    private Snapshot load() {
+    private Snapshot load(Snapshot previous) {
         if (!settings.enabled()) {
             return new Snapshot(List.of(), Map.of(), System.currentTimeMillis());
         }
         long started = System.nanoTime();
         try {
+            NacosConfigClient.ListResult listed = client.listResult("*" + DATA_ID_SUFFIX);
+            if (!listed.ok()) {
+                // 失败也写入 fetchedAt，避免 Nacos 故障期间每次请求都重试。
+                if (previous != null && !previous.remotes().isEmpty()) {
+                    log.warn(
+                            "[Skill] 列出 Nacos 技能失败，沿用上次快照（{} 个）：{}",
+                            previous.remotes().size(),
+                            listed.warning());
+                    return new Snapshot(
+                            previous.remotes(), previous.byId(), System.currentTimeMillis());
+                }
+                log.warn("[Skill] 列出 Nacos 技能失败且无历史快照，仅保留内置技能：{}", listed.warning());
+                return new Snapshot(List.of(), Map.of(), System.currentTimeMillis());
+            }
             Map<String, RemoteSkill> byId = new LinkedHashMap<>();
-            for (NacosConfigClient.ConfigEntry entry : client.list("*" + DATA_ID_SUFFIX)) {
+            for (NacosConfigClient.ConfigEntry entry : listed.entries()) {
                 String dataId = entry.dataId();
                 if (!dataId.startsWith(".") && !dataId.endsWith(DATA_ID_SUFFIX)) {
                     continue;
@@ -501,7 +515,8 @@ public final class NacosSkillRegistry {
                 byId.put(id, parseRemote(id, entry));
             }
             // 只解析 frontmatter；文件包在 detail/files 时按 dataId 单条读取（见 filesOf）。
-            fileCache.clear();
+            // 仅裁剪已删除技能，避免 Nacos 抖动时把文件缓存整份丢掉。
+            fileCache.keySet().retainAll(byId.keySet());
             log.info("[Skill] 从 Nacos 加载 {} 个技能配置", byId.size());
             return new Snapshot(
                     List.copyOf(byId.values()), Map.copyOf(byId), System.currentTimeMillis());

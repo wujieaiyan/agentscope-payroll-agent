@@ -19,6 +19,7 @@ public final class TurnMetrics {
     public static final String EVENT_BYTES = "payroll.chat.turn.event.bytes";
     public static final String REPLAY_EVENTS = "payroll.chat.turn.replay.events";
     public static final String RESUME = "payroll.chat.turn.resume";
+    public static final String STREAM_REJECTED = "payroll.chat.stream.rejected";
 
     private static volatile MeterRegistry registry = Metrics.globalRegistry;
     private static volatile Counter gap;
@@ -27,6 +28,7 @@ public final class TurnMetrics {
     private static volatile DistributionSummary eventBytes;
     private static volatile DistributionSummary replayEvents;
     private static volatile Timer resume;
+    private static volatile Counter streamRejected;
 
     private TurnMetrics() {}
 
@@ -38,6 +40,7 @@ public final class TurnMetrics {
         eventBytes = null;
         replayEvents = null;
         resume = null;
+        streamRejected = null;
     }
 
     /** 续流断点缺口：客户端游标早于仍保留的事件。 */
@@ -111,6 +114,19 @@ public final class TurnMetrics {
             replayEvents = summary;
         }
         summary.record(count);
+    }
+
+    /** 对话执行队列已满被拒绝的请求数。 */
+    public static void streamRejected() {
+        Counter counter = streamRejected;
+        if (counter == null) {
+            counter =
+                    Counter.builder(STREAM_REJECTED)
+                            .description("对话执行队列满被拒绝的请求数")
+                            .register(registry);
+            streamRejected = counter;
+        }
+        counter.increment();
     }
 
     /** 续流追平耗时：从建立连接（或首次重放）到事件日志耗尽。 */

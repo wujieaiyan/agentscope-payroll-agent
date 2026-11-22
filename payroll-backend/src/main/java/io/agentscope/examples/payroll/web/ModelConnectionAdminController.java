@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.web;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.model.ModelCatalog;
@@ -13,6 +15,7 @@ import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ModelCredentialService;
 import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
+import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
@@ -44,19 +47,20 @@ public class ModelConnectionAdminController {
             String id,
             String name,
             String provider,
-            String baseUrl,
+            @JsonProperty("baseUrl") @JsonAlias("base_url") String baseUrl,
             String model,
-            String apiKey,
-            String apiKeyEnv,
-            Integer contextWindow,
-            Integer maxTokens,
+            @JsonProperty("apiKey") @JsonAlias("api_key") String apiKey,
+            @JsonProperty("apiKeyEnv") @JsonAlias("api_key_env") String apiKeyEnv,
+            @JsonProperty("contextWindow") @JsonAlias("context_window") Integer contextWindow,
+            @JsonProperty("maxTokens") @JsonAlias("max_tokens") Integer maxTokens,
             Double temperature,
-            Integer timeoutSeconds,
+            @JsonProperty("timeoutSeconds") @JsonAlias("timeout_seconds") Integer timeoutSeconds,
             List<String> capabilities,
             Boolean enabled,
             Long revision) {}
 
-    public record CredentialInput(String apiKey, Long revision) {}
+    public record CredentialInput(
+            @JsonProperty("apiKey") @JsonAlias("api_key") String apiKey, Long revision) {}
 
     public record DefaultsInput(String control, String coding, String utility, Long revision) {}
 
@@ -104,6 +108,7 @@ public class ModelConnectionAdminController {
 
     @PostMapping
     public ApiResponse create(@RequestBody ConnectionInput input, HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(input.revision()));
         String operator = operator(request);
         if (isBlank(input.id())) {
             throw new PayrollException("请填写连接 ID");
@@ -148,6 +153,7 @@ public class ModelConnectionAdminController {
             @PathVariable String id,
             @RequestBody ConnectionInput input,
             HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(input.revision()));
         String operator = operator(request);
         ModelConnection existing = requireEditable(id);
         Map<String, Object> before = view(existing);
@@ -201,6 +207,7 @@ public class ModelConnectionAdminController {
             @PathVariable String id,
             @RequestBody CredentialInput input,
             HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(input.revision()));
         ModelConnection existing = requireEditable(id);
         if (existing.ollama()) {
             throw new PayrollException("Ollama 连接不需要 API Key");
@@ -239,6 +246,7 @@ public class ModelConnectionAdminController {
             @PathVariable String id,
             @RequestParam(name = "revision", required = false) Long revision,
             HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(revision));
         ModelConnection existing = requireEditable(id);
         String operator = operator(request);
         credentials.clear(id);
@@ -261,6 +269,7 @@ public class ModelConnectionAdminController {
             @PathVariable String id,
             @RequestParam(name = "revision", required = false) Long revision,
             HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(revision));
         ModelConnection existing = requireEditable(id);
         List<String> references = agentReferences(id);
         if (!references.isEmpty()) {
@@ -305,6 +314,7 @@ public class ModelConnectionAdminController {
 
     @PutMapping("/defaults")
     public ApiResponse defaults(@RequestBody DefaultsInput input, HttpServletRequest request) {
+        AuditContext.markRevision(revisionText(input.revision()));
         ModelDefaults before = registry.catalog().defaults();
         ModelDefaults next =
                 new ModelDefaults(input.control(), input.coding(), input.utility());
@@ -438,6 +448,10 @@ public class ModelConnectionAdminController {
 
     private static long revisionOf(Long revision) {
         return revision == null ? -1L : revision;
+    }
+
+    private static String revisionText(Long revision) {
+        return revision == null ? null : revision.toString();
     }
 
     private static String trimmed(String value) {

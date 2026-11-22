@@ -13,6 +13,7 @@ import io.agentscope.examples.payroll.model.ModelConfigException;
 import io.agentscope.examples.payroll.model.ModelConnection;
 import io.agentscope.examples.payroll.model.ModelConnections;
 import io.agentscope.examples.payroll.model.ModelDefaults;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -137,8 +138,8 @@ class ModelConnectionRegistryTest {
     }
 
     @Test
-    @DisplayName("默认连接被停用后控制面解析失败")
-    void disabledDefaultFails() throws IOException {
+    @DisplayName("停用仍是默认值的连接被拒绝，默认连接保持可用")
+    void disablingDefaultRejected() throws IOException {
         nacos = new FakeNacos();
         ModelConnectionRegistry registry = registry(true);
         ModelCatalog catalog =
@@ -146,18 +147,49 @@ class ModelConnectionRegistryTest {
                         connection("dash", "qwen-max", 8192, List.of("stream"), true),
                         0,
                         "admin");
-        catalog = registry.saveDefaults(new ModelDefaults("dash", "", ""), catalog.revision(), "admin");
-        registry.saveConnection(
-                connection("dash", "qwen-max", 8192, List.of("stream"), false),
-                catalog.revision(),
-                "admin");
+        catalog = registry.saveDefaults(new ModelDefaults("dash", "", "dash"), catalog.revision(), "admin");
 
+        long revision = catalog.revision();
         ModelConfigException error =
                 assertThrows(
                         ModelConfigException.class,
-                        () -> registry.resolveControl(AgentModelSettings.none()));
-        assertEquals(ModelConfigException.CONNECTION_UNAVAILABLE, error.code());
-        assertTrue(error.getMessage().contains("停用"), error.getMessage());
+                        () ->
+                                registry.saveConnection(
+                                        connection("dash", "qwen-max", 8192, List.of("stream"), false),
+                                        revision,
+                                        "admin"));
+        assertEquals(ModelConfigException.INVALID_CONNECTION, error.code());
+        assertTrue(error.getMessage().contains("默认"), error.getMessage());
+
+        assertEquals("dash", registry.resolveControl(AgentModelSettings.none()).id());
+        assertTrue(registry.find("dash").orElseThrow().enabled());
+        assertEquals(revision, registry.revision());
+    }
+
+    @Test
+    @DisplayName("停用非默认连接不受限制")
+    void disablingNonDefaultAllowed() throws IOException {
+        nacos = new FakeNacos();
+        ModelConnectionRegistry registry = registry(true);
+        ModelCatalog catalog =
+                registry.saveConnection(
+                        connection("dash", "qwen-max", 8192, List.of("stream"), true),
+                        0,
+                        "admin");
+        catalog =
+                registry.saveConnection(
+                        connection("spare", "qwen-max", 8192, List.of("stream"), true),
+                        catalog.revision(),
+                        "admin");
+        catalog = registry.saveDefaults(new ModelDefaults("dash", "", ""), catalog.revision(), "admin");
+
+        registry.saveConnection(
+                connection("spare", "qwen-max", 8192, List.of("stream"), false),
+                catalog.revision(),
+                "admin");
+
+        assertFalse(registry.find("spare").orElseThrow().enabled());
+        assertEquals("dash", registry.resolveControl(AgentModelSettings.none()).id());
     }
 
     @Test
@@ -362,6 +394,34 @@ class ModelConnectionRegistryTest {
     }
 
     @Test
+    @DisplayName("写路径读取 Nacos 失败时 fail-closed，503 且不写入旧目录")
+    void writeFailsClosedWhenNacosReadFails() throws IOException {
+        nacos = new FakeNacos();
+        ModelConnectionRegistry registry = registry(true);
+        registry.saveConnection(
+                connection("dash", "qwen-max", 8192, List.of("stream"), true), 0, "admin");
+        int writesBefore = nacos.writes.get();
+
+        nacos.failReads = true;
+        PayrollUnavailableException error =
+                assertThrows(
+                        PayrollUnavailableException.class,
+                        () ->
+                                registry.saveConnection(
+                                        connection("other", "m", 8192, List.of(), true),
+                                        1,
+                                        "admin"));
+        assertTrue(error.getMessage().contains("payroll-models.json"), error.getMessage());
+        assertEquals(writesBefore, nacos.writes.get(), "读取失败时不得写入");
+        assertTrue(registry.find("dash").isPresent(), "读路径仍可回落上次目录");
+
+        nacos.failReads = false;
+        registry.saveConnection(
+                connection("other", "m", 8192, List.of(), true), 1, "admin");
+        assertTrue(registry.find("other").isPresent());
+    }
+
+    @Test
     @DisplayName("Nacos 未启用时只读，解析走环境连接")
     void disabledNacosIsReadOnly() throws IOException {
         nacos = new FakeNacos();
@@ -423,6 +483,7 @@ class ModelConnectionRegistryTest {
         private final Map<String, String> configs = new ConcurrentHashMap<>();
         private final java.util.concurrent.atomic.AtomicInteger writes =
                 new java.util.concurrent.atomic.AtomicInteger();
+        private volatile boolean failReads;
 
         private FakeNacos() throws IOException {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -432,6 +493,10 @@ class ModelConnectionRegistryTest {
 
         private void handle(HttpExchange exchange) throws IOException {
             if ("GET".equals(exchange.getRequestMethod())) {
+                if (failReads) {
+                    respond(exchange, 500, "injected read failure");
+                    return;
+                }
                 String dataId = query(exchange).get("dataId");
                 String body = dataId == null ? null : configs.get(dataId);
                 if (body == null) {

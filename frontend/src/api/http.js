@@ -1,9 +1,10 @@
 /** 统一请求封装：ApiResponse{status,data,message}，401 跳回登录页。 */
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, data = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -36,7 +37,8 @@ export async function api(path, options = {}) {
   if (!response.ok || (payload && payload.status === 'ERROR')) {
     throw new ApiError(
       (payload && payload.message) || `请求失败：HTTP ${response.status}`,
-      response.status
+      response.status,
+      (payload && payload.data) || null
     );
   }
   return payload ? payload.data : null;
@@ -79,7 +81,11 @@ async function unwrap(response, fallback) {
     }
   }
   if (!response.ok || (payload && payload.status === 'ERROR')) {
-    throw new ApiError((payload && payload.message) || `${fallback}：HTTP ${response.status}`, response.status);
+    throw new ApiError(
+      (payload && payload.message) || `${fallback}：HTTP ${response.status}`,
+      response.status,
+      (payload && payload.data) || null
+    );
   }
   return payload ? payload.data : null;
 }

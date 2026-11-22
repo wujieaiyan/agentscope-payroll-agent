@@ -178,6 +178,8 @@ String modelQuestion = AttachmentContext.compose(question, attachmentText);
 | D3 | 原文件保留 | **已确认：保留并可下载** |
 | D4 | 已绑定消息的附件 | 随会话删除，消息内保留元数据快照；不提供单条删除 |
 | D5 | 单轮限制 | 5 个文件 / 单文件 20MB / 注入 30000 字符 |
+| D6 | 图片识别引擎演进 | **已定（2026-11-21）**：S2 引入 RapidOCR-Java（JNI 调用 RapidOcrOnnx 原生库，Java 侧无 Python 依赖）作为主识别档，Tesseract 降为降级档；是否彻底下线 Tesseract 由 S2 黄金集验收决定 |
+| D7 | 云端 OCR / 视觉模型 | **未定**：默认关闭。输入含证件号、工资条等 PII，开启需租户级显式配置并留审计 |
 
 ## 13. 任务拆分（确认后执行）
 
@@ -186,3 +188,76 @@ String modelQuestion = AttachmentContext.compose(question, attachmentText);
 3. P0 前端：附件按钮/拖拽/粘贴、chips 与预览、历史展示、导出。
 4. P0 测试与端到端：解析单测、契约兼容、本机 UI 验收。
 5. P1 运维：孤儿清理任务、审计事件、配置项（`payroll.chat.attachment.*`）。
+
+## 14. OCR 能力演进排期（2026-11-21 更新）
+
+> 适用范围：对话附件解析与知识库扫描件解析共用同一套识别档位。
+> 背景：真实样本（952×610 手机翻拍毕业证）上 Tesseract 5.4 输出大量乱码，叠加 `min-confidence=0.6` 词级过滤后 138 字符仅剩 74 字符，证件号等关键字段被丢弃。结论：**先修管道，再换引擎**。
+
+**目标形态**：
+原图落盘 → `PARSING` → 入队 → `ImageTextExtractor` 链（Tess4J 降级档 → 质量门 → RapidOCR 主档 → 质量门 → [S3] 视觉模型）→ 写文本 + `extraction_meta` → `READY` / `FAILED`（错误分类）。
+
+**失败分类**（阈值由黄金集校准，不拍数字）：
+- `NO_ENGINE`：引擎/模型未就绪；
+- `NO_TEXT`：结果低于质量门（字符数、中文占比、关键字段命中）；
+- `OVER_LIMIT`：页数/大小/预算超限。
+
+### S1 管道正确性（先做）
+
+1. 解析移出 HTTP 线程：上传接口只做落盘 + 建任务，复用 `KbIngestService` 的任务语义（QUEUED→RUNNING、可取消、可重试）；`PARSING` 从请求内瞬时态改为真实的异步中间态。
+2. 提取溯源：`chat_attachments` 增加 `extraction_meta`（engine / model / version / languages / psm / confidence / latency_ms / source_sha256），支撑复现、A/B 与审计。
+3. 停止破坏性过滤：词级置信度只做标记，不再直接丢弃文本，由下游判定。
+4. 前端：`PARSING` 进度、提取文本预览、「重新识别」入口（重识别依赖第 2 项）。
+
+**验收**：上传接口 p99 不含模型调用；任一附件可按 `source_sha256` 重跑并对比结果。
+
+### S2 引擎升级（本轮更新：RapidOCR-Java）
+
+**2.0 降级档进程内化（可选，约 0.5d）**
+Tesseract CLI → Tess4J 5.19（JNA 包装，进程内），去掉对 `tesseract.exe` 绝对路径与每次起子进程的依赖；语言包继续复用现有 `tessdata`。
+
+**2.1 端口与适配器（约 1d）**
+- 新增 `ImageTextExtractor` 端口，返回 `{ text, words/boxes, confidence, engine, modelVersion, latencyMs }`。
+- 适配器：`Tess4jExtractor`（降级档）、`RapidOcrExtractor`（主档）。
+- 由质量门选择档位，禁止 if/else 硬编码引擎名；每档独立超时、熔断、内容哈希缓存（同图不重复推理）。
+
+**2.2 RapidOCR-Java 接入（约 1–2d）**
+- 依赖（0.0.7 为 JNI 壳，原生库与模型为独立构件）：
+  - `io.github.mymonstercat:rapidocr:0.0.7`；
+  - `io.github.mymonstercat:rapidocr-onnx-windows-x86_64:1.2.2`（约 6MB，含 ONNX 原生库，另有 linux/macos 构件）；
+  - `io.github.mymonstercat:rapidocr-onnx-models:1.2.2`（约 26MB，含 det/cls/rec 模型与字典）。
+- 模型首次运行时解压到临时目录（`%TEMP%/ocrJava/onnx`），生产环境需显式指定可持久化目录，避免容器重建后重新解压。
+- 运行位置：`payroll-backend` 进程内，**不放入沙箱技能容器**。
+- 版本策略：当前为 0.0.x，API 可能变动；`pom` 固定版本，适配层隔离第三方 API，必要时可切换为自组 `com.microsoft.onnxruntime` + PP-OCR ONNX 模型。
+
+**2.3 配置与部署**
+- 新增 `payroll.kb.ocr.engine`（`tesseract | rapidocr | chain`，默认 `chain`）、`payroll.kb.ocr.quality-gate.*`、`payroll.kb.ocr.rapidocr.model-dir`。
+- 模型与原生库不入 git：部署期下载 + SHA-256 校验；离线构建需预置 `~/.m2` 与模型目录。
+- 资源预算：ONNX session 常驻内存按 200–400MB 估算（mobile 模型），与异步队列并发上限一并设定。
+
+**2.4 质量门与验收**
+- 黄金集：现有真实翻拍样本 + 构造样本（倾斜、低光、印章遮挡、表格截图），按字段类型统计 CER 与关键字段命中率。
+- 门槛：RapidOCR 档关键字段命中率相对 Tesseract 基线有明确增量；p95 延迟与内存峰值在预算内；质量门误判率可接受。
+- 未达标时保留 `chain`，但主档仍为 Tesseract，RapidOCR 只做影子运行（结果写 `extraction_meta`，不注入）。
+
+**2.5 冒烟基准（2026-11-21，本机 JDK 17 / Windows x64）**
+- 合成黄金集：16 张（4 类文本 × 清晰 / 旋转 4° / 模糊 / 0.5 倍缩放），全为假数据，覆盖中文、日期、金额与 18 位编号。
+- CER：RapidOCR **0.0005**（16 张，最差 0.009）；Tesseract 5.4 psm 3 **0.1572**（清晰组 0.3204，主要问题是丢行与串行）。
+- 真实翻拍样本（952×610）：RapidOCR 177 字符、中文占比 0.69、命中 12/15 个结构短语（含「证书编号」）；Tesseract psm 3 为 132 字符、0.42、9/15；应用现行 0.6 过滤后仅 107 字符，18 位编号整段被丢弃。
+- 延迟（CPU）：1000×700 合成图约 390ms；952×610 真实图约 690ms；2 倍放大后约 1.3s。
+- 编号稳定性：真实样本 18 位编号在 1× 与 2× 两次推理结果完全一致；Tesseract 在 psm 3/6/11 下分别得到 18/9/12 位，互相不一致。
+- 局限：合成集不能替代真实标注集，真实场景 CER 仍需按 2.4 建集后复测。
+
+### S3 可选第三档：视觉模型
+
+- 补 `CAP_VISION` 能力位（当前 `ModelConnection` 仅有 `tools` / `stream`）、`ModelConnectionTester` 探测、注册表按能力过滤。
+- 仅对质量门判定为 `NO_TEXT` 的图片触发；默认关闭。
+- 用量计量、租户配额、并发上限。
+
+### S4 合规与体验收尾
+
+- PII 出口治理：证件、工资条默认只走本地档；云端 OCR/视觉需租户级显式开启并审计；PDF `max-pages` 设上限后才允许云端。
+- 管理端配置页：引擎开关、质量门阈值、出口白名单可视化。
+- 指标：`ocr_requests_total{engine,outcome}`、耗时分布、质量分、`vision_fallback_rate`。
+
+**依赖关系**：S2 依赖 S1 的异步与溯源；S3 依赖 S2 的质量门；S4 的云开关依赖 S3 的计量。

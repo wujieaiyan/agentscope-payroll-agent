@@ -1,15 +1,21 @@
 package io.agentscope.examples.payroll.kb;
 
+import io.agentscope.examples.payroll.domain.ExtractionMeta;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.kb.KbConfigModels.OcrConfig;
 import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.Heading;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.PageRange;
+import io.agentscope.examples.payroll.kb.ocr.ImageTextResult;
+import io.agentscope.examples.payroll.kb.ocr.OcrExtractionService;
+import io.agentscope.examples.payroll.kb.ocr.OcrFailure;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -64,9 +70,11 @@ public class KbParserService {
     }
 
     private final KbOcrService ocrService;
+    private final OcrExtractionService extractionService;
 
-    public KbParserService(KbOcrService ocrService) {
+    public KbParserService(KbOcrService ocrService, OcrExtractionService extractionService) {
         this.ocrService = ocrService;
+        this.extractionService = extractionService;
     }
 
     public KbParsedDocument parse(Path file, String ext) {
@@ -98,21 +106,17 @@ public class KbParserService {
         }
     }
 
-    /** 对话附件解析：只接受 Word/Excel/图片，返回纯文本；失败原因直接面向用户。 */
-    public String parseChatAttachment(Path file, String ext) {
+    /** 对话附件解析：返回纯文本与提取溯源；失败原因直接面向用户。 */
+    public ChatExtraction parseChatAttachment(Path file, String ext) {
         String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         try {
             return switch (normalized) {
-                case "docx" -> parseDocx(file).text();
-                case "xlsx", "xls" -> parseExcel(file).text();
-                case "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff" -> parseImage(file);
+                case "docx", "xlsx", "xls" -> parseNativeAttachment(file, normalized);
+                case "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff" -> parseImageAttachment(file);
                 default -> throw new PayrollException("暂不支持该附件格式，请上传 docx/xlsx 或图片");
             };
-        } catch (PayrollException e) {
-            throw e;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PayrollException("附件解析被中断，请重试");
+        } catch (PayrollException | OcrFailure e) {
+            throw e instanceof PayrollException error ? error : new PayrollException(e.getMessage());
         } catch (IOException e) {
             throw new PayrollException("解析附件失败：" + e.getMessage());
         } catch (RuntimeException e) {
@@ -121,23 +125,50 @@ public class KbParserService {
         }
     }
 
-    private String parseImage(Path file) throws IOException, InterruptedException {
-        if (!ocrService.enabled() || !ocrService.available()) {
-            throw new PayrollException("图片识别不可用：未找到 OCR 引擎 tesseract");
-        }
+    /** 图片附件走档位链 OCR，返回实际生效的引擎与质量门结论。 */
+    private ChatExtraction parseImageAttachment(Path file) throws IOException {
         BufferedImage image = ImageIO.read(file.toFile());
         if (image == null) {
             throw new PayrollException("无法解码图片，请上传 PNG/JPG 等常见格式");
         }
-        ParseConfig config = KbConfigModels.defaultParse();
-        OcrConfig ocr = config.ocr == null ? new OcrConfig() : config.ocr;
-        String text =
-                ocrService.recognize(
-                        image, ocrService.resolveLanguages(ocr.languages), ocr.minConfidence);
+        OcrConfig ocr = KbConfigModels.defaultParse().ocr;
+        String languages = ocrService.resolveLanguages(ocr == null ? null : ocr.languages);
+        ImageTextResult result = extractionService.extract(image, languages);
+        String text = result.text();
         if (text == null || text.isBlank()) {
             throw new PayrollException("图片未识别出文字，请上传更清晰的截图");
         }
-        return text;
+        return new ChatExtraction(text, result.toMeta(text.strip().length()));
+    }
+
+    /** Word/Excel 原生解析不经过 OCR 引擎链，只记录类型、耗时与原文哈希。 */
+    private ChatExtraction parseNativeAttachment(Path file, String ext) throws IOException {
+        long started = System.currentTimeMillis();
+        KbParsedDocument document =
+                switch (ext) {
+                    case "docx" -> parseDocx(file);
+                    case "xlsx", "xls" -> parseExcel(file);
+                    default -> throw new PayrollException("暂不支持的文档类型：" + ext);
+                };
+        String text = document.text();
+        return new ChatExtraction(
+                text,
+                ExtractionMeta.nativeParse(
+                        ext, sha256(file), System.currentTimeMillis() - started, text.length()));
+    }
+
+    private static String sha256(Path file) throws IOException {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file));
+            StringBuilder builder = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                builder.append(Character.forDigit((value >> 4) & 0xF, 16));
+                builder.append(Character.forDigit(value & 0xF, 16));
+            }
+            return builder.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     private KbParsedDocument parsePdf(Path file, ParseConfig config, PageListener listener)
@@ -208,13 +239,14 @@ public class KbParserService {
         if (blankPages.isEmpty()) {
             return new OcrStats(0, 0, 0);
         }
-        if (!ocrService.enabled() || !ocrService.available()) {
+        boolean ocrEnabled = extractionService.enabled();
+        if (!ocrEnabled || !extractionService.available()) {
             if (layerChars < MIN_PAGE_TEXT_CHARS) {
                 throw new PayrollException(
-                        ocrService.enabled()
-                                ? "该 PDF 为扫描件（无文字层），但未找到 OCR 引擎 tesseract。"
-                                        + "请安装 Tesseract（含 chi_sim 语言包），或用 payroll.kb.ocr.command 指定可执行文件，"
-                                        + "也可改用带文字层的 PDF"
+                        ocrEnabled
+                                ? "该 PDF 为扫描件（无文字层），但未找到可用的 OCR 引擎"
+                                        + "（Tesseract/RapidOCR）。请安装 Tesseract（含 chi_sim 语言包），"
+                                        + "或用 payroll.kb.ocr.command 指定可执行文件，也可改用带文字层的 PDF"
                                 : "该 PDF 为扫描件（无文字层），OCR 已被关闭"
                                         + "（payroll.kb.ocr.enabled=false），请启用 OCR 或改用带文字层的 PDF");
             }
@@ -247,12 +279,9 @@ public class KbParserService {
             try {
                 BufferedImage image =
                         renderer.renderImageWithDPI(pageIndex, ocrService.dpi(), ImageType.RGB);
-                String text = ocrService.recognize(image, languages, ocrConfig.minConfidence);
-                pageTexts.set(pageIndex, text == null ? "" : text);
+                ImageTextResult result = extractionService.extract(image, languages);
+                pageTexts.set(pageIndex, result.text() == null ? "" : result.text());
                 ocrPages++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new PayrollException("解析被中断，请重试入库");
             } catch (IOException | RuntimeException e) {
                 skipped++;
                 log.warn("[知识库] 第 {} 页 OCR 失败：{}", pageIndex + 1, e.getMessage());
@@ -495,5 +524,9 @@ public class KbParserService {
         List<PageRange> pages =
                 content.isEmpty() ? List.of() : List.of(new PageRange(1, 0, content.length()));
         return new KbParsedDocument(content, content.isEmpty() ? 0 : 1, pages, headings);
+    }
+
+    /** 对话附件解析结果：文本 + 提取溯源，供落库与前端展示引擎信息。 */
+    public record ChatExtraction(String text, ExtractionMeta meta) {
     }
 }

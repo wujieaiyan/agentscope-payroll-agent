@@ -25,6 +25,7 @@ final class ConversationContext {
     private static final int SUMMARY_LIMIT = 900;
     private static final int QUESTION_LIMIT = 240;
     private static final int ANSWER_LIMIT = 500;
+    static final int CONTINUATION_LIMIT = 600;
 
     record Turn(String question, String answer) {
     }
@@ -78,16 +79,57 @@ final class ConversationContext {
 
     /** 在同一位置注入偏好前缀块：偏好 → 摘要/历史 → 历史线索 → 本轮问题。 */
     String augment(String question, String memoryBlock, String prefixBlock) {
+        return augment(question, memoryBlock, prefixBlock, "");
+    }
+
+    /** 知识库材料块位于历史线索之后、本轮问题之前；为空时输出与旧重载逐字一致。 */
+    String augment(String question, String memoryBlock, String prefixBlock, String materialBlock) {
+        return augment(question, memoryBlock, prefixBlock, materialBlock, "");
+    }
+
+    /** 续写块紧跟历史线索，只用于同一角色延续上一轮答复的语气与内容。 */
+    String augment(
+            String question,
+            String memoryBlock,
+            String prefixBlock,
+            String materialBlock,
+            String continuationBlock) {
         String prefix = prefixBlock == null ? "" : prefixBlock.trim();
         String history = render();
+        String continuation = continuationBlock == null ? "" : continuationBlock.trim();
         String memory = memoryBlock == null ? "" : memoryBlock.trim();
-        if (prefix.isEmpty() && history.isBlank() && memory.isEmpty()) {
+        String material = materialBlock == null ? "" : materialBlock.trim();
+        if (prefix.isEmpty()
+                && history.isBlank()
+                && continuation.isEmpty()
+                && memory.isEmpty()
+                && material.isEmpty()) {
             return question;
         }
         StringBuilder builder = new StringBuilder(prefix);
         appendBlock(builder, history);
+        appendBlock(builder, continuation);
         appendBlock(builder, memory);
+        appendBlock(builder, material);
         return builder.append("\n\n【本轮问题】\n").append(question).toString();
+    }
+
+    /**
+     * 上一轮助手答复的续写依据：同一智能体被追问、续写或修改时注入，
+     * 让语气与主题延续下去；数值仍必须由工具重新获取。
+     */
+    static String continuationBlock(String answer) {
+        String text = answer == null ? "" : answer.trim();
+        if (text.isBlank()) {
+            return "";
+        }
+        return """
+                【上一轮助手答复｜仅用于延续语气与内容】
+                %s
+                保持同一角色与主题继续回答；其中出现的员工、部门、期间可作指代线索，
+                金额、税额、考勤与政策必须重新调用工具获取，禁止直接复述其中数值。
+                【续写依据结束】"""
+                .formatted(truncate(text, CONTINUATION_LIMIT));
     }
 
     private static void appendBlock(StringBuilder builder, String block) {
@@ -148,6 +190,16 @@ final class ConversationContext {
 
     int recentTurnCount() {
         return turns.size();
+    }
+
+    /** 最近一轮用户问题；没有保留的原始轮次时返回空串，用于短问的检索补全。 */
+    String lastQuestion() {
+        return turns.isEmpty() ? "" : turns.get(turns.size() - 1).question();
+    }
+
+    /** 最近一轮助手答复；只用于同一角色的续写依据，不进入历史指代段。 */
+    String lastAnswer() {
+        return turns.isEmpty() ? "" : turns.get(turns.size() - 1).answer();
     }
 
     boolean isEmpty() {

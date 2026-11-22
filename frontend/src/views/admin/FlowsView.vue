@@ -21,6 +21,8 @@ const saving = ref(false);
 const activating = ref(false);
 const clearing = ref(false);
 const flows = ref([]);
+const revision = ref('');
+const settingsRevision = ref('');
 const activeFlowId = ref('');
 const meta = ref({ writable: false, location: '', agents: [] });
 const graphNodes = ref([]);
@@ -53,6 +55,11 @@ async function reload(preferredId) {
     const [data, metaValue] = await Promise.all([api('/api/admin/flows'), api('/api/admin/flows/meta')]);
     flows.value = (data && data.flows) || [];
     activeFlowId.value = (data && data.activeFlowId) || '';
+    revision.value = (data && data.revision) || (metaValue && metaValue.revision) || '';
+    settingsRevision.value =
+      (data && data.settingsRevision) ||
+      (metaValue && metaValue.settingsRevision) ||
+      '';
     meta.value = metaValue || { writable: false, location: '', agents: [] };
     const wanted =
       preferredId || flow.id || activeFlowId.value || (flows.value[0] && flows.value[0].id);
@@ -63,6 +70,42 @@ async function reload(preferredId) {
   } finally {
     loading.value = false;
   }
+}
+
+function withRevision(path, value) {
+  if (!value) return path;
+  const joiner = path.includes('?') ? '&' : '?';
+  return `${path}${joiner}revision=${encodeURIComponent(value)}`;
+}
+
+/** 409 时只刷新列表与指纹，保留当前画布，避免覆盖用户未保存的编辑。 */
+async function refreshRevisions() {
+  try {
+    const [data, metaValue] = await Promise.all([
+      api('/api/admin/flows'),
+      api('/api/admin/flows/meta'),
+    ]);
+    flows.value = (data && data.flows) || flows.value;
+    activeFlowId.value = (data && data.activeFlowId) || '';
+    revision.value = (data && data.revision) || (metaValue && metaValue.revision) || '';
+    settingsRevision.value =
+      (data && data.settingsRevision) ||
+      (metaValue && metaValue.settingsRevision) ||
+      '';
+    if (metaValue) meta.value = metaValue;
+  } catch (error) {
+    // 刷新失败保留画布，用户可手动刷新
+  }
+}
+
+async function handleWriteError(error) {
+  if (error.status === 409) {
+    errors.value = ['配置已被他人修改，已同步最新版本，请确认画布后重新保存'];
+    toast('配置已被他人修改，已同步最新版本', 'error');
+    await refreshRevisions();
+    return;
+  }
+  toast(error.message, 'error');
 }
 
 function selectFlow(id) {
@@ -156,15 +199,20 @@ async function saveFlow() {
   errors.value = [];
   try {
     const saved = flow.id
-      ? await api(`/api/admin/flows/${encodeURIComponent(flow.id)}`, { method: 'PUT', body })
-      : await api('/api/admin/flows', { method: 'POST', body });
+      ? await api(withRevision(`/api/admin/flows/${encodeURIComponent(flow.id)}`, revision.value), {
+          method: 'PUT',
+          body,
+        })
+      : await api(withRevision('/api/admin/flows', revision.value), { method: 'POST', body });
     toast('流程已保存', 'success');
     await reload(saved.id);
   } catch (error) {
-    errors.value = String(error.message || error)
-      .split('；')
-      .filter(Boolean);
-    toast(error.message, 'error');
+    if (error.status !== 409) {
+      errors.value = String(error.message || error)
+        .split('；')
+        .filter(Boolean);
+    }
+    await handleWriteError(error);
   } finally {
     saving.value = false;
   }
@@ -174,12 +222,14 @@ async function removeFlow() {
   if (!flow.id || !meta.value.writable) return;
   if (!window.confirm(`删除流程「${flow.name}」？`)) return;
   try {
-    await api(`/api/admin/flows/${encodeURIComponent(flow.id)}`, { method: 'DELETE' });
+    await api(withRevision(`/api/admin/flows/${encodeURIComponent(flow.id)}`, revision.value), {
+      method: 'DELETE',
+    });
     toast('流程已删除', 'success');
     flow.id = null;
     await reload();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   }
 }
 
@@ -188,14 +238,23 @@ async function activateFlow() {
   if (!window.confirm('设为全局默认流程会同时取消默认核算智能体，确认继续？')) return;
   activating.value = true;
   try {
-    await api(`/api/admin/flows/${encodeURIComponent(flow.id)}/active`, { method: 'PUT' });
-    toast('已设为全局默认流程，并取消默认核算智能体', 'success');
+    const result = await api(
+      withRevision(`/api/admin/flows/${encodeURIComponent(flow.id)}/active`, settingsRevision.value),
+      { method: 'PUT' }
+    );
+    if (result && result.warning) {
+      toast(result.warning, 'error');
+    } else {
+      toast('已设为全局默认流程，并取消默认核算智能体', 'success');
+    }
     await reload(flow.id);
   } catch (error) {
-    errors.value = String(error.message || error)
-      .split('；')
-      .filter(Boolean);
-    toast(error.message, 'error');
+    if (error.status !== 409) {
+      errors.value = String(error.message || error)
+        .split('；')
+        .filter(Boolean);
+    }
+    await handleWriteError(error);
   } finally {
     activating.value = false;
   }
@@ -206,11 +265,11 @@ async function clearActiveFlow() {
   if (!window.confirm('取消全局默认流程？下一轮对话将回到核算智能体链路。')) return;
   clearing.value = true;
   try {
-    await api('/api/admin/flows/active', { method: 'DELETE' });
+    await api(withRevision('/api/admin/flows/active', settingsRevision.value), { method: 'DELETE' });
     toast('已取消全局默认流程，下一轮对话生效', 'success');
     await reload(flow.id);
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   } finally {
     clearing.value = false;
   }

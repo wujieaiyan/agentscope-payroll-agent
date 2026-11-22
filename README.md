@@ -583,6 +583,13 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   （`chat.action.propose/confirm/execute/cancel/expire`、`chat.action.safety.override`）。
   设计细节与决策记录见 [`docs/routing-action-confirm-spec.md`](docs/routing-action-confirm-spec.md)。
 
+- **点击式人工确认**：管理台「智能体 → 写操作确认」可直接开关（写入 Nacos
+  `payroll-agent-settings.json` 的 `actionConfirm`，运行期按 TTL 生效，未启用 Nacos 时回退
+  `payroll.chat.action-confirm.enabled`）。开启后**所有**写工具都先生成卡片，点「确认执行」才执行。
+  另有 `request_confirmation` 工具，让模型把“要我继续吗”这类正文问句变成确认卡片（带可选细节），
+  确认后前端自动把卡片里的 `followup` 作为下一轮输入发送；该工具始终强制确认，不受开关影响。
+  见 [`docs/chat-confirm-click-spec.md`](docs/chat-confirm-click-spec.md)。
+
 - **角色 Skill 外置（可选）**：三个角色的提示词已拆成 AgentScope 动态技能，系统提示只保留
   金额安全规则与“第一步加载技能”的指令，模型通过 `load_skill_through_path` 按需读取角色说明。
   默认从本机 Nacos 读取；可用 `PAYROLL_NACOS_ENABLED=false` 回到纯代码内置版本，

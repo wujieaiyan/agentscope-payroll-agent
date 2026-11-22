@@ -156,10 +156,11 @@ class NacosSkillRepositoryTest {
                 new NacosSkillRepository(
                         settings,
                         dataId -> Optional.ofNullable(configs.get(dataId)),
-                        pattern -> configs.entrySet().stream()
-                                .map(entry -> new NacosConfigClient.ConfigEntry(
-                                        entry.getKey(), entry.getValue(), 1L))
-                                .toList(),
+                        pattern -> NacosConfigClient.ListResult.ok(
+                                configs.entrySet().stream()
+                                        .map(entry -> new NacosConfigClient.ConfigEntry(
+                                                entry.getKey(), entry.getValue(), 1L))
+                                        .toList()),
                         clock()::get);
 
         List<String> names = repository.getAllSkillNames();
@@ -181,9 +182,7 @@ class NacosSkillRepositoryTest {
                 new NacosSkillRepository(
                         settings,
                         dataId -> Optional.ofNullable(configs.get(dataId)),
-                        pattern -> {
-                            throw new IllegalStateException("nacos down");
-                        },
+                        pattern -> NacosConfigClient.ListResult.failed("nacos down"),
                         clock()::get);
 
         assertEquals(RoleSkills.ids(), repository.getAllSkillNames());
@@ -204,7 +203,7 @@ class NacosSkillRepositoryTest {
                         pattern -> {
                             listCalls.incrementAndGet();
                             if (failing.get()) {
-                                throw new IllegalStateException("nacos down");
+                                return NacosConfigClient.ListResult.failed("nacos down");
                             }
                             return entries(configs);
                         },
@@ -388,12 +387,13 @@ class NacosSkillRepositoryTest {
         return configs;
     }
 
-    private static List<NacosConfigClient.ConfigEntry> entries(Map<String, String> configs) {
-        return configs.entrySet().stream()
-                .map(
-                        entry ->
-                                new NacosConfigClient.ConfigEntry(
-                                        entry.getKey(), entry.getValue(), 1L))
-                .toList();
+    private static NacosConfigClient.ListResult entries(Map<String, String> configs) {
+        return NacosConfigClient.ListResult.ok(
+                configs.entrySet().stream()
+                        .map(
+                                entry ->
+                                        new NacosConfigClient.ConfigEntry(
+                                                entry.getKey(), entry.getValue(), 1L))
+                        .toList());
     }
 }

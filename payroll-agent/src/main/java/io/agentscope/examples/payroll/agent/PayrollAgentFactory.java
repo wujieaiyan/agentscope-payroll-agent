@@ -149,6 +149,15 @@ public final class PayrollAgentFactory {
             2. 需要外部数据或执行操作时调用可用工具，核对返回结果后再作答；工具报错时按提示修正参数重试一次。
             3. 信息不足时明确追问，不得用假设内容继续。
             4. 不得虚构或泄露用户隐私数据。
+            ## 请求确认
+            需要用户授权或同意后才能继续（开始生成、提交草稿、执行敏感步骤）时，调用
+            request_confirmation，传 summary、detail 与用户口吻的 followup，然后停止输出等待卡片确认；
+            不要用正文里的“要我继续吗”代替。用户点取消后不要执行该步骤，改为询问下一步。
+            ## 需要用户选择
+            需要用户在多个方案间拍板、逐条确认口径，或补充只有用户才知道的关键信息时，调用
+            request_input：把每个待决问题放进 questions，尽量给出 options 让用户点选，
+            需要自由填写时置 allow_free_text=true，再传一个 title。
+            禁止在正文里列“以下 N 项需要你拍板”之类的清单后停下；调用后停止输出，等待用户提交卡片。
             """;
 
     /** 只读检索规则：协同智能体与团队/流程 KB 节点共用。 */
@@ -180,14 +189,30 @@ public final class PayrollAgentFactory {
             3. 工具返回 FORBIDDEN 时原样说明无权限，禁止改用通用知识或薪酬流程作答。
             """;
 
+    /** 静态流水线只有计算智能体面向用户提问：校验与核算阶段没有交互工具，也不该再追问。 */
+    private static final String PIPELINE_INTERACTION_RULES =
+            """
+            ## 需要用户拍板
+            需要用户在多个方案间拍板、逐条确认口径，或补充只有用户才知道的关键信息时，必须调用
+            request_input：把每个待决问题拆成 questions，尽量给出 options 让用户点选，
+            需要自由填写时置 allow_free_text=true，再传一个 title。
+            禁止在正文里列“以下 N 项需要你拍板”之类的清单后停下，也不要声称自己无法出卡片；
+            调用后停止输出，等待用户提交卡片。
+            ## 请求确认
+            需要用户授权后才能继续（生成草稿、提交、执行敏感步骤）时，调用 request_confirmation，
+            传 summary、detail 与用户口吻的 followup，然后停止输出等待卡片确认。
+            """;
+
     private static String calculatorPrompt(String skillId) {
         return COMMON_RULES
                 + "\n"
                 + SKILL_BOOT_RULE.formatted(skillId)
+                + PIPELINE_INTERACTION_RULES
                 + """
                 ## 基本职责
                 你是「薪酬计算智能体」，多智能体流水线的第 1 环。只负责理解诉求、调用确定性工具完成计算，
                 并整理出供下游“验证智能体”复核的计算记录；你的输出不是最终用户答复。
+                但如果需要用户拍板或授权，先按上方规则出卡片，用户提交后再继续计算。
                 """;
     }
 
@@ -437,6 +462,8 @@ public final class PayrollAgentFactory {
     private static HarnessAgent createKbAgent(Model model, KbSkillGateway gateway) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new KbQueryTools(gateway));
+        toolkit.registerTool(new ConfirmationTools());
+        toolkit.registerTool(new QuestionTools());
         return createAgent(
                 "PayrollKbAgent",
                 "知识库问答智能体：只读检索全部可读知识库并带引用作答",
@@ -597,6 +624,8 @@ public final class PayrollAgentFactory {
         AgentSkill accountantSkill =
                 SkillRepositories.activeSkill(skillRepository, RoleSkills.ACCOUNTANT);
         Toolkit calculatorTools = toolkit(tools, CALCULATOR_TOOLS, "计算", calculatorSkill);
+        calculatorTools.registerTool(new ConfirmationTools());
+        calculatorTools.registerTool(new QuestionTools());
         List<McpClientWrapper> mcpClients =
                 McpToolRegistrar.registerAll(
                         calculatorTools,
@@ -675,6 +704,10 @@ public final class PayrollAgentFactory {
         KbSkillGateway kbGateway = kbSearch ? kbGateway() : null;
         if (kbGateway != null) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
+        }
+        if (!payrollRole) {
+            toolkit.registerTool(new ConfirmationTools());
+            toolkit.registerTool(new QuestionTools());
         }
         List<McpClientWrapper> mcpClients =
                 McpToolRegistrar.registerAll(
@@ -841,6 +874,8 @@ public final class PayrollAgentFactory {
         if (kbRead) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
         }
+        toolkit.registerTool(new ConfirmationTools());
+        toolkit.registerTool(new QuestionTools());
         List<McpClientWrapper> mcpClients =
                 McpToolRegistrar.registerAll(
                         toolkit,
@@ -1363,8 +1398,15 @@ public final class PayrollAgentFactory {
         return toolkit;
     }
 
+    /** 当前控制面模型标识（provider:model）；解析失败时回落环境变量标签。 */
     public static String modelId() {
-        return io.agentscope.examples.payroll.support.ModelEnv.modelId();
+        try {
+            ModelConnection connection = modelRegistry.resolveControl(AgentModelSettings.none());
+            String model = connection.model();
+            return model.isBlank() ? connection.provider() : connection.provider() + ":" + model;
+        } catch (RuntimeException e) {
+            return io.agentscope.examples.payroll.support.ModelEnv.modelId();
+        }
     }
 
     /**
@@ -1397,6 +1439,12 @@ public final class PayrollAgentFactory {
     /** 轻量面模型：意图/计划 JSON；默认复用控制面连接。 */
     public static Model utilityModel() {
         return cachedModel(modelRegistry.resolveUtility(), "轻量面");
+    }
+
+    /** 轻量面连接版本：调用方据此判断是否需要重建轻量模型实例。 */
+    public static String utilityVersionKey() {
+        ModelConnection connection = modelRegistry.resolveUtility();
+        return connection.versionKey(credentialVersion(connection));
     }
 
     /**
@@ -1470,13 +1518,13 @@ public final class PayrollAgentFactory {
         return env("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL);
     }
 
-    /** 按连接版本缓存模型实例；不同使用面共用同一池，连接任一字段变化即重建。 */
+    /** 按连接版本缓存模型实例；连接任一字段或凭证版本变化即重建。 */
     private static Model cachedModel(ModelConnection connection, String plane) {
         if (connection == null) {
             throw new ModelConfigException(
                     ModelConfigException.CONNECTION_UNAVAILABLE, plane + "模型连接不可用");
         }
-        String key = plane + "|" + connection.versionKey();
+        String key = plane + "|" + connection.versionKey(credentialVersion(connection));
         synchronized (PayrollAgentFactory.class) {
             Model cached = MODELS.get(key);
             if (cached == null) {
@@ -1485,6 +1533,20 @@ public final class PayrollAgentFactory {
                 UsageModelCatalog.register(cached, plane, connection.provider());
             }
             return cached;
+        }
+    }
+
+    /** 凭证版本只进入缓存键，不含密钥；未注入凭证服务时返回空串，保持测试与 CLI 兼容。 */
+    private static String credentialVersion(ModelConnection connection) {
+        ModelCredentialService credentials = modelCredentials;
+        if (credentials == null) {
+            return "";
+        }
+        try {
+            return credentials.versionOf(connection);
+        } catch (RuntimeException e) {
+            log.warn("[Model] 读取凭证版本失败，本次按空版本处理：{}", e.getMessage());
+            return "";
         }
     }
 

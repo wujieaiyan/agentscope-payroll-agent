@@ -23,8 +23,8 @@ import org.slf4j.LoggerFactory;
  * 伴生 {@code <skill-id>.files.json} 解析为 {@link AgentSkill#getResources()}。
  *
  * <p>目录（id + manifest）按 TTL 缓存，一次 {@code list} 调用即拿到全部正文；
- * 正文按访问顺序 LRU 缓存，冷启动不逐条拉取。列表或正文读取失败时回退上次成功快照
- * 或代码内置版本。仓库只读。
+ * 正文按访问顺序 LRU 缓存，冷启动不逐条拉取。列表失败由 {@link NacosConfigClient.ListResult#ok()}
+ * 表达，回退上次成功快照或代码内置版本；单条正文读取失败沿用上次成功内容。仓库只读。
  */
 public final class NacosSkillRepository implements AgentSkillRepository, PayrollSkillCatalog {
 
@@ -44,7 +44,7 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
 
     @FunctionalInterface
     interface ConfigLister {
-        List<NacosConfigClient.ConfigEntry> list(String dataIdPattern);
+        NacosConfigClient.ListResult list(String dataIdPattern);
     }
 
     private record Entry(long fetchedAt, AgentSkill skill, long chars) {
@@ -83,7 +83,7 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
 
     private static ConfigLister nacosLister(NacosSkillSettings settings) {
         NacosConfigClient client = new NacosConfigClient(settings);
-        return client::list;
+        return client::listResult;
     }
 
     NacosSkillRepository(
@@ -220,11 +220,24 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
         Set<String> ids = new LinkedHashSet<>(RoleSkills.ids());
         Map<String, SkillManifest> manifests = new LinkedHashMap<>();
         BuiltInSkillRepository.MANIFESTS.forEach((id, manifest) -> manifests.put(id, manifest));
-        try {
+        NacosConfigClient.ListResult listed = lister.list("*" + NacosSkillRegistry.DATA_ID_SUFFIX);
+        if (!listed.ok()) {
+            Catalog previous = lastGood;
+            if (previous != null) {
+                log.warn(
+                        "[Skill] 列出 Nacos 技能失败，沿用上次成功快照（{} 个技能）：{}",
+                        previous.ids().size(),
+                        listed.warning());
+                // 失败时刻也计入 TTL，避免 Nacos 故障期间每次调用都重试列表。
+                Catalog retry = new Catalog(previous.ids(), previous.manifests(), now);
+                catalog = retry;
+                return retry;
+            }
+            log.warn("[Skill] 列出 Nacos 技能失败，仅保留内置技能：{}", listed.warning());
+        } else {
             Set<String> remoteIds = new LinkedHashSet<>();
             Map<String, SkillManifest> remoteManifests = new LinkedHashMap<>();
-            for (NacosConfigClient.ConfigEntry entry :
-                    lister.list("*" + NacosSkillRegistry.DATA_ID_SUFFIX)) {
+            for (NacosConfigClient.ConfigEntry entry : listed.entries()) {
                 String dataId = entry.dataId();
                 if (dataId == null || !dataId.endsWith(NacosSkillRegistry.DATA_ID_SUFFIX)) {
                     continue;
@@ -239,19 +252,6 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
             }
             ids.addAll(remoteIds);
             manifests.putAll(remoteManifests);
-        } catch (RuntimeException e) {
-            Catalog previous = lastGood;
-            if (previous != null) {
-                log.warn(
-                        "[Skill] 列出 Nacos 技能失败，沿用上次成功快照（{} 个技能）：{}",
-                        previous.ids().size(),
-                        e.getMessage());
-                // 失败时刻也计入 TTL，避免 Nacos 故障期间每次调用都重试列表。
-                Catalog retry = new Catalog(previous.ids(), previous.manifests(), now);
-                catalog = retry;
-                return retry;
-            }
-            log.warn("[Skill] 列出 Nacos 技能失败，仅保留内置技能：{}", e.getMessage());
         }
         Catalog next =
                 new Catalog(

@@ -49,6 +49,21 @@ public final class AuditContext {
         }
     }
 
+    /** 记录本次条件写入使用的 revision（可空，灰度期允许缺失）。 */
+    public static void markRevision(String revision) {
+        State state = CURRENT.get();
+        if (state != null) {
+            state.revision = revision;
+        }
+    }
+
+    public static void markWriteResult(String writeResult) {
+        State state = CURRENT.get();
+        if (state != null) {
+            state.writeResult = writeResult;
+        }
+    }
+
     public static void markRecorded() {
         State state = CURRENT.get();
         if (state != null) {
@@ -69,6 +84,8 @@ public final class AuditContext {
         private String actorName;
         private String failureMessage;
         private Integer failureStatus;
+        private String revision;
+        private String writeResult;
         private boolean recorded;
 
         private State(String traceId, String ip, String userAgent, AuthUser actor) {
@@ -105,6 +122,14 @@ public final class AuditContext {
 
         public Integer failureStatus() {
             return failureStatus;
+        }
+
+        public String revision() {
+            return revision;
+        }
+
+        public String writeResult() {
+            return writeResult;
         }
 
         public boolean recorded() {

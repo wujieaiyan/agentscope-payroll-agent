@@ -16,9 +16,23 @@ public record NacosSkillSettings(
         String username,
         String password,
         Duration timeout,
-        Duration ttl) {
+        Duration ttl,
+        int listMaxPages) {
 
     public static final String DEFAULT_GROUP = "payroll-agent";
+    public static final int DEFAULT_LIST_MAX_PAGES = 50;
+
+    public NacosSkillSettings(
+            boolean enabled,
+            String server,
+            String group,
+            String namespace,
+            String username,
+            String password,
+            Duration timeout,
+            Duration ttl) {
+        this(enabled, server, group, namespace, username, password, timeout, ttl, DEFAULT_LIST_MAX_PAGES);
+    }
 
     public NacosSkillSettings {
         server = normalizeServer(server);
@@ -34,6 +48,9 @@ public record NacosSkillSettings(
         if (ttl.isNegative() || ttl.isZero()) {
             throw new IllegalArgumentException("Nacos 技能缓存时间必须大于 0");
         }
+        if (listMaxPages < 1) {
+            throw new IllegalArgumentException("Nacos 列表翻页上限必须大于 0");
+        }
     }
 
     public static NacosSkillSettings fromEnvironment() {
@@ -47,7 +64,8 @@ public record NacosSkillSettings(
                 env("PAYROLL_NACOS_USERNAME", ""),
                 env("PAYROLL_NACOS_PASSWORD", ""),
                 Duration.ofMillis(longEnv("PAYROLL_NACOS_TIMEOUT_MS", 2000)),
-                Duration.ofSeconds(longEnv("PAYROLL_NACOS_SKILL_TTL_SECONDS", 60)));
+                Duration.ofSeconds(longEnv("PAYROLL_NACOS_SKILL_TTL_SECONDS", 60)),
+                (int) longEnv("PAYROLL_NACOS_LIST_MAX_PAGES", DEFAULT_LIST_MAX_PAGES));
     }
 
     public String location() {
