@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.web.TooManyRequestsException;
@@ -13,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,7 +35,6 @@ public class AgentRuntimeClient {
     private final String token;
     private final Duration perUrlTimeout;
     private final Duration submitBudget;
-    private final long maxSkewSeconds;
     private final AtomicInteger cursor = new AtomicInteger();
     private final HttpClient http =
             HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
@@ -63,7 +64,6 @@ public class AgentRuntimeClient {
                 submitBudget == null || submitBudget.isNegative() || submitBudget.isZero()
                         ? Duration.ofSeconds(10)
                         : submitBudget;
-        this.maxSkewSeconds = 120;
     }
 
     public boolean enabled() {
@@ -110,6 +110,35 @@ public class AgentRuntimeClient {
         return post("/internal/route/preview", body, false, false);
     }
 
+    /**
+     * 读取 runtime 服务器时间（毫秒），供启动时钟偏移校验使用；未配置或不可达时返回空。
+     * 两个地址都失败才放弃，避免单节点短暂不可达误报。
+     */
+    public Optional<Long> serverTimeMillis() {
+        if (!enabled()) {
+            return Optional.empty();
+        }
+        for (String base : urls) {
+            try {
+                HttpResponse<String> response =
+                        send(base, "GET", "/internal/health", "", Duration.ofSeconds(2));
+                if (response.statusCode() / 100 != 2) {
+                    continue;
+                }
+                Map<String, Object> body =
+                        JsonSupport.fromJson(
+                                response.body(), new TypeReference<Map<String, Object>>() {});
+                Object value = body.get("epoch_millis");
+                if (value instanceof Number number) {
+                    return Optional.of(number.longValue());
+                }
+            } catch (Exception e) {
+                log.debug("[运行期] 读取服务器时间失败：{}，原因={}", base, e.getMessage());
+            }
+        }
+        return Optional.empty();
+    }
+
     private String post(String path, String body, boolean bestEffort, boolean budgeted) {
         if (urls.isEmpty()) {
             throw new PayrollUnavailableException("智能体运行期不可用：未配置 runtime 地址");
@@ -136,7 +165,8 @@ public class AgentRuntimeClient {
                     throw new IllegalStateException("轮次已被其它节点接管或已结束");
                 }
                 if (response.statusCode() == 429) {
-                    throw new TooManyRequestsException("运行时繁忙，请稍后重试");
+                    throw new TooManyRequestsException(
+                            "运行时繁忙，请稍后重试", retryAfterSeconds(response));
                 }
                 if (response.statusCode() == 503) {
                     throw new PayrollUnavailableException("运行时不可用");
@@ -165,6 +195,19 @@ public class AgentRuntimeClient {
         throw last == null ? new IllegalStateException("没有可用的 runtime 节点") : last;
     }
 
+    /** 读取 runtime 的 Retry-After；缺失或非法时按 5s 处理。 */
+    private static int retryAfterSeconds(HttpResponse<String> response) {
+        String raw = response.headers().firstValue("Retry-After").orElse("").trim();
+        if (raw.isEmpty()) {
+            return 5;
+        }
+        try {
+            return Math.max(1, Integer.parseInt(raw));
+        } catch (NumberFormatException e) {
+            return 5;
+        }
+    }
+
     private static void budgetExhausted() {
         TurnMetrics.submitBudgetExhausted();
         throw new PayrollUnavailableException("智能体运行期提交预算耗尽，请稍后重试");
@@ -172,15 +215,25 @@ public class AgentRuntimeClient {
 
     private HttpResponse<String> send(
             String base, String path, String body, Duration timeout) throws Exception {
+        return send(base, "POST", path, body, timeout);
+    }
+
+    private HttpResponse<String> send(
+            String base, String method, String path, String body, Duration timeout)
+            throws Exception {
         String timestamp = String.valueOf(Instant.now().getEpochSecond());
-        String signature = InternalAuth.sign(token, "POST", path, timestamp, body);
+        String signature = InternalAuth.sign(token, method, path, timestamp, body);
         HttpRequest request =
                 HttpRequest.newBuilder(URI.create(base + path))
                         .timeout(timeout)
                         .header("Content-Type", "application/json")
                         .header("X-Payroll-Timestamp", timestamp)
                         .header("X-Payroll-Internal", signature)
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .method(
+                                method,
+                                body == null || body.isEmpty()
+                                        ? HttpRequest.BodyPublishers.noBody()
+                                        : HttpRequest.BodyPublishers.ofString(body))
                         .build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }

@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
@@ -13,10 +12,8 @@ import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,7 +27,6 @@ import org.slf4j.LoggerFactory;
 public final class NacosAgentRegistry {
 
     public static final String DATA_ID = "payroll-agents.json";
-    public static final String SETTINGS_DATA_ID = "payroll-agent-settings.json";
     public static final String DEFAULT_ACTIVE_AGENT = RoleSkills.CALCULATOR;
 
     private static final Logger log = LoggerFactory.getLogger(NacosAgentRegistry.class);
@@ -41,6 +37,7 @@ public final class NacosAgentRegistry {
 
     private final NacosSkillSettings settings;
     private final NacosConfigClient client;
+    private final NacosRuntimeSettings runtime;
     // 兼容前置：新增字段（如 model）时旧版本必须能读取新配置，未知字段直接忽略。
     private final ObjectMapper json =
             JsonMapper.builder()
@@ -52,18 +49,18 @@ public final class NacosAgentRegistry {
     private volatile Snapshot<AgentDefinition> cache;
     private volatile long fetchedAt;
 
-    private volatile String cachedActiveAgent;
-    /** Nacos 显式配置的写操作确认开关；null 表示未配置，由调用方回退环境变量。 */
-    private volatile Boolean cachedActionConfirm;
-    private volatile String cachedSettingsRevision = ConfigRevision.ABSENT;
-    private volatile long settingsFetchedAt;
-
     public NacosAgentRegistry() {
         this(NacosSkillSettings.fromEnvironment());
     }
 
     NacosAgentRegistry(NacosSkillSettings settings) {
+        this(settings, new NacosRuntimeSettings(settings));
+    }
+
+    /** 与流程注册表共享同一份运行时设置缓存，避免两个实例各自读到旧模式。 */
+    public NacosAgentRegistry(NacosSkillSettings settings, NacosRuntimeSettings runtime) {
         this.settings = settings;
+        this.runtime = runtime;
         this.client = new NacosConfigClient(settings);
         this.ttlMillis = settings.ttl().toMillis();
     }
@@ -85,13 +82,9 @@ public final class NacosAgentRegistry {
         return snapshot().revision();
     }
 
-    /** 当前 settings 文档内容指纹；未读取或读取失败时沿用上次已知值。 */
+    /** 运行时设置文档指纹；未启用时为空指纹。 */
     public String settingsRevision() {
-        if (!settings.enabled()) {
-            return ConfigRevision.ABSENT;
-        }
-        refreshSettings();
-        return cachedSettingsRevision;
+        return settings.enabled() ? runtime.revision() : ConfigRevision.ABSENT;
     }
 
     private Snapshot<AgentDefinition> snapshot() {
@@ -159,26 +152,9 @@ public final class NacosAgentRegistry {
         return agent;
     }
 
-    /** 管理员显式配置的智能体 id；未配置返回空串。 */
+    /** 管理员显式配置的智能体 id；仅 AGENT 模式非空。 */
     public String configuredAgentId() {
-        if (!settings.enabled()) {
-            return "";
-        }
-        long now = System.currentTimeMillis();
-        String snapshot = cachedActiveAgent;
-        if (snapshot != null && now - settingsFetchedAt < ttlMillis) {
-            return snapshot;
-        }
-        synchronized (this) {
-            snapshot = cachedActiveAgent;
-            if (snapshot != null && now - settingsFetchedAt < ttlMillis) {
-                return snapshot;
-            }
-            snapshot = loadActiveAgentId(snapshot);
-            cachedActiveAgent = snapshot;
-            settingsFetchedAt = now;
-            return snapshot;
-        }
+        return settings.enabled() ? runtime.activeAgentId() : "";
     }
 
     /** 管理员配置的核算智能体 id；未配置时返回默认计算专家。 */
@@ -192,11 +168,9 @@ public final class NacosAgentRegistry {
         return setActiveAgent(id, null);
     }
 
-    /** @param expectedRevision settings 文档指纹；null/空白跳过校验（滚动发布兼容） */
+    /** @param expectedRevision 运行时设置文档指纹；null/空白跳过校验（滚动发布兼容） */
     public synchronized String setActiveAgent(String id, String expectedRevision) {
         requireWritable();
-        SettingsSnapshot base = reloadSettingsForWrite();
-        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
         AgentDefinition agent =
                 list().stream()
                         .filter(a -> a.id().equals(id))
@@ -208,8 +182,7 @@ public final class NacosAgentRegistry {
         if (!AgentDefinition.VISIBILITY_PUBLIC.equals(agent.visibility())) {
             throw new PayrollException("只有公开的智能体才能用于薪酬核算");
         }
-        publishSettings(base, root -> root.put("calculationAgentId", id));
-        cachedActiveAgent = id;
+        runtime.activateAgent(id, expectedRevision);
         log.info("[Agent] 核算智能体已设置为 {}（{}）", agent.name(), id);
         return id;
     }
@@ -221,141 +194,25 @@ public final class NacosAgentRegistry {
 
     public synchronized void clearActiveAgent(String expectedRevision) {
         requireWritable();
-        SettingsSnapshot base = reloadSettingsForWrite();
-        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
-        publishSettings(base, root -> root.put("calculationAgentId", ""));
-        cachedActiveAgent = "";
+        runtime.clearAgent(expectedRevision);
         log.info("[Agent] 已取消全局核算智能体，对话回到内置流水线");
     }
 
-    /** 写操作确认开关的 Nacos 覆盖值；Nacos 未启用或未配置该键时为空，由调用方回退环境变量。 */
+    /** 写操作确认开关的 Nacos 覆盖值；未启用或未配置该键时为空，由调用方回退环境变量。 */
     public Optional<Boolean> actionConfirmOverride() {
-        if (!settings.enabled()) {
-            return Optional.empty();
-        }
-        refreshSettings();
-        return Optional.ofNullable(cachedActionConfirm);
+        return settings.enabled() ? runtime.actionConfirmOverride() : Optional.empty();
     }
 
-    /** 管理台切换写操作确认；读-改-写保留同一文件里的核算智能体配置。 */
+    /** 管理台切换写操作确认；与模式/默认流程共用同一份运行时设置文档。 */
     public synchronized void setActionConfirm(boolean enabled) {
         setActionConfirm(enabled, null);
     }
 
     public synchronized void setActionConfirm(boolean enabled, String expectedRevision) {
         requireWritable();
-        SettingsSnapshot base = reloadSettingsForWrite();
-        requireRevision(base.revision(), expectedRevision, SETTINGS_DATA_ID);
-        publishSettings(base, root -> root.put("actionConfirm", enabled));
-        cachedActionConfirm = enabled;
-        log.info("[Agent] 写操作确认已{}（Nacos {}）", enabled ? "开启" : "关闭", SETTINGS_DATA_ID);
-    }
-
-    private synchronized void refreshSettings() {
-        long now = System.currentTimeMillis();
-        if (settingsFetchedAt > 0 && now - settingsFetchedAt < ttlMillis) {
-            return;
-        }
-        loadSettings(cachedActiveAgent);
-        settingsFetchedAt = now;
-    }
-
-    private String loadActiveAgentId(String fallback) {
-        loadSettings(fallback);
-        String current = cachedActiveAgent;
-        if (current != null) {
-            return current;
-        }
-        return fallback == null ? "" : fallback;
-    }
-
-    private void loadSettings(String fallback) {
-        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
-        switch (fetched.status()) {
-            case OK -> {
-                try {
-                    JsonNode root = json.readTree(fetched.entry().content());
-                    JsonNode confirm = root.path("actionConfirm");
-                    cachedActionConfirm = confirm.isBoolean() ? confirm.asBoolean() : null;
-                    cachedActiveAgent =
-                            root.path("calculationAgentId")
-                                    .asText(fallback == null ? "" : fallback)
-                                    .trim();
-                    cachedSettingsRevision =
-                            ConfigRevision.revisionOf(fetched.entry().content());
-                } catch (Exception e) {
-                    log.warn(
-                            "[Agent] 解析 Nacos 配置 {} 失败，沿用上次设置：{}",
-                            SETTINGS_DATA_ID,
-                            e.getMessage());
-                }
-            }
-            case ABSENT -> {
-                cachedActionConfirm = null;
-                cachedSettingsRevision = ConfigRevision.ABSENT;
-            }
-            case ERROR -> log.warn(
-                    "[Agent] 读取 Nacos 配置 {} 失败，沿用上次设置：{}",
-                    SETTINGS_DATA_ID,
-                    fetched.message());
-        }
-    }
-
-    private record SettingsSnapshot(ObjectNode root, String revision) {
-    }
-
-    /** 绕过 TTL 读取 settings 文档作为写入基线；读失败或解析失败抛 503。 */
-    private SettingsSnapshot reloadSettingsForWrite() {
-        NacosConfigClient.FetchResult fetched = client.fetchResult(SETTINGS_DATA_ID);
-        switch (fetched.status()) {
-            case OK -> {
-                try {
-                    JsonNode parsed = json.readTree(fetched.entry().content());
-                    if (!(parsed instanceof ObjectNode root)) {
-                        throw new IllegalStateException("配置根节点不是 JSON 对象");
-                    }
-                    return new SettingsSnapshot(
-                            root, ConfigRevision.revisionOf(fetched.entry().content()));
-                } catch (Exception e) {
-                    throw new PayrollUnavailableException(
-                            "读取 " + SETTINGS_DATA_ID + " 失败：" + e.getMessage(), e);
-                }
-            }
-            case ABSENT -> {
-                return new SettingsSnapshot(json.createObjectNode(), ConfigRevision.ABSENT);
-            }
-            default -> throw new PayrollUnavailableException(
-                    "读取 " + SETTINGS_DATA_ID + " 失败：" + fetched.message());
-        }
-    }
-
-    private void requireRevision(String current, String expected, String dataId) {
-        if (expected == null || expected.isBlank()) {
-            log.warn("[Agent] 写入 {} 未携带 revision，跳过并发校验（revision_missing=true）", dataId);
-            return;
-        }
-        if (!current.equals(expected)) {
-            throw new PayrollConflictException("配置已被他人修改，请刷新后重试", current);
-        }
-    }
-
-    /** 在已读取的 settings 文档上只改目标键，保留未知键。 */
-    private void publishSettings(SettingsSnapshot base, Consumer<ObjectNode> mutator) {
-        ObjectNode root = base.root();
-        mutator.accept(root);
-        try {
-            String content = json.writerWithDefaultPrettyPrinter().writeValueAsString(root);
-            if (!client.publish(SETTINGS_DATA_ID, content)) {
-                throw new PayrollException(
-                        "写入 Nacos 配置 " + SETTINGS_DATA_ID + " 失败，请检查 Nacos 连接与账号权限");
-            }
-            cachedSettingsRevision = ConfigRevision.revisionOf(content);
-            settingsFetchedAt = System.currentTimeMillis();
-        } catch (PayrollException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new PayrollException("序列化核算智能体配置失败：" + e.getMessage());
-        }
+        runtime.setActionConfirm(enabled, expectedRevision);
+        log.info("[Agent] 写操作确认已{}（Nacos {}）", enabled ? "开启" : "关闭",
+                NacosRuntimeSettings.DATA_ID);
     }
 
     /** 新建或更新（按 id 匹配）。返回保存后的定义。 */
@@ -456,6 +313,17 @@ public final class NacosAgentRegistry {
         if (!settings.enabled()) {
             throw new PayrollException(
                     "Nacos 未启用（设置 PAYROLL_NACOS_SERVER），无法保存智能体定义");
+        }
+    }
+
+    /** agents 文档的并发写入校验；运行时设置文档由 {@link NacosRuntimeSettings} 校验。 */
+    private void requireRevision(String current, String expected, String dataId) {
+        if (expected == null || expected.isBlank()) {
+            log.warn("[Agent] 写入 {} 未携带 revision，跳过并发校验（revision_missing=true）", dataId);
+            return;
+        }
+        if (!current.equals(expected)) {
+            throw new PayrollConflictException("配置已被他人修改，请刷新后重试", current);
         }
     }
 

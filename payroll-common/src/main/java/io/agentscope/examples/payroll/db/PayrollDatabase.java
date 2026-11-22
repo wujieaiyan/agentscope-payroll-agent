@@ -70,10 +70,15 @@ public final class PayrollDatabase {
                 role_code VARCHAR(32) NOT NULL,
                 department_id BIGINT,
                 active BOOLEAN NOT NULL DEFAULT TRUE,
+                must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_login_at TIMESTAMP
             )
+            """,
+            """
+            ALTER TABLE app_users
+                ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE
             """,
             """
             CREATE TABLE IF NOT EXISTS chat_sessions (

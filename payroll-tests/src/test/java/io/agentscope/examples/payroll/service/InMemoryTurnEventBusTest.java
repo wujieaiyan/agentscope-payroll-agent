@@ -47,4 +47,21 @@ class InMemoryTurnEventBusTest {
         assertEquals(false, bus.cancelled("turn-1"));
         assertEquals(1L, bus.earliestSeq("turn-1"));
     }
+
+    @Test
+    void overwritesOldestEventsWhenRingIsFull() {
+        InMemoryTurnEventBus bus = new InMemoryTurnEventBus();
+        int overflow = 5;
+        for (int i = 1; i <= InMemoryTurnEventBus.MAX_EVENTS + overflow; i++) {
+            bus.append("turn-1", "text", Map.of("text", String.valueOf(i)));
+        }
+
+        assertEquals(overflow + 1L, bus.earliestSeq("turn-1"));
+        java.util.List<TurnEvent> head = bus.read("turn-1", 0L, 3);
+        assertEquals(overflow + 1L, head.get(0).seq());
+        assertEquals(overflow + 3L, head.get(2).seq());
+        assertEquals(
+                InMemoryTurnEventBus.MAX_EVENTS,
+                bus.read("turn-1", 0L, Integer.MAX_VALUE).size());
+    }
 }

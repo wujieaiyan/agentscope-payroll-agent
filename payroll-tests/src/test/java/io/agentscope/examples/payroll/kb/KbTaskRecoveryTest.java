@@ -19,12 +19,15 @@ import io.agentscope.examples.payroll.kb.KbEnums.TaskType;
 import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbModels.IngestTask;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.web.TooManyRequestsException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -195,6 +198,38 @@ class KbTaskRecoveryTest {
         assertEquals(failed, next.retryOfTaskId());
         assertEquals(DocStatus.PENDING, document(documentId).status());
         verify(ingestService, never()).run(failed);
+    }
+
+    @Test
+    @DisplayName("入库队列满时任务落失败并返回 429")
+    void rejectedSubmissionFailsTaskAndReturns429() {
+        long documentId = seedDocument("policy.pdf");
+        long failed = seedTask(documentId, TaskStatus.FAILED, 0);
+        ExecutorService closed = Executors.newSingleThreadExecutor();
+        closed.shutdown();
+        KbTaskService rejecting =
+                new KbTaskService(
+                        taskStore,
+                        documentStore,
+                        mock(KbSeriesService.class),
+                        mock(KbPermissionService.class),
+                        ingestService,
+                        new H2AdminRepository(database),
+                        mock(AuditService.class),
+                        new ObjectMapper(),
+                        closed,
+                        3);
+
+        assertThrows(
+                TooManyRequestsException.class,
+                () -> rejecting.retry(SERIES_ID, failed, USER));
+
+        IngestTask created = otherTask(documentId, failed);
+        assertEquals(TaskStatus.FAILED, created.status());
+        assertEquals("QUEUE_FULL", created.errorCode());
+        Document document = document(documentId);
+        assertEquals(DocStatus.FAILED, document.status());
+        assertEquals("QUEUE_FULL", document.errorCode());
     }
 
     @Test

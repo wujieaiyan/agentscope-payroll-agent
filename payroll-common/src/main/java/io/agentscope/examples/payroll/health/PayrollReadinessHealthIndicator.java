@@ -99,7 +99,7 @@ public final class PayrollReadinessHealthIndicator implements HealthIndicator {
     }
 
     /** single 下 Redis 问题只标 DEGRADED，保持 200；cluster 下任何不确定都按 DOWN。 */
-    private static String redisStatus(RedisHealthProbe.Summary summary, boolean required) {
+    public static String redisStatus(RedisHealthProbe.Summary summary, boolean required) {
         if (!summary.configured()) {
             return required ? "DOWN" : "SKIPPED";
         }

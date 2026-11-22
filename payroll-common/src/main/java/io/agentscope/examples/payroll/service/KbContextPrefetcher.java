@@ -140,6 +140,7 @@ public final class KbContextPrefetcher {
         try {
             response = future.get(settings.timeoutMs(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
+            future.cancel(true);
             log.warn(
                     "[知识库][材料] 预取超时：截止={}ms，question={}",
                     settings.timeoutMs(),

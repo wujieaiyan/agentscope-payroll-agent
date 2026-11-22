@@ -163,6 +163,18 @@ public final class VectorMemoryService implements AutoCloseable {
         return ready;
     }
 
+    /** /health 组件：未启用=SKIPPED；启用时做一次轻量 ping，异常按 DOWN，不抛出。 */
+    public String esStatus() {
+        if (settings == null || !settings.enabled() || store == null) {
+            return "SKIPPED";
+        }
+        try {
+            return store.ping() ? "UP" : "DOWN";
+        } catch (RuntimeException e) {
+            return "DOWN";
+        }
+    }
+
     /** 默认只在当前会话内召回；显式开启 crossSession 才允许跨会话。 */
     public String recall(long userId, long sessionId, String question) {
         if (!ready || userId <= 0 || question == null || question.isBlank()) {

@@ -19,6 +19,7 @@ import io.agentscope.examples.payroll.devteam.DevGuardMonitor;
 import io.agentscope.examples.payroll.devteam.DevModelSettings;
 import io.agentscope.examples.payroll.devteam.DevPathPolicy;
 import io.agentscope.examples.payroll.devteam.DevRoleContract;
+import io.agentscope.examples.payroll.agent.model.FailoverModel;
 import io.agentscope.examples.payroll.agent.model.OpenAiCompatibleChatModel;
 import io.agentscope.examples.payroll.model.AgentModelSettings;
 import io.agentscope.examples.payroll.model.ModelConfigException;
@@ -61,6 +62,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1520,20 +1522,43 @@ public final class PayrollAgentFactory {
 
     /** 按连接版本缓存模型实例；连接任一字段或凭证版本变化即重建。 */
     private static Model cachedModel(ModelConnection connection, String plane) {
+        return cached(connection, plane, false);
+    }
+
+    /** {@code spare} 为备用连接模型：不再套故障切换，避免切换链。 */
+    private static Model cached(ModelConnection connection, String plane, boolean spare) {
         if (connection == null) {
             throw new ModelConfigException(
                     ModelConfigException.CONNECTION_UNAVAILABLE, plane + "模型连接不可用");
         }
-        String key = plane + "|" + connection.versionKey(credentialVersion(connection));
+        String key =
+                plane
+                        + "|"
+                        + connection.versionKey(credentialVersion(connection))
+                        + (spare ? "|spare" : "");
         synchronized (PayrollAgentFactory.class) {
             Model cached = MODELS.get(key);
             if (cached == null) {
-                cached = buildModel(connection, plane);
+                Model built = buildModel(connection, plane);
+                cached = spare ? built : failoverModel(built, connection, plane);
                 MODELS.put(key, cached);
                 UsageModelCatalog.register(cached, plane, connection.provider());
             }
             return cached;
         }
+    }
+
+    private static Model failoverModel(Model primary, ModelConnection connection, String plane) {
+        Predicate<ModelConnection> filter = "编码面".equals(plane) ? PayrollAgentFactory::writeCapable : null;
+        return new FailoverModel(
+                primary,
+                plane,
+                connection.id(),
+                () ->
+                        modelRegistry
+                                .fallback(connection, filter)
+                                .map(backup -> cached(backup, plane, true))
+                                .orElse(null));
     }
 
     /** 凭证版本只进入缓存键，不含密钥；未注入凭证服务时返回空串，保持测试与 CLI 兼容。 */

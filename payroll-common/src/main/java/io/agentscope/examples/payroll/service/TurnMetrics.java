@@ -29,6 +29,7 @@ public final class TurnMetrics {
     public static final String TURN_EXPIRED = "payroll.chat.turn.expired";
     public static final String SUBMIT_BUDGET_EXHAUSTED = "payroll.runtime.submit.budget.exhausted";
     public static final String EVENT_BUS_UNAVAILABLE = "payroll.chat.event.bus.unavailable";
+    public static final String MODEL_FAILOVER = "payroll.model.failover";
 
     private static volatile MeterRegistry registry = Metrics.globalRegistry;
     private static volatile String deploymentMode = "single";
@@ -38,12 +39,13 @@ public final class TurnMetrics {
     private static volatile DistributionSummary eventBytes;
     private static volatile DistributionSummary replayEvents;
     private static volatile Timer resume;
-    private static volatile Counter streamRejected;
     private static volatile Counter quotaRejected;
     private static volatile Counter leaseRenewFailed;
     private static volatile Counter submitBudgetExhausted;
     private static volatile Counter eventBusUnavailable;
+    private static final Map<String, Counter> streamRejected = new ConcurrentHashMap<>();
     private static final Map<String, Counter> turnExpired = new ConcurrentHashMap<>();
+    private static final Map<String, Counter> modelFailover = new ConcurrentHashMap<>();
 
     private TurnMetrics() {}
 
@@ -55,12 +57,13 @@ public final class TurnMetrics {
         eventBytes = null;
         replayEvents = null;
         resume = null;
-        streamRejected = null;
+        streamRejected.clear();
         quotaRejected = null;
         leaseRenewFailed = null;
         submitBudgetExhausted = null;
         eventBusUnavailable = null;
         turnExpired.clear();
+        modelFailover.clear();
     }
 
     /** 启动时由装配层写入；必须在首个请求前调用。 */
@@ -138,13 +141,21 @@ public final class TurnMetrics {
         summary.record(count);
     }
 
-    /** 对话执行队列已满被拒绝的请求数。 */
+    /** 对话执行队列已满被拒绝的请求数，按执行器区分。 */
     public static void streamRejected() {
-        Counter counter = streamRejected;
-        if (counter == null) {
-            counter = counter(STREAM_REJECTED, "对话执行队列满被拒绝的请求数").register(registry);
-            streamRejected = counter;
-        }
+        streamRejected("executor");
+    }
+
+    /** reason 区分 executor / tail / runtime，便于判断是启动、续流还是运行期容量不足。 */
+    public static void streamRejected(String reason) {
+        String tag = reason == null || reason.isBlank() ? "executor" : reason.trim();
+        Counter counter =
+                streamRejected.computeIfAbsent(
+                        tag,
+                        key ->
+                                counter(STREAM_REJECTED, "对话执行队列满被拒绝的请求数")
+                                        .tag("reason", key)
+                                        .register(registry));
         counter.increment();
     }
 
@@ -217,6 +228,19 @@ public final class TurnMetrics {
             counter = counter(EVENT_BUS_UNAVAILABLE, "事件总线不可用次数").register(registry);
             eventBusUnavailable = counter;
         }
+        counter.increment();
+    }
+
+    /** 首包连接失败后切换到同平面备用模型的次数；plane 区分控制面/轻量面/编码面。 */
+    public static void modelFailover(String plane) {
+        String tag = plane == null || plane.isBlank() ? "unknown" : plane.trim();
+        Counter counter =
+                modelFailover.computeIfAbsent(
+                        tag,
+                        key ->
+                                counter(MODEL_FAILOVER, "模型连接级切换次数")
+                                        .tag("plane", key)
+                                        .register(registry));
         counter.increment();
     }
 

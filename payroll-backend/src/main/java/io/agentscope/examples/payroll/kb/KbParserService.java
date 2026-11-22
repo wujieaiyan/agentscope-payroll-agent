@@ -7,10 +7,12 @@ import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.Heading;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.PageRange;
 import io.agentscope.examples.payroll.kb.ocr.ImageTextResult;
+import io.agentscope.examples.payroll.kb.ocr.OcrCanceled;
 import io.agentscope.examples.payroll.kb.ocr.OcrExtractionService;
 import io.agentscope.examples.payroll.kb.ocr.OcrFailure;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,9 +20,18 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
@@ -83,11 +94,21 @@ public class KbParserService {
 
     public KbParsedDocument parse(
             Path file, String ext, ParseConfig parseConfig, PageListener listener) {
+        return parse(file, ext, parseConfig, listener, null);
+    }
+
+    /** canceled 为入库取消信号：命中后停止提交新页，并中断在跑 OCR 进程。 */
+    public KbParsedDocument parse(
+            Path file,
+            String ext,
+            ParseConfig parseConfig,
+            PageListener listener,
+            BooleanSupplier canceled) {
         ParseConfig config = parseConfig == null ? KbConfigModels.defaultParse() : parseConfig;
         String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         try {
             return switch (normalized) {
-                case "pdf" -> parsePdf(file, config, listener);
+                case "pdf" -> parsePdf(file, config, listener, canceled);
                 case "docx" -> parseDocx(file);
                 case "xlsx", "xls" -> parseExcel(file);
                 case "md", "markdown" -> parseMarkdown(file);
@@ -157,21 +178,27 @@ public class KbParserService {
                         ext, sha256(file), System.currentTimeMillis() - started, text.length()));
     }
 
+    /** 流式摘要：上传上限 600MB，避免把整份文件读进内存后再算哈希。 */
     private static String sha256(Path file) throws IOException {
         try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file));
-            StringBuilder builder = new StringBuilder(hash.length * 2);
-            for (byte value : hash) {
-                builder.append(Character.forDigit((value >> 4) & 0xF, 16));
-                builder.append(Character.forDigit(value & 0xF, 16));
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[64 * 1024];
+            try (InputStream input = Files.newInputStream(file)) {
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (read > 0) {
+                        digest.update(buffer, 0, read);
+                    }
+                }
             }
-            return builder.toString();
+            return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }
     }
 
-    private KbParsedDocument parsePdf(Path file, ParseConfig config, PageListener listener)
+    private KbParsedDocument parsePdf(
+            Path file, ParseConfig config, PageListener listener, BooleanSupplier canceled)
             throws IOException {
         OcrConfig ocrConfig = config.ocr == null ? new OcrConfig() : config.ocr;
         boolean filterHeaderFooter =
@@ -186,7 +213,7 @@ public class KbParserService {
                 stripper.setEndPage(page);
                 pageTexts.add(stripper.getText(document));
             }
-            OcrStats ocrStats = ocrBlankPages(document, pageTexts, ocrConfig, listener);
+            OcrStats ocrStats = ocrBlankPages(document, pageTexts, ocrConfig, listener, canceled);
             if (filterHeaderFooter) {
                 filterHeaderFooter(pageTexts);
             }
@@ -225,7 +252,8 @@ public class KbParserService {
             PDDocument document,
             List<String> pageTexts,
             OcrConfig ocrConfig,
-            PageListener listener)
+            PageListener listener,
+            BooleanSupplier canceled)
             throws IOException {
         List<Integer> blankPages = new ArrayList<>();
         long layerChars = 0;
@@ -270,34 +298,96 @@ public class KbParserService {
             budget = maxPages;
         }
         String languages = ocrService.resolveLanguages(ocrConfig.languages);
-        PDFRenderer renderer = new PDFRenderer(document);
+        BooleanSupplier abort = canceled == null ? () -> false : canceled;
+        int dpi = ocrService.dpi();
         long started = System.currentTimeMillis();
-        int ocrPages = 0;
-        int skipped = blankPages.size() - budget;
-        for (int index = 0; index < budget; index++) {
-            int pageIndex = blankPages.get(index);
-            try {
-                BufferedImage image =
-                        renderer.renderImageWithDPI(pageIndex, ocrService.dpi(), ImageType.RGB);
-                ImageTextResult result = extractionService.extract(image, languages);
-                pageTexts.set(pageIndex, result.text() == null ? "" : result.text());
-                ocrPages++;
-            } catch (IOException | RuntimeException e) {
-                skipped++;
-                log.warn("[知识库] 第 {} 页 OCR 失败：{}", pageIndex + 1, e.getMessage());
+        long deadline = started + ocrService.docBudgetSeconds() * 1000L;
+        int poolSize = Math.max(1, Math.min(ocrService.concurrency(), budget));
+        PDFRenderer renderer = new PDFRenderer(document);
+        Map<Integer, String> recognized = new ConcurrentHashMap<>();
+        AtomicInteger ocrPages = new AtomicInteger();
+        ExecutorService pool =
+                Executors.newFixedThreadPool(
+                        poolSize,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "kb-ocr-page");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        List<Future<?>> futures = new ArrayList<>(budget);
+        RuntimeException[] abortSignal = new RuntimeException[1];
+        try {
+            for (int index = 0; index < budget; index++) {
+                if (System.currentTimeMillis() > deadline) {
+                    log.warn(
+                            "[知识库] PDF OCR 达到单文档时间上限（{}s），剩余 {} 页不再识别",
+                            ocrService.docBudgetSeconds(),
+                            budget - index);
+                    break;
+                }
+                int pageIndex = blankPages.get(index);
+                futures.add(
+                        pool.submit(
+                                (Callable<Void>)
+                                        () -> {
+                                            if (abort.getAsBoolean()) {
+                                                throw new OcrCanceled();
+                                            }
+                                            BufferedImage image;
+                                            synchronized (renderer) {
+                                                image =
+                                                        renderer.renderImageWithDPI(
+                                                                pageIndex, dpi, ImageType.RGB);
+                                            }
+                                            ImageTextResult result =
+                                                    extractionService.extract(
+                                                            image, languages, abort);
+                                            recognized.put(
+                                                    pageIndex,
+                                                    result.text() == null ? "" : result.text());
+                                            int done = ocrPages.incrementAndGet();
+                                            if (listener != null) {
+                                                // 并行识别下页码不再单调，进度按已完成页数上报。
+                                                synchronized (listener) {
+                                                    listener.onPageProgress(
+                                                            done, pageTexts.size(), done);
+                                                }
+                                            }
+                                            return null;
+                                        }));
             }
-            if (listener != null) {
-                listener.onPageProgress(pageIndex + 1, pageTexts.size(), ocrPages);
+            for (Future<?> future : futures) {
+                try {
+                    future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("OCR 被中断", e);
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause() == null ? e : e.getCause();
+                    // 取消信号向上传递；单页识别失败与旧串行实现一致，跳过该页继续。
+                    if (cause instanceof KbParserService.AbortSignal) {
+                        abortSignal[0] = (RuntimeException) cause;
+                        break;
+                    }
+                    log.warn("[知识库] OCR 页失败：{}", cause.getMessage());
+                }
             }
+        } finally {
+            pool.shutdownNow();
         }
+        if (abortSignal[0] != null) {
+            throw abortSignal[0];
+        }
+        recognized.forEach(pageTexts::set);
+        int skipped = blankPages.size() - recognized.size();
         log.info(
                 "[知识库] PDF OCR：pages={}，扫描页={}，OCR 完成={}，跳过={}，耗时={}ms",
                 pageTexts.size(),
                 blankPages.size(),
-                ocrPages,
+                recognized.size(),
                 skipped,
                 System.currentTimeMillis() - started);
-        return new OcrStats(blankPages.size(), ocrPages, skipped);
+        return new OcrStats(blankPages.size(), recognized.size(), skipped);
     }
 
     private record OcrStats(int blankPages, int ocrPages, int skippedPages) {

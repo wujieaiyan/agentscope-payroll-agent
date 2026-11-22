@@ -13,10 +13,12 @@ import io.agentscope.examples.payroll.domain.PayrollRun;
 import io.agentscope.examples.payroll.domain.PayrollRunDetail;
 import io.agentscope.examples.payroll.domain.PerformanceReview;
 import io.agentscope.examples.payroll.domain.ReviewView;
+import io.agentscope.examples.payroll.health.RuntimeHealthService;
 import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatQuotaService;
+import io.agentscope.examples.payroll.service.TokenBudgetService;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
@@ -40,10 +42,6 @@ import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthComponent;
-import org.springframework.boot.actuate.health.HealthEndpoint;
-import org.springframework.boot.actuate.health.Status;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
@@ -85,10 +83,11 @@ public class PayrollWebController {
     private final AuditService auditService;
     private final AuthService authService;
     private final ChatQuotaService chatQuotaService;
+    private final TokenBudgetService tokenBudgetService;
     private final ApprovalService approvalService;
     private final NacosAgentRegistry agentRegistry;
     private final NacosFlowRegistry flowRegistry;
-    private final HealthEndpoint healthEndpoint;
+    private final RuntimeHealthService runtimeHealthService;
 
     public PayrollWebController(
             PayrollServices services,
@@ -96,30 +95,31 @@ public class PayrollWebController {
             AuditService auditService,
             AuthService authService,
             ChatQuotaService chatQuotaService,
+            TokenBudgetService tokenBudgetService,
             ApprovalService approvalService,
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry,
-            HealthEndpoint healthEndpoint) {
+            RuntimeHealthService runtimeHealthService) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
         this.authService = authService;
         this.chatQuotaService = chatQuotaService;
+        this.tokenBudgetService = tokenBudgetService;
         this.approvalService = approvalService;
         this.agentRegistry = agentRegistry;
         this.flowRegistry = flowRegistry;
-        this.healthEndpoint = healthEndpoint;
+        this.runtimeHealthService = runtimeHealthService;
     }
 
-    /** 旧编排兼容：状态跟随 readiness（DB + Redis），不再返回数据库地址等敏感字段。 */
+    /** 组件健康：db/redis/nacos/es 只回状态；核心依赖不可用整体 503，不再暴露地址。 */
     @GetMapping("/health")
     public ResponseEntity<ApiResponse> health() {
-        HealthComponent readiness = readiness();
-        boolean up = readiness != null && Status.UP.equals(readiness.getStatus());
+        RuntimeHealthService.Report report = runtimeHealthService.snapshot();
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("status", up ? "UP" : "DOWN");
+        payload.put("status", report.status());
+        payload.put("components", report.components());
         payload.put("data_through_period", services.engine().dataThroughPeriod());
-        payload.put("database", depDetail(readiness, "db", up));
         payload.put("email_mode", "DRY_RUN");
         payload.put("chat_model", services.chat().modelId());
         String flowId = flowRegistry.activeFlowId();
@@ -135,31 +135,11 @@ public class PayrollWebController {
                         : configuredAgent.isBlank()
                                 ? "默认三段流水线"
                                 : agentRegistry.activeAgent().name());
-        if (up) {
+        if (!report.down()) {
             return ResponseEntity.ok(ApiResponse.ok(payload));
         }
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(new ApiResponse("ERROR", payload, "服务未就绪"));
-    }
-
-    private HealthComponent readiness() {
-        try {
-            return healthEndpoint.healthForPath("readiness");
-        } catch (RuntimeException e) {
-            log.warn("[健康] 无法读取 readiness 分组：{}", e.getMessage());
-            return null;
-        }
-    }
-
-    private static Object depDetail(HealthComponent readiness, String dep, boolean up) {
-        if (!(readiness instanceof Health health)) {
-            return "UNKNOWN";
-        }
-        Object value = health.getDetails().get(dep);
-        if (value != null) {
-            return value;
-        }
-        return up ? "UP" : "UNKNOWN";
     }
 
     @GetMapping("/employees")
@@ -310,6 +290,7 @@ public class PayrollWebController {
             @RequestBody(required = false) ChatRequest request, HttpServletRequest http) {
         String message = requireChatMessage(request);
         long userId = authService.currentUser(http).id();
+        tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
@@ -342,6 +323,7 @@ public class PayrollWebController {
             return emitter;
         }
         long userId = authService.currentUser(http).id();
+        tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
@@ -349,7 +331,7 @@ public class PayrollWebController {
             chatStreamExecutor.execute(() -> streamChat(message, userId, channel));
         } catch (RejectedExecutionException e) {
             chatQuotaService.release(userId);
-            ChatStreamRejection.record(chatStreamExecutor);
+            ChatStreamRejection.record(chatStreamExecutor, "executor");
             throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);

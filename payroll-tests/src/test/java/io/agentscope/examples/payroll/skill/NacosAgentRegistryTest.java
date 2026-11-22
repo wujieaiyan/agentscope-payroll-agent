@@ -243,7 +243,7 @@ class NacosAgentRegistryTest {
         assertEquals(saved.id(), registry.activeAgent().id());
         assertTrue(
                 nacos.configs
-                        .get(NacosAgentRegistry.SETTINGS_DATA_ID)
+                        .get(NacosRuntimeSettings.DATA_ID)
                         .contains(saved.id()),
                 nacos.configs.toString());
 
@@ -261,12 +261,12 @@ class NacosAgentRegistryTest {
 
         registry.setActionConfirm(true);
         registry.setActiveAgent(saved.id());
-        String settings = nacos.configs.get(NacosAgentRegistry.SETTINGS_DATA_ID);
+        String settings = nacos.configs.get(NacosRuntimeSettings.DATA_ID);
         assertTrue(settings.contains("\"actionConfirm\" : true"), settings);
         assertTrue(settings.contains(saved.id()), settings);
 
         registry.setActionConfirm(false);
-        settings = nacos.configs.get(NacosAgentRegistry.SETTINGS_DATA_ID);
+        settings = nacos.configs.get(NacosRuntimeSettings.DATA_ID);
         assertTrue(settings.contains("\"actionConfirm\" : false"), settings);
         assertTrue(settings.contains(saved.id()), settings);
 

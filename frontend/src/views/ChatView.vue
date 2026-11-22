@@ -38,6 +38,8 @@ const attachmentBusy = ref(false);
 const draggingFiles = ref(false);
 const attachmentPreview = ref(null);
 const questionDrafts = reactive({});
+/** 429 后的发送冷却：按服务端 retryAfterSeconds 倒计时，避免容量恢复前反复提交。 */
+const retryCooldown = ref(0);
 const ATTACHMENT_ACCEPT = '.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
 const ATTACHMENT_EXT = ['docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
 const QUESTION_MAX = 2000;
@@ -50,6 +52,7 @@ let tabSync = null;
 let mirroring = false;
 let mirrorFinishing = false;
 let persistTimer = null;
+let retryTimer = null;
 let unmounted = false;
 const RESUME_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 // 打印机式输出：文本先入队再按固定节奏吐出，续流重放时也能逐字可见。
@@ -64,7 +67,12 @@ let typeTimer = null;
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value) || null);
 const attachmentsReady = computed(() => attachments.value.every((item) => item.status === 'READY'));
 const canSend = computed(
-  () => !busy.value && !attachmentBusy.value && attachmentsReady.value && draft.value.trim().length > 0
+  () =>
+    !busy.value &&
+    retryCooldown.value <= 0 &&
+    !attachmentBusy.value &&
+    attachmentsReady.value &&
+    draft.value.trim().length > 0
 );
 
 /** 流式阶段只统计已完成的 skill_read 次数，用于提示本轮读了多少个技能文件。 */
@@ -949,7 +957,22 @@ function newStreamingState() {
     resumable: false,
     gap: false,
     gapMessage: '',
+    queue: null,
   };
+}
+
+/** 429 冷却倒计时：期间发送按钮保持禁用，倒计时结束自动恢复。 */
+function startRetryCooldown(seconds) {
+  const wait = Math.max(1, Math.min(300, Math.round(Number(seconds) || 5)));
+  retryCooldown.value = wait;
+  if (retryTimer) window.clearInterval(retryTimer);
+  retryTimer = window.setInterval(() => {
+    retryCooldown.value = Math.max(0, retryCooldown.value - 1);
+    if (retryCooldown.value <= 0) {
+      window.clearInterval(retryTimer);
+      retryTimer = null;
+    }
+  }, 1000);
 }
 
 function delay(ms) {
@@ -1034,6 +1057,12 @@ function handleEvent(event, data) {
   if (!state) return;
   touchSeq(data);
   switch (event) {
+    case 'queued':
+      state.queue = {
+        position: Math.max(1, Number(data.position) || 1),
+        etaSeconds: Math.max(0, Number(data.etaSeconds) || 0),
+      };
+      break;
     case 'turn':
       // 续流重放时同一个 turn 不应把游标回退到 0
       if (data.turn_id && turnState.turnId !== data.turn_id) {
@@ -1044,6 +1073,7 @@ function handleEvent(event, data) {
     case 'snapshot':
       // 冷恢复直接替换为已合并状态，不再逐字重放历史增量。
       stopTyping();
+      state.queue = null;
       state.pendingText = '';
       state.text = data.text || '';
       if (Array.isArray(data.tools)) {
@@ -1071,6 +1101,7 @@ function handleEvent(event, data) {
       break;
     case 'start':
       state.model = data.model || state.model;
+      state.queue = null;
       break;
     case 'agent_start':
       state.agents.push({ id: data.agent, label: data.label || data.agent, text: '' });
@@ -1144,6 +1175,7 @@ function handleEvent(event, data) {
       break;
     case 'text':
       if (state.gap) break;
+      if (data.text) state.queue = null;
       enqueueText(data.text || '');
       break;
     case 'action_proposal':
@@ -1208,6 +1240,7 @@ function streamSnapshot() {
       cancelled: state.cancelled,
       gap: state.gap,
       gapMessage: state.gapMessage,
+      queue: state.queue,
     },
   };
 }
@@ -1583,6 +1616,12 @@ async function send() {
     if (error.name !== 'AbortError' && state && !state.cancelled && !unmounted) {
       if (turnState.turnId) {
         await resumeLoop(sessionId, turnState.lastSeq);
+      } else if (error.status === 429) {
+        // 容量拒绝：入口还没有建轮次，恢复输入并倒计时，服务端已给出可重试时间。
+        if (!draft.value) draft.value = text;
+        if (!attachments.value.length) attachments.value = sendingAttachments;
+        startRetryCooldown(error.retryAfterSeconds);
+        streamFailed(error.message || '当前排队已满，请稍后重试');
       } else {
         streamFailed('网络异常，请求未送达，请重试');
       }
@@ -2035,6 +2074,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('online', retryOnNetwork);
   document.removeEventListener('visibilitychange', onVisibilityChange);
   if (persistTimer) window.clearTimeout(persistTimer);
+  if (retryTimer) window.clearInterval(retryTimer);
   stopTyping();
   if (controller) controller.abort();
   if (tabSync) {
@@ -2562,8 +2602,17 @@ onBeforeUnmount(() => {
               <span v-else-if="streaming.paused">已暂停</span>
               <span v-else-if="streaming.gap">部分过程已跳过</span>
               <span v-else-if="streaming.text">正在输出</span>
+              <span v-else-if="streaming.queue">排队中（第 {{ streaming.queue.position }} 位）</span>
               <span v-else-if="busy">正在思考</span>
               <span v-else-if="streaming.resumable">连接已中断</span>
+            </div>
+            <div
+              v-if="streaming.queue && !streaming.text"
+              class="muted"
+              style="font-size: 12px; margin-bottom: 6px"
+            >
+              当前排队第 {{ streaming.queue.position }} 位<template v-if="streaming.queue.etaSeconds">
+                ，预计等待约 {{ streaming.queue.etaSeconds }} 秒</template>
             </div>
             <div class="bubble" :class="{ error: streaming.error }">
               <template v-if="streaming.text">
@@ -2581,7 +2630,7 @@ onBeforeUnmount(() => {
                   >[{{ part.index }}]</button>
                 </template>
               </template>
-              <span v-else-if="!streaming.error && !streaming.gap && !streaming.paused" class="typing"><i></i><i></i><i></i></span>
+              <span v-else-if="!streaming.error && !streaming.gap && !streaming.paused && !streaming.queue" class="typing"><i></i><i></i><i></i></span>
               <template v-if="streaming.error">{{ streaming.error }}</template>
               <template v-else-if="streaming.cancelled">（本轮回答已取消）</template>
               <template v-else-if="streaming.gap">{{ streaming.gapMessage }}</template>
@@ -2822,7 +2871,9 @@ onBeforeUnmount(() => {
             @paste="onComposerPaste"
           ></textarea>
           <button v-if="busy" class="danger" @click="stop">暂停</button>
-          <button v-else class="primary" :disabled="!canSend" @click="send">发送</button>
+          <button v-else class="primary" :disabled="!canSend" @click="send">
+            {{ retryCooldown > 0 ? `${retryCooldown}s 后可发送` : '发送' }}
+          </button>
         </div>
         <div class="composer-foot">
           <span class="left">

@@ -120,7 +120,8 @@ public class PayrollBackendConfiguration {
     public ApplicationRunner payrollStartupReporter(
             PayrollServices services,
             AgentRuntimeClient runtimeClient,
-            Environment environment) {
+            Environment environment,
+            @Value("${payroll.internal.clock-skew-warning-seconds:60}") long skewWarningSeconds) {
         return args -> {
             String port = environment.getProperty("local.server.port", "0");
             String address = environment.getProperty("server.address", "127.0.0.1");
@@ -131,7 +132,27 @@ public class PayrollBackendConfiguration {
             log.info("输出目录        {}", services.runService().outputDir().toAbsolutePath());
             log.info("按 Ctrl+C 停止");
             log.info("=".repeat(72));
+            checkClockSkew(runtimeClient, skewWarningSeconds);
         };
+    }
+
+    /** 内部签名带时间窗：两端时钟漂移超过窗口会全部 401，启动时提前告警。 */
+    private static void checkClockSkew(AgentRuntimeClient client, long warningSeconds) {
+        long startedAt = System.currentTimeMillis();
+        var serverTime = client.serverTimeMillis();
+        long finishedAt = System.currentTimeMillis();
+        if (serverTime.isEmpty()) {
+            return;
+        }
+        long skewSeconds = (serverTime.get() - (startedAt + finishedAt) / 2) / 1000;
+        if (Math.abs(skewSeconds) > Math.max(5L, warningSeconds)) {
+            log.warn(
+                    "[运行期] 与 agent-runtime 时钟偏移约 {} 秒（阈值 {} 秒），内部签名可能被拒绝，请校准 NTP",
+                    skewSeconds,
+                    warningSeconds);
+        } else {
+            log.info("[运行期] 与 agent-runtime 时钟偏移约 {} 秒", skewSeconds);
+        }
     }
 
     /** 后端不执行模型：保留接口兼容性，但直接给出可操作的错误。 */

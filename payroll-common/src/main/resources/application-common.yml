@@ -54,10 +54,15 @@ payroll:
   health:
     # readiness 只探测 DB + Redis；ES/Nacos 只进各自 Actuator 详情，不参与摘流。
     readiness-deps: "${PAYROLL_HEALTH_READINESS_DEPS:db,redis}"
+    # /health 中 Nacos 组件的新鲜度窗口：超过该时长未成功列表即报 DOWN（整体降级）。
+    nacos-stale-seconds: "${PAYROLL_HEALTH_NACOS_STALE_SECONDS:300}"
   internal:
     # runtime 内部接口 HMAC 密钥；null/空时内部提交不可用。
     token: "${PAYROLL_AGENT_RUNTIME_TOKEN:}"
+    # 内部签名的允许时间窗（秒），两端需一致；超出即 401。
     max-skew-seconds: "${PAYROLL_INTERNAL_MAX_SKEW_SECONDS:120}"
+    # 启动时向 runtime /internal/health 取时间做偏移自检，超过该秒数只告警不阻断。
+    clock-skew-warning-seconds: "${PAYROLL_INTERNAL_CLOCK_SKEW_WARNING_SECONDS:60}"
   db:
     url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
     user: "${PAYROLL_DB_USER:sa}"
@@ -66,6 +71,16 @@ payroll:
   auth:
     enabled: "${PAYROLL_AUTH_ENABLED:true}"
     admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+    # 新建/重置密码后强制先改密；存量用户迁移时保持 FALSE。
+    force-password-change: "${PAYROLL_AUTH_FORCE_PASSWORD_CHANGE:true}"
+  usage:
+    # 每用户每日 token 预算，0 表示不限；超限新轮次返回 429。
+    daily-token-budget: "${PAYROLL_USAGE_DAILY_TOKEN_BUDGET:0}"
+  skill:
+    # 技能文件包读取缓存：按访问序 LRU，条数与正文总字节双上限，正文变化即失效。
+    file-cache:
+      max-entries: "${PAYROLL_SKILL_FILE_CACHE_MAX_ENTRIES:128}"
+      max-bytes: "${PAYROLL_SKILL_FILE_CACHE_MAX_BYTES:33554432}"
   security:
     # 同一账号连续失败达到阈值后锁定，Redis 不可用时回退进程内计数。
     login-max-failures: "${PAYROLL_LOGIN_MAX_FAILURES:5}"

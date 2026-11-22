@@ -1,6 +1,8 @@
 package io.agentscope.examples.payroll.kb.ocr;
 
 import io.agentscope.examples.payroll.domain.ExtractionMeta;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
 import jakarta.annotation.PreDestroy;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -22,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +49,7 @@ public class OcrExtractionService {
     private final Map<String, ImageTextExtractor.Result> cache;
     private final Map<String, Breaker> breakers = Collections.synchronizedMap(new LinkedHashMap<>());
     private final ExecutorService timeoutExecutor;
+    private final Counter failures;
 
     public OcrExtractionService(
             List<ImageTextExtractor> extractors,
@@ -74,6 +78,11 @@ public class OcrExtractionService {
                             thread.setDaemon(true);
                             return thread;
                         });
+        this.failures =
+                Counter.builder("payroll.kb.ocr.failures")
+                        .description("OCR 识别失败次数（按引擎）")
+                        .tag("engine", "all")
+                        .register(Metrics.globalRegistry);
     }
 
     public boolean enabled() {
@@ -121,21 +130,34 @@ public class OcrExtractionService {
     }
 
     public ImageTextResult extract(BufferedImage image, String languages) throws IOException {
+        return extract(image, languages, null);
+    }
+
+    public ImageTextResult extract(
+            BufferedImage image, String languages, BooleanSupplier canceled) throws IOException {
         Path directory = Files.createTempDirectory("ocr-image-");
         try {
             Path png = directory.resolve("source.png");
             if (!ImageIO.write(image, "png", png.toFile())) {
                 throw new IOException("无法写出 OCR 临时图片");
             }
-            return extract(png, languages);
+            return extract(png, languages, canceled);
         } finally {
             deleteQuietly(directory);
         }
     }
 
     public ImageTextResult extract(Path image, String languages) throws IOException {
+        return extract(image, languages, null);
+    }
+
+    public ImageTextResult extract(
+            Path image, String languages, BooleanSupplier canceled) throws IOException {
         if (!enabled) {
             throw new OcrFailure(OcrFailure.NO_ENGINE, "OCR 已被关闭（payroll.kb.ocr.enabled=false）", List.of());
+        }
+        if (canceled != null && canceled.getAsBoolean()) {
+            throw new OcrCanceled();
         }
         byte[] bytes = Files.readAllBytes(image);
         String sha256 = sha256(bytes);
@@ -147,6 +169,9 @@ public class OcrExtractionService {
         boolean anyEngineReady = false;
 
         for (String engineId : engineOrder()) {
+            if (canceled != null && canceled.getAsBoolean()) {
+                throw new OcrCanceled();
+            }
             ImageTextExtractor extractor = extractors.get(engineId);
             if (extractor == null) {
                 attempts.add(attempt(engineId, null, null, 0, 0, false, null, "未注册"));
@@ -174,7 +199,9 @@ public class OcrExtractionService {
             } else {
                 long started = System.currentTimeMillis();
                 try {
-                    raw = runWithTimeout(extractor, image, normalizedLanguages);
+                    raw = runWithTimeout(extractor, image, normalizedLanguages, canceled);
+                } catch (OcrCanceled e) {
+                    throw e;
                 } catch (OcrFailure e) {
                     throw e;
                 } catch (InterruptedException e) {
@@ -182,6 +209,7 @@ public class OcrExtractionService {
                     throw new IOException("OCR 被中断", e);
                 } catch (Exception e) {
                     latency = System.currentTimeMillis() - started;
+                    failures.increment();
                     breakerFailure(engineId);
                     lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                     attempts.add(
@@ -239,11 +267,13 @@ public class OcrExtractionService {
         }
 
         if (best != null) {
+            failures.increment();
             throw new OcrFailure(
                     OcrFailure.NO_TEXT,
                     "识别结果未达到质量门：" + best.engine() + "（" + best.gateDetail() + "）",
                     attempts);
         }
+        failures.increment();
         if (!anyEngineReady) {
             throw new OcrFailure(
                     OcrFailure.NO_ENGINE,
@@ -257,18 +287,38 @@ public class OcrExtractionService {
                 attempts);
     }
 
+    /** 每 200ms 检查一次取消/超时：取消时中断识别线程，Tesseract 子进程随之被销毁。 */
     private ImageTextExtractor.Result runWithTimeout(
-            ImageTextExtractor extractor, Path image, String languages) throws Exception {
+            ImageTextExtractor extractor,
+            Path image,
+            String languages,
+            BooleanSupplier canceled)
+            throws Exception {
         int timeout = Math.max(5, extractor.timeoutSeconds());
         Future<ImageTextExtractor.Result> future =
                 timeoutExecutor.submit(() -> extractor.extract(image, languages));
+        long deadline = System.currentTimeMillis() + timeout * 1000L;
         try {
-            return future.get(timeout, TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            throw new IOException("识别超时（" + timeout + "s）");
+            while (true) {
+                long remaining = deadline - System.currentTimeMillis();
+                try {
+                    return future.get(Math.max(1, Math.min(200, remaining)), TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    if (canceled != null && canceled.getAsBoolean()) {
+                        future.cancel(true);
+                        throw new OcrCanceled();
+                    }
+                    if (System.currentTimeMillis() >= deadline) {
+                        future.cancel(true);
+                        throw new IOException("识别超时（" + timeout + "s）");
+                    }
+                }
+            }
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof OcrCanceled ocrCanceled) {
+                throw ocrCanceled;
+            }
             if (cause instanceof Exception exception) {
                 throw exception;
             }

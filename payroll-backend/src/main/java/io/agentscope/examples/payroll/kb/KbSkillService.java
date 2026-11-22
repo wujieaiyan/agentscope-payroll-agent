@@ -87,6 +87,7 @@ public class KbSkillService {
     private final KbDocumentService documentService;
     private final KbPermissionService permissionService;
     private final KbRetrievalService retrievalService;
+    private final KbEmbeddingService embeddingService;
     private final H2AdminRepository adminRepository;
 
     private final int autoMaxSeries;
@@ -100,6 +101,7 @@ public class KbSkillService {
             KbDocumentService documentService,
             KbPermissionService permissionService,
             KbRetrievalService retrievalService,
+            KbEmbeddingService embeddingService,
             H2AdminRepository adminRepository,
             @Value("${payroll.kb.chat.auto-max-series:5}") int autoMaxSeries) {
         this.seriesService = seriesService;
@@ -110,6 +112,7 @@ public class KbSkillService {
         this.documentService = documentService;
         this.permissionService = permissionService;
         this.retrievalService = retrievalService;
+        this.embeddingService = embeddingService;
         this.adminRepository = adminRepository;
         this.autoMaxSeries = Math.max(1, Math.min(autoMaxSeries, MAX_SEARCH_SERIES));
     }
@@ -249,6 +252,8 @@ public class KbSkillService {
         List<Long> denied = new ArrayList<>();
         List<LibraryResult> libraries = new ArrayList<>();
         boolean readyDocument = false;
+        // 多库检索共用同一次查询嵌入，避免按库重复调用嵌入服务。
+        KbEmbeddingService.Embedding queryEmbedding = embeddingService.embedQuery(query);
         for (Long seriesId : seriesIds) {
             SeriesView series;
             try {
@@ -262,7 +267,8 @@ public class KbSkillService {
                     retrievalService.search(
                             seriesId,
                             new RetrievalTestRequest(query, perSeriesLimit, null, false),
-                            user);
+                            user,
+                            queryEmbedding);
             if (!"NONE".equals(engineOf(result))) {
                 readyDocument = true;
             }

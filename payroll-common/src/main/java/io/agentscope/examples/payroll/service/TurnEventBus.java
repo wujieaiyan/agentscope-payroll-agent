@@ -15,11 +15,12 @@ import java.util.Set;
 public interface TurnEventBus {
 
     /** 事件 schema 版本；新增字段保持向后兼容时再加一。 */
-    int VERSION = 2;
+    int VERSION = 3;
 
     /** 已注册的事件类型；未注册的事件仍会下发，但会记录告警供发布方排查。 */
     Set<String> KNOWN_EVENTS =
             Set.of(
+                    "queued",
                     "start",
                     "agent_start",
                     "agent_text",

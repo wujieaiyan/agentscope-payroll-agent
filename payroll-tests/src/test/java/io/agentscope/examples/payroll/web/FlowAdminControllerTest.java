@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -8,9 +9,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -199,7 +200,7 @@ class FlowAdminControllerTest {
                 Map.of("activeFlowId", "flow-1", "clearedAgentId", "agent-x"),
                 response.data());
         verify(flowRegistry).setActiveFlow(eq("flow-1"), isNull());
-        verify(agentRegistry).clearActiveAgent();
+        verify(agentRegistry, never()).clearActiveAgent();
         verify(auditService)
                 .record(
                         eq("flow.activate"),
@@ -218,22 +219,22 @@ class FlowAdminControllerTest {
     }
 
     @Test
-    @DisplayName("激活流程先写流程再清智能体")
-    void activateWritesFlowBeforeClearingAgent() {
+    @DisplayName("激活流程只写一次运行时设置文档，不再单独清智能体")
+    void activateUsesSinglePublishAcrossRegistries() {
         FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(flow);
         when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
 
         controller.activate("flow-1", null);
 
-        var order = inOrder(flowRegistry, agentRegistry);
-        order.verify(flowRegistry).setActiveFlow("flow-1", null);
-        order.verify(agentRegistry).clearActiveAgent();
+        verify(flowRegistry, times(1)).setActiveFlow("flow-1", null);
+        verify(agentRegistry, never()).clearActiveAgent();
+        verify(agentRegistry, never()).setActiveAgent(any(), any());
     }
 
     @Test
-    @DisplayName("写流程失败时不清理智能体")
-    void activateAbortsWhenFlowWriteFails() {
+    @DisplayName("写运行时设置失败时不触发任何补偿写")
+    void activateAbortsWhenSettingsWriteFails() {
         FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(flow);
         when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
@@ -244,24 +245,21 @@ class FlowAdminControllerTest {
         assertThrows(
                 PayrollException.class, () -> controller.activate("flow-1", null));
         verify(agentRegistry, never()).clearActiveAgent();
+        verify(auditService, never()).record(any(), any(), any(), any(), any());
     }
 
     @Test
-    @DisplayName("清理智能体失败时激活仍成功并给出告警")
-    void activateKeepsFlowWhenAgentClearFails() {
+    @DisplayName("激活响应不再携带双写告警字段")
+    void activateResponseHasNoWarningField() {
         FlowDefinition flow = flow("flow-1", standardNodes(), standardEdges());
         when(flowRegistry.find("flow-1")).thenReturn(flow);
         when(agentRegistry.configuredAgentId()).thenReturn("agent-x");
-        doThrow(new PayrollException("写配置超时"))
-                .when(agentRegistry)
-                .clearActiveAgent();
 
         Map<?, ?> data = (Map<?, ?>) controller.activate("flow-1", null).data();
 
         assertEquals("flow-1", data.get("activeFlowId"));
         assertEquals("agent-x", data.get("clearedAgentId"));
-        assertTrue(data.get("warning").toString().contains("写配置超时"), data.toString());
-        verify(flowRegistry).setActiveFlow("flow-1", null);
+        assertFalse(data.containsKey("warning"), data.toString());
     }
 
     @Test

@@ -54,6 +54,30 @@ class ApiExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("容量拒绝返回统一 429 契约与 Retry-After 头")
+    void reportsRateLimitedContract() {
+        ResponseEntity<Map<String, Object>> response =
+                handler.handleRateLimited(new TooManyRequestsException("当前排队已满，请稍后重试"));
+
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS, response.getStatusCode());
+        assertEquals("5", response.getHeaders().getFirst("Retry-After"));
+        assertEquals("BUSY", response.getBody().get("code"));
+        assertEquals(5, response.getBody().get("retryAfterSeconds"));
+        assertEquals("当前排队已满，请稍后重试", response.getBody().get("message"));
+    }
+
+    @Test
+    @DisplayName("容量拒绝支持自定义码与冷却秒数")
+    void reportsRateLimitedWithCustomRetryAfter() {
+        ResponseEntity<Map<String, Object>> response =
+                handler.handleRateLimited(new TooManyRequestsException("QUOTA", 12, "配额已用完"));
+
+        assertEquals("12", response.getHeaders().getFirst("Retry-After"));
+        assertEquals("QUOTA", response.getBody().get("code"));
+        assertEquals(12, response.getBody().get("retryAfterSeconds"));
+    }
+
+    @Test
     @DisplayName("配置中心不可用返回 503 且不泄露内部地址")
     void reportsUnavailableWithoutInternals() {
         ResponseEntity<ApiResponse> response =

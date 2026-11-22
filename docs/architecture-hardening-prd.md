@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | v0.4（批次 1–2、批次 4 已实现，§14 其余批次待确认） |
+| 版本 | v0.6（批次 1–6 已实现；批次 3/5/6 补充落地说明） |
 | 日期 | 2026-11-22 |
-| 状态 | 批次 1–2 与批次 4（V1–V5）已编码并通过离线测试，已提交并推送 `feature/dev-team`（批次 1–2：`5297c6c`；批次 4：`3816d02`）；批次 3、5、6 待评审 |
+| 状态 | 批次 1–2（`5297c6c`）、批次 4（`3816d02`）已推送 `feature/dev-team`；批次 3（O1–O7）、批次 5（W1–W6）、批次 6（X1–X7）已编码，离线全量测试与前端构建通过，未提交 |
 | 关联文档 | `docs/model-and-skill-scale-prd.md`、`docs/three-module-split-spec.md`、`docs/chat-resume.md`、`docs/vector-memory-spec.md`、`docs/multi-node-deploy.md` |
 | 范围 | Nacos 配置面读写一致性、技能缓存可靠性、对话执行面并发与依赖降级、模型与路由缓存正确性、运维基线、KB 解析/检索与集群可用性 |
 | 输入 | 2026-11-21 架构评审（P0/P1/P2，证据见 §2）；2026-11-22 性能、高并发与可用性复核（见 §14）；v0.3 补齐探针契约、Redis 持久化探测、指标告警与前端契约；v0.4 记录批次 4（V1–V5）实现状态与代码入口 |
@@ -754,24 +754,35 @@ for (int pageNo = 1; pageNo <= maxPages; pageNo++) {
 | O3 | 健康探测 | `/health` 返回 `{status, components:{db, redis, nacos, es}}`；DB `SELECT 1` 1s 超时，Redis ping，Nacos 用最近一次成功列表时间，ES 可选；删除 `database.url`；核心依赖不可用时整体 503 | 停 Redis/Nacos 分别得到 DEGRADED/503；响应无地址、用户名 |
 | O4 | 备份与恢复 | `scripts/backup.sh`：MySQL 用 `MYSQL_PWD` 环境变量（不出现在命令行与日志），Nacos 通过 v1 导出接口；保留 7 天；`docs/restore-runbook.md` 含演练步骤 | 在临时库完整恢复一次并跑冒烟查询 |
 | O5 | 成本闸门 | 基于 `llm_usage` 聚合每用户每日 token；超限返回 429 并提示；默认关闭（预算 0 = 不限） | 设置小额预算后第 N+1 轮被拒；关闭后恢复 |
-| O6 | 强制首改密 | `app_users` 增 `must_change_password`（H2：`BOOLEAN DEFAULT FALSE`；MySQL：`TINYINT(1) NOT NULL DEFAULT 0`，`V19__must_change_password.sql`）；登录响应带 `mustChangePassword`；拦截器仅放行 `/api/auth/login`、`/api/auth/password`、`/api/auth/logout`、`/api/health`；管理台新建用户/重置密码置 TRUE，存量用户 FALSE | 新用户登录后只能改密；改密后恢复正常；存量账号不受影响 |
+| O6 | 强制首改密 | `app_users` 增 `must_change_password`（H2：`BOOLEAN DEFAULT FALSE`；MySQL：`TINYINT(1) NOT NULL DEFAULT 0`，`V20__must_change_password.sql`）；登录与 `/api/auth/me` 响应带 `must_change_password`（全局 Jackson 为 snake_case，前端已按该键读取）；拦截器仅放行 `/api/auth/login`、`/api/auth/password`、`/api/auth/logout`、`/api/auth/me`、`/api/health`；管理台新建用户/重置密码置 TRUE，存量用户与引导管理员 FALSE | 新用户登录后只能改密；改密后恢复正常；存量账号不受影响 |
 | O7 | backlog 校正 | 见下表 | 任务列表与代码状态一致 |
 
 backlog 校正（对应任务 #142–#152）：
 
 | 任务 | 结论 |
 | --- | --- |
-| #142 默认配置与成本开关 | 并入 O5；默认配置项已在各 PRD 落地，不再单列 |
+| #142 默认配置与成本开关 | 已由 O5 完成，关闭；默认配置项已在各 PRD 落地，不再单列 |
 | #143 KB 任务启动恢复与重试上限 | 已完成（#371），关闭 |
-| #144 对话并发、有界队列与 429 | 由 R1 完成 |
-| #145 安全基线 | 拆为三部分：登录限流已完成（#154）；强制改密 → O6；绑定地址写入部署文档 |
-| #146 Actuator 与 Prometheus | 降级为可选；先用 O3 的 `/health` 与现有日志指标 |
+| #144 对话并发、有界队列与 429 | 已由 R1 完成，关闭 |
+| #145 安全基线 | 已闭环：登录限流（#154）、强制首改密（O6）、绑定地址写入部署文档；关闭 |
+| #146 Actuator 与 Prometheus | 保留为可选；先用 O3 的 `/health` 与现有日志指标 |
 | #147 HikariCP 与关键事务 | 已完成（#153），关闭 |
 | #149 KB 提示注入防护 | 保留为独立 P1 安全项 |
-| #150 备份任务与恢复手册 | 由 O4 完成 |
+| #150 备份任务与恢复手册 | 已由 O4 完成（`scripts/backup.sh` + `docs/restore-runbook.md`），关闭 |
 | #151 效果回归集与脚本 | 保留，与 §9 的金标集合并 |
 | #152 全量测试与端到端 | 由各批次验收承接 |
 | #373 偏好回显示例文案 | 保留 P1，不受本 PRD 影响 |
+
+### 7.1 实现状态（2026-11-22）
+
+| ID | 代码入口 | 测试 | 与设计的偏差 |
+| --- | --- | --- | --- |
+| O1 | `payroll-common/.../skill/NacosRuntimeSettings.java`（单一设置文档与 revision 校验）、`NacosAgentRegistry` / `NacosFlowRegistry`（共用该 Bean）、`AgentAdminController` / `FlowAdminController`（每次切换一次 publish） | `NacosRuntimeSettingsTest`、`AgentAdminControllerTest`、`FlowAdminControllerTest` | 控制器返回 `{activeAgentId, clearedFlowId}` / `{activeFlowId, clearedAgentId}`，不再返回 `data.warning`；旧文档并发写入仅 WARN 跳过校验 |
+| O2 | `NacosSkillRegistry.FileCache`（访问序 LRU）、`PayrollCoreConfiguration`（`payroll.skill.file-cache.*`） | `NacosSkillRegistryTest` | 按 `skillId` 计数与字节双上限；`mdHash` 变化即失效 |
+| O3 | `payroll-common/.../health/RuntimeHealthService.java`、`payroll-backend/.../web/HealthEndpointsController.java` | `RuntimeHealthServiceTest`、`HealthEndpointsControllerTest` | `/health` 的 `components` 不返回地址与用户名；ES 缺失时该组件为 `SKIPPED` 而非 DOWN |
+| O4 | `scripts/backup.sh`、`docs/restore-runbook.md` | 本机 H2 + Nacos v1 导出实跑通过 | Nacos 改为 v1 导出 zip（原设计未指定实现方式）；不可达时跳过并提示，不使备份整体失败 |
+| O5 | `payroll-common/.../service/TokenBudgetService.java`、`PayrollCoreConfiguration`、`ChatSessionController` | `TokenBudgetServiceTest`、`ChatSessionControllerTest` | 预算超限复用 429 通道，响应体与既有配额拒绝一致 |
+| O6 | `H2AdminRepository`（建号/重置置 TRUE、引导管理员 FALSE）、`AuthService`、`AuthInterceptor`、`AuthController`、`V20__must_change_password.sql` | `ForcedPasswordChangeWebTest`（端到端）、`PayrollAuthWebTest` | 迁移编号为 V20（V19 已被审计写入结果占用）；JSON 键为 `must_change_password`；拦截器额外放行 `/api/auth/me`，供前端首屏判断 |
 
 ---
 
@@ -794,6 +805,7 @@ backlog 校正（对应任务 #142–#152）：
 | `payroll.nacos.list.max-pages` | 50 | 2 | 列表翻页上限 |
 | `payroll.skill.file-cache.max-entries` | 128 | 3 | 文件包缓存条数 |
 | `payroll.skill.file-cache.max-bytes` | 33554432 | 3 | 文件包缓存字节上限 |
+| `payroll.health.nacos-stale-seconds` | 300 | 3 | `/health` 中 Nacos 新鲜度窗口，超过即 DOWN |
 | `payroll.usage.daily-token-budget` | 0 | 3 | 每日 token 预算，0 为不限 |
 | `payroll.auth.force-password-change` | true | 3 | 首改密开关 |
 | `payroll.deployment.mode` | `single` | 4 | `single` 保留本地降级；`cluster` 禁用租约/配额/事件本地回退 |
@@ -1070,6 +1082,16 @@ W6 的前后端契约（批次 5 一并落地）：
 | X6 | 模型连接故障切换（D14） | 同平面按优先级连接级切换一次，总预算 5s；失败不重试第二次 |
 | X7 | 时钟与签名 | 启动时校验 NTP 偏移，超阈值告警；签名窗口可配置 |
 
+落地说明（批次 6，均已实现并有单测）：
+
+- **X1**：`KbElasticsearchService` 按 UTF-8 字节累计，单批超过 5MB 先提交再继续；`_bulk?refresh=false`，全部写完追加一次 `_refresh`（超时 15s，失败只告警不影响入库结果），等价于原 `wait_for` 语义。检索保留 `script_score + cosineSimilarity`（带 `seriesId` + `chunkLevel` 过滤）：现有 mapping 未声明 `similarity: cosine`，切 `knn` 需要重建索引并改变排序，本次不采纳；留待有真实 10 万 chunk 基线后再评估 topK 预筛。
+- **X2**：`KbTaskService` 先按系列聚合并集，文档名走 `KbDocumentStore.findByIds(seriesId, ids)`，操作人走新增的 `H2AdminRepository.findUsers(Collection<Long>)`（单条 `IN` 查询），缺失用户回退「用户#{id}」。
+- **X3**：`KbParserService` 的 `sha256` 改为 64KB 流式摘要，不再 `Files.readAllBytes` 把整份 PDF 读进堆。
+- **X4**：`InMemoryTurnEventBus` 用固定上限环形缓冲（容量按需 64→10000，写满覆盖最旧），追加与裁剪 O(1)，`earliestSeq` 直接读队头。
+- **X5**：`ChatSessionManager` 拆成 `turn-heartbeat`、`turn-stale-scan`、`turn-cleanup` 三个 daemon 单线程调度器，心跳不会被失联扫描或清理阻塞；清理仅在开启保留天数时创建。
+- **X6**：`FailoverModel` 包装主连接，仅在**尚未产出任何元素**且异常链含 `IOException`/`TimeoutException`、耗时 ≤5s 时切换一次；备连接由 `ModelConnectionRegistry.fallback(primary, filter)` 按注册优先级挑选，编码面只允许 `writeCapable` 连接；备连接失败直接上抛，不再发起第三次尝试；切换记 `payroll.model.failover{plane}`。
+- **X7**：runtime `/internal/health` 增加 `epoch_millis`；Web 启动时 `AgentRuntimeClient.serverTimeMillis()` 取服务端时间，按请求往返中点估算偏移，超过 `payroll.internal.clock-skew-warning-seconds`（默认 60s）只记 WARN 不阻断启动；校验窗口沿用 `payroll.internal.max-skew-seconds`（默认 120s），两端需一致。
+
 ### 14.9 容量模型
 
 | 维度 | 公式 | 现状代入 |
@@ -1101,6 +1123,7 @@ W6 的前后端契约（批次 5 一并落地）：
 - 配额 TTL 变更无数据迁移，旧键自然过期；Lua 与旧实现可并存一个版本。
 - 批次 5 SSE 改造保留 `payroll.chat.sse-tail-model=legacy|shared`，灰度一个版本后删除 legacy。
 - KB 检索瘦身不改表结构；`payroll.kb.retrieval.max-candidates` 可调回大值；`payroll.kb.ingest.batch-size=1` 回退逐行写入。
+- 批次 6 无表结构与接口变更：X1 的 5MB 分片与末尾刷新、X3 流式摘要、X4 环形缓冲、X5 线程拆分均为内部实现，回滚即回退代码；X6 只注册了备连接才会切换，删除备连接即关闭；X7 的偏移自检只告警，可用 `payroll.internal.clock-skew-warning-seconds` 调整灵敏度。
 - 文档同步：更新 `docs/multi-node-deploy.md`——新增 cluster 模式章节（`payroll.deployment.mode`、Redis AOF/HA 硬前提、`/livez`/`/readyz` 探针配置）、nginx 的 SSE 配置（`proxy_buffering off`、`proxy_read_timeout` 不小于轮次上限、`X-Accel-Buffering: no`、续流禁用重试）、以及 `MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED` 只影响详情不影响 readiness 的说明。
 
 ### 14.11 手工验收（Run 模式，不用 Debug）
@@ -1143,7 +1166,7 @@ W6 的前后端契约（批次 5 一并落地）：
 | `payroll.readyz.status` / `payroll.readyz.failing`（dep=db\|redis） | gauge | 非 UP 持续 2 分钟 | V3 |
 | `payroll.redis.persistence.ok` | gauge (0/1) | 0 时告警（cluster 为致命） | V3、A-3 |
 | `payroll.runtime.submit.budget.exhausted` | counter | 5 分钟内 > 0 | V5 |
-| `payroll.model.failover`（待补） | counter | 持续增长时检查主连接 | X6 |
+| `payroll.model.failover`（plane=控制面\|编码面） | counter | 持续增长时检查主连接 | X6 |
 
 要求：所有指标带 `deployment.mode` 标签，便于区分单机与集群的降级行为。
 

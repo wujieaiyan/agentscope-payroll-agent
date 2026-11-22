@@ -51,7 +51,7 @@ class ChatAttachmentServiceTest {
         store = new ChatAttachmentStore(database);
         sessionId = chatStore.create(USER_ID, "附件会话").id();
         ChatSessionManager manager = new ChatSessionManager(chatStore, (session, user) -> null);
-        KbOcrService ocr = new KbOcrService(false, "tesseract", "", "chi_sim+eng", 300, 60, 0);
+        KbOcrService ocr = new KbOcrService(false, "tesseract", "", "chi_sim+eng", 200, 60, 0, 2, 600);
         KbParserService parser =
                 new KbParserService(
                         ocr,

@@ -85,11 +85,16 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(TooManyRequestsException.class)
-    public ResponseEntity<ApiResponse> handleRateLimited(TooManyRequestsException e) {
+    public ResponseEntity<Map<String, Object>> handleRateLimited(TooManyRequestsException e) {
         AuditContext.markFailure(e.getMessage(), HttpStatus.TOO_MANY_REQUESTS.value());
+        // 容量拒绝统一契约：{code, retryAfterSeconds, message}，并保留 Retry-After 头。
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                .header(HttpHeaders.RETRY_AFTER, "5")
-                .body(ApiResponse.error(e.getMessage()));
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(e.retryAfterSeconds()))
+                .body(
+                        Map.of(
+                                "code", e.code(),
+                                "retryAfterSeconds", e.retryAfterSeconds(),
+                                "message", e.getMessage()));
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

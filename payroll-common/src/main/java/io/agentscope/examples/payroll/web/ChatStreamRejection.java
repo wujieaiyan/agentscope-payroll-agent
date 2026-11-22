@@ -14,13 +14,18 @@ public final class ChatStreamRejection {
     private ChatStreamRejection() {}
 
     public static void record(Executor executor) {
-        TurnMetrics.streamRejected();
+        record(executor, "executor");
+    }
+
+    /** reason 区分 executor / tail / runtime，指标与日志都按执行器归属。 */
+    public static void record(Executor executor, String reason) {
+        TurnMetrics.streamRejected(reason);
         int queued = -1;
         int active = -1;
         if (executor instanceof ThreadPoolExecutor pool) {
             queued = pool.getQueue().size();
             active = pool.getActiveCount();
         }
-        log.warn("[SSE] 对话执行队列已满：queued={}，active={}", queued, active);
+        log.warn("[SSE] 对话执行队列已满：reason={}，queued={}，active={}", reason, queued, active);
     }
 }

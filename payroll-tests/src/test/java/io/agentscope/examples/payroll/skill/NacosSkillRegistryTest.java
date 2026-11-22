@@ -528,6 +528,57 @@ class NacosSkillRegistryTest {
         assertTrue(error.getMessage().contains("Nacos 未启用"), error.getMessage());
     }
 
+    @Test
+    @DisplayName("文件缓存条数超限时按访问序淘汰最久未用条目")
+    void evictsLeastRecentlyUsedFileCacheEntry() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true, Duration.ofSeconds(60), 2, 32L * 1024 * 1024);
+        for (String id : List.of("skill-a", "skill-b", "skill-c")) {
+            registry.create(id, "角色", roleContent("规则"));
+            registry.replaceFiles(id, List.of(file("references/faq.md", "# " + id)));
+        }
+        assertEquals(Set.of("skill-b", "skill-c"), fileCacheKeys(registry), "最早写入的条目应被淘汰");
+
+        // 访问 skill-b 使其成为最近使用项，再写入 skill-d 应淘汰 skill-c。
+        registry.fileContent("skill-b", "references/faq.md");
+        registry.create("skill-d", "角色", roleContent("规则"));
+        registry.replaceFiles("skill-d", List.of(file("references/faq.md", "# skill-d")));
+
+        assertEquals(Set.of("skill-b", "skill-d"), fileCacheKeys(registry));
+    }
+
+    @Test
+    @DisplayName("文件缓存正文总字节超限时同样按 LRU 淘汰")
+    void evictsFileCacheByBytes() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true, Duration.ofSeconds(60), 8, 150);
+        String payload = "x".repeat(100);
+        registry.create("skill-a", "角色", roleContent("规则"));
+        registry.replaceFiles("skill-a", List.of(file("references/a.md", payload)));
+        registry.create("skill-b", "角色", roleContent("规则"));
+        registry.replaceFiles("skill-b", List.of(file("references/b.md", payload)));
+
+        assertEquals(Set.of("skill-b"), fileCacheKeys(registry), "两倍上限的正文只应保留最近一条");
+    }
+
+    @Test
+    @DisplayName("正文变化后文件缓存按 mdHash 失效，不再返回旧文件")
+    void invalidatesFileCacheWhenBodyChanges() throws Exception {
+        nacos = new FakeNacosServer();
+        NacosSkillRegistry registry = registry(true);
+        registry.create(AUDITOR, "角色", roleContent("初版规则。"));
+        registry.replaceFiles(AUDITOR, List.of(file("references/faq.md", "# FAQ")));
+        assertEquals("# FAQ", registry.fileContent(AUDITOR, "references/faq.md"));
+
+        // 模拟其他节点改写正文：快照重建后 mdHash 变化，缓存必须失效而不是继续返回旧文件。
+        nacos.configs.put(
+                AUDITOR + ".md",
+                "---\nname: " + AUDITOR + "\ndescription: \"角色\"\n---\n" + roleContent("新版规则。"));
+        registry.create("cache-probe", "角色", roleContent("规则"));
+
+        assertTrue(registry.files(AUDITOR).isEmpty(), "正文变化后不应继续使用旧文件缓存");
+    }
+
     private static SkillFilePackage.SkillFile file(String path, String content) {
         return new SkillFilePackage.SkillFile(path, content);
     }
@@ -572,11 +623,29 @@ class NacosSkillRegistryTest {
         return new NacosSkillRegistry(settings);
     }
 
+    private NacosSkillRegistry registry(
+            boolean enabled, Duration ttl, int maxEntries, long maxBytes) {
+        NacosSkillSettings settings =
+                new NacosSkillSettings(
+                        enabled,
+                        nacos.url(),
+                        "payroll-agent",
+                        "",
+                        "",
+                        "",
+                        Duration.ofSeconds(2),
+                        ttl);
+        return new NacosSkillRegistry(settings, SkillFileSettings.defaults(), maxEntries, maxBytes);
+    }
+
     @SuppressWarnings("unchecked")
     private static Set<String> fileCacheKeys(NacosSkillRegistry registry) throws Exception {
         Field field = NacosSkillRegistry.class.getDeclaredField("fileCache");
         field.setAccessible(true);
-        Map<String, ?> cache = (Map<String, ?>) field.get(registry);
-        return Set.copyOf(cache.keySet());
+        Object cache = field.get(registry);
+        Field entriesField = cache.getClass().getDeclaredField("entries");
+        entriesField.setAccessible(true);
+        Map<String, ?> entries = (Map<String, ?>) entriesField.get(cache);
+        return Set.copyOf(entries.keySet());
     }
 }

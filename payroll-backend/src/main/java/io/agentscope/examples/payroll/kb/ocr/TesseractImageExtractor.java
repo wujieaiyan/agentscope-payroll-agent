@@ -41,7 +41,7 @@ public class TesseractImageExtractor implements ImageTextExtractor {
 
     @Override
     public int timeoutSeconds() {
-        return ocrService.timeoutSeconds();
+        return ocrService.pageTimeoutSeconds();
     }
 
     @Override

@@ -10,6 +10,7 @@ import io.agentscope.examples.payroll.kb.KbModels.Chunk;
 import io.agentscope.examples.payroll.kb.KbModels.ConfigVersion;
 import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbModels.IngestTask;
+import io.agentscope.examples.payroll.kb.ocr.OcrCanceled;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -23,7 +24,9 @@ import org.springframework.stereotype.Service;
 public class KbIngestService {
 
     private static final Logger log = LoggerFactory.getLogger(KbIngestService.class);
+    /** 嵌入服务单次请求上限；向量回写与行插入各自按 100/批。 */
     private static final int EMBED_BATCH = 16;
+    private static final int WRITE_BATCH = 100;
 
     private final KbTaskStore taskStore;
     private final KbDocumentStore documentStore;
@@ -97,10 +100,10 @@ public class KbIngestService {
                             document.ext(),
                             payload.parse,
                             (pageNo, totalPages, ocrPages) -> {
+                                ensureNotCanceled(taskId);
                                 if (pageNo % 20 != 0 && pageNo != totalPages) {
                                     return;
                                 }
-                                ensureNotCanceled(taskId);
                                 int progress =
                                         2
                                                 + (int)
@@ -120,7 +123,8 @@ public class KbIngestService {
                                                 + ocrPages
                                                 + " 页",
                                         null);
-                            });
+                            },
+                            () -> taskStore.cancelRequested(taskId));
             if (parsed.text() == null || parsed.text().strip().length() < 10) {
                 throw new PayrollException("解析文本过短或为空，请确认文档包含可提取文字");
             }
@@ -165,7 +169,11 @@ public class KbIngestService {
                 }
             }
             stage = System.currentTimeMillis();
-            try {
+            if (elasticsearchService.enabled()) {
+                // ES 是本部署的检索主路径：索引写不进去不能标 READY，否则检索会静默缺数据。
+                if (!elasticsearchService.available()) {
+                    throw new PayrollException("ES 不可用，索引未写入，请恢复后重试");
+                }
                 elasticsearchService.indexChunks(
                         document.seriesId(),
                         document.id(),
@@ -175,15 +183,14 @@ public class KbIngestService {
                 log(
                         taskId,
                         "INDEX",
-                        "ES 索引完成："
-                                + indexed.size()
-                                + " 块（"
-                                + (elasticsearchService.available() ? "已连接" : "不可用，仅本地检索")
-                                + "）",
+                        "ES 索引完成：" + indexed.size() + " 块",
                         (int) (System.currentTimeMillis() - stage));
-            } catch (RuntimeException e) {
-                log(taskId, "INDEX", "ES 索引失败，仅保留本地索引：" + e.getMessage(), null);
-                log.warn("[知识库] ES 索引失败：{}", e.getMessage());
+            } else {
+                log(
+                        taskId,
+                        "INDEX",
+                        "ES 未启用，仅保留本地索引",
+                        (int) (System.currentTimeMillis() - stage));
             }
 
             documentStore.updateResult(
@@ -200,7 +207,7 @@ public class KbIngestService {
                     "DONE",
                     "入库成功：" + indexed.size() + " 个检索块",
                     (int) (System.currentTimeMillis() - started));
-        } catch (IngestCanceled canceled) {
+        } catch (IngestCanceled | OcrCanceled canceled) {
             cleanup(document);
             if (document != null) {
                 documentStore.updateStatus(document.id(), DocStatus.PENDING, null, "入库任务已取消");
@@ -222,39 +229,76 @@ public class KbIngestService {
     }
 
     private List<Long> persistDrafts(Document document, List<Draft> drafts) {
-        List<Long> ids = new ArrayList<>(drafts.size());
-        for (Draft draft : drafts) {
-            Long parentChunkId =
-                    draft.parentIndex() == null ? null : ids.get(draft.parentIndex());
-            Chunk chunk =
-                    new Chunk(
-                            0L,
-                            document.seriesId(),
-                            document.id(),
-                            parentChunkId,
-                            draft.level(),
-                            draft.seq(),
-                            draft.content(),
-                            draft.contentHash(),
-                            draft.tokenCount(),
-                            draft.charStart(),
-                            draft.charEnd(),
-                            draft.pageNo(),
-                            null,
-                            draft.titlePath(),
-                            draft.metadata(),
-                            null,
-                            null,
-                            "ACTIVE",
-                            Instant.now());
-            ids.add(chunkStore.insert(chunk));
+        Long[] ids = new Long[drafts.size()];
+        List<Integer> parents = new ArrayList<>();
+        List<Integer> children = new ArrayList<>();
+        for (int i = 0; i < drafts.size(); i++) {
+            if (drafts.get(i).level() == ChunkLevel.PARENT) {
+                parents.add(i);
+            } else {
+                children.add(i);
+            }
         }
-        return ids;
+        // 父块先入库拿到主键，子块的 parent_chunk_id 才能在同一批里正确引用。
+        insertDrafts(document, drafts, parents, ids);
+        insertDrafts(document, drafts, children, ids);
+        List<Long> ordered = new ArrayList<>(drafts.size());
+        for (Long id : ids) {
+            ordered.add(id);
+        }
+        return ordered;
+    }
+
+    private void insertDrafts(
+            Document document, List<Draft> drafts, List<Integer> indexes, Long[] ids) {
+        for (int start = 0; start < indexes.size(); start += WRITE_BATCH) {
+            int end = Math.min(start + WRITE_BATCH, indexes.size());
+            List<Chunk> batch = new ArrayList<>(end - start);
+            for (int k = start; k < end; k++) {
+                Draft draft = drafts.get(indexes.get(k));
+                Long parentChunkId =
+                        draft.parentIndex() == null ? null : ids[draft.parentIndex()];
+                if (draft.parentIndex() != null && parentChunkId == null) {
+                    throw new IllegalStateException(
+                            "父分块缺少主键，分块序号=" + draft.parentIndex());
+                }
+                batch.add(toChunk(document, draft, parentChunkId));
+            }
+            List<Long> inserted = chunkStore.insertBatchReturningIds(batch);
+            for (int k = 0; k < inserted.size(); k++) {
+                ids[indexes.get(start + k)] = inserted.get(k);
+            }
+        }
+    }
+
+    private static Chunk toChunk(Document document, Draft draft, Long parentChunkId) {
+        return new Chunk(
+                0L,
+                document.seriesId(),
+                document.id(),
+                parentChunkId,
+                draft.level(),
+                draft.seq(),
+                draft.content(),
+                draft.contentHash(),
+                draft.tokenCount(),
+                draft.charStart(),
+                draft.charEnd(),
+                draft.pageNo(),
+                null,
+                draft.titlePath(),
+                draft.metadata(),
+                null,
+                null,
+                "ACTIVE",
+                Instant.now());
     }
 
     private void embedChunks(long taskId, List<Long> ids, List<Draft> drafts) {
         int embedded = 0;
-        String source = "HASH";
+        String source = "OLLAMA";
+        List<Long> pendingIds = new ArrayList<>(WRITE_BATCH);
+        List<String> pendingVectors = new ArrayList<>(WRITE_BATCH);
         for (int start = 0; start < drafts.size(); start += EMBED_BATCH) {
             ensureNotCanceled(taskId);
             int end = Math.min(start + EMBED_BATCH, drafts.size());
@@ -270,15 +314,24 @@ public class KbIngestService {
             if (texts.isEmpty()) {
                 continue;
             }
-            KbEmbeddingService.Embedding embedding = embeddingService.embed(texts);
+            // 入库不做哈希降级：嵌入失败让任务 FAILED 后重试，避免把 HASH 向量当语义向量。
+            KbEmbeddingService.Embedding embedding = embeddingService.embedStrict(texts);
             source = embedding.source();
             for (int i = 0; i < targets.size(); i++) {
-                chunkStore.updateVector(
-                        targets.get(i), embeddingService.toJson(embedding.vectors().get(i)), source);
+                pendingIds.add(targets.get(i));
+                pendingVectors.add(embeddingService.toJson(embedding.vectors().get(i)));
+                if (pendingIds.size() >= WRITE_BATCH) {
+                    chunkStore.updateVectorsBatch(pendingIds, pendingVectors, source);
+                    pendingIds.clear();
+                    pendingVectors.clear();
+                }
             }
             embedded += targets.size();
             taskStore.updateProgress(
                     taskId, "EMBED", 45 + Math.min(45, (int) (45.0 * end / drafts.size())));
+        }
+        if (!pendingIds.isEmpty()) {
+            chunkStore.updateVectorsBatch(pendingIds, pendingVectors, source);
         }
         taskStore.appendLog(taskId, "EMBED", "INFO", "嵌入完成：" + embedded + " 块，来源 " + source, null);
     }

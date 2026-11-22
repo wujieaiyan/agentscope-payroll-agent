@@ -66,6 +66,8 @@ class ChatActionConfirmWebTest {
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
         registry.add("payroll.auth.enabled", () -> "true");
         registry.add("payroll.auth.admin-password", () -> ADMIN_PASSWORD);
+        // 本类验证写确认链路，新建用户的强制首改密由 ForcedPasswordChangeWebTest 专项覆盖。
+        registry.add("payroll.auth.force-password-change", () -> "false");
         registry.add("payroll.chat.action-confirm.enabled", () -> "true");
     }
 

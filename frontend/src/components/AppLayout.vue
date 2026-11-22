@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api/http';
-import { auth, can, logout } from '../stores/auth';
+import { auth, can, logout, markPasswordChanged } from '../stores/auth';
 import { toast } from '../stores/toast';
 
 const router = useRouter();
@@ -12,6 +12,8 @@ const collapsedGroups = reactive({});
 const showPassword = ref(false);
 const passwordSaving = ref(false);
 const passwordForm = reactive({ old_password: '', new_password: '', confirm: '' });
+const forcing = computed(() => auth.mustChangePassword);
+const passwordModalOpen = computed(() => forcing.value || showPassword.value);
 
 const groups = [
   {
@@ -73,6 +75,11 @@ function openPassword() {
   showPassword.value = true;
 }
 
+function closePassword() {
+  if (forcing.value) return;
+  showPassword.value = false;
+}
+
 async function savePassword() {
   if (passwordForm.new_password.length < 8) {
     toast('新密码至少 8 位', 'error');
@@ -92,6 +99,8 @@ async function savePassword() {
       },
     });
     showPassword.value = false;
+    markPasswordChanged();
+    Object.assign(passwordForm, { old_password: '', new_password: '', confirm: '' });
     toast('密码已修改', 'success');
   } catch (error) {
     toast(error.message, 'error');
@@ -180,13 +189,14 @@ async function signOut() {
       </main>
     </div>
 
-    <div v-if="showPassword" class="modal-mask" @click.self="showPassword = false">
+    <div v-if="passwordModalOpen" class="modal-mask" @click.self="closePassword">
       <div class="modal" style="width: min(420px, 96vw)">
         <div class="modal-head">
-          <h3>修改密码</h3>
-          <button class="subtle sm" @click="showPassword = false">关闭</button>
+          <h3>{{ forcing ? '首次登录需修改密码' : '修改密码' }}</h3>
+          <button v-if="!forcing" class="subtle sm" @click="closePassword">关闭</button>
         </div>
         <div class="modal-body">
+          <p v-if="forcing" class="hint">为保障账号安全，修改初始密码后才能使用管理台。</p>
           <label class="field">
             当前密码
             <input v-model="passwordForm.old_password" type="password" autocomplete="current-password" />
@@ -201,7 +211,8 @@ async function signOut() {
           </label>
         </div>
         <div class="modal-foot">
-          <button class="ghost" @click="showPassword = false">取消</button>
+          <button v-if="forcing" class="ghost" @click="signOut">退出登录</button>
+          <button v-else class="ghost" @click="closePassword">取消</button>
           <button class="primary" :disabled="passwordSaving" @click="savePassword">
             {{ passwordSaving ? '提交中…' : '确认修改' }}
           </button>

@@ -194,7 +194,7 @@ public class AgentAdminController {
         return ApiResponse.ok(result);
     }
 
-    /** 管理员指定全局核算智能体；设置后自动取消全局默认流程，避免流程与智能体同时生效。 */
+    /** 管理员指定全局核算智能体；单份运行时设置文档内同时清空默认流程。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.AGENT_MANAGE)
     public ApiResponse setActive(
@@ -203,17 +203,7 @@ public class AgentAdminController {
         AuditContext.markRevision(revision);
         find(id);
         String previousFlow = flowRegistry == null ? "" : flowRegistry.activeFlowId();
-        if (flowRegistry != null && !previousFlow.isBlank()) {
-            // 先清流程：失败直接 503，不触碰智能体设置。
-            flowRegistry.clearActiveFlow();
-        }
-        String agentId;
-        try {
-            agentId = registry.setActiveAgent(id, revision);
-        } catch (RuntimeException e) {
-            restoreFlow(previousFlow, e);
-            throw e;
-        }
+        String agentId = registry.setActiveAgent(id, revision);
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("activeAgentId", agentId);
         audit.put("clearedFlowId", previousFlow);
@@ -222,19 +212,6 @@ public class AgentAdminController {
         result.put("activeAgentId", agentId);
         result.put("clearedFlowId", previousFlow);
         return ApiResponse.ok(result);
-    }
-
-    /** 智能体设置写入失败时尽力恢复默认流程，避免两种激活模式同时失效。 */
-    private void restoreFlow(String previousFlow, RuntimeException cause) {
-        if (flowRegistry == null || previousFlow == null || previousFlow.isBlank()) {
-            return;
-        }
-        try {
-            flowRegistry.setActiveFlow(previousFlow);
-        } catch (RuntimeException restore) {
-            throw new PayrollUnavailableException(
-                    "激活智能体失败且无法恢复默认流程，当前无激活模式，请重试", restore);
-        }
     }
 
     /** 取消全局核算智能体：对话回到内置三段流水线。 */

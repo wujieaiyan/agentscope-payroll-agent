@@ -127,7 +127,7 @@ public class FlowAdminController {
         return ApiResponse.ok(Map.of("deleted", id));
     }
 
-    /** 设为全局默认流程；先写流程再清智能体，清失败只告警（运行期以流程优先）。 */
+    /** 设为全局默认流程；单份运行时设置文档内同时清空核算智能体。 */
     @PutMapping("/{id}/active")
     @RequirePermission(Permissions.FLOW_MANAGE)
     public ApiResponse activate(
@@ -138,28 +138,13 @@ public class FlowAdminController {
         validate(flow, true);
         String clearedAgent = agentRegistry.configuredAgentId();
         flowRegistry.setActiveFlow(id, revision);
-        String warning = "";
-        if (!clearedAgent.isBlank()) {
-            try {
-                agentRegistry.clearActiveAgent();
-            } catch (RuntimeException e) {
-                warning = "默认智能体未能取消，当前流程与智能体同时激活，运行期以流程优先：" + e.getMessage();
-                log.warn("[流程编排] 激活流程 {} 后清除默认智能体失败：{}", id, e.getMessage());
-            }
-        }
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("activeFlowId", id);
         audit.put("clearedAgentId", clearedAgent);
-        if (!warning.isBlank()) {
-            audit.put("warning", warning);
-        }
         auditService.record("flow.activate", "flow_definition", id, null, audit);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("activeFlowId", id);
         result.put("clearedAgentId", clearedAgent);
-        if (!warning.isBlank()) {
-            result.put("warning", warning);
-        }
         return ApiResponse.ok(result);
     }
 

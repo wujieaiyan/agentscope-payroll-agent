@@ -18,6 +18,7 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.health.PayrollReadinessHealthIndicator;
 import io.agentscope.examples.payroll.health.RedisHealthProbe;
+import io.agentscope.examples.payroll.health.RuntimeHealthService;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
 import io.agentscope.examples.payroll.agent.ConfirmationTools;
@@ -57,11 +58,13 @@ import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.RedisTurnEventBus;
 import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
+import io.agentscope.examples.payroll.service.TokenBudgetService;
 import io.agentscope.examples.payroll.service.TurnEventBus;
 import io.agentscope.examples.payroll.service.TurnLeaseService;
 import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
+import io.agentscope.examples.payroll.skill.NacosRuntimeSettings;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.SkillFileSettings;
 import io.agentscope.examples.payroll.skill.SkillImportService;
@@ -159,6 +162,24 @@ public class PayrollCoreConfiguration {
             MeterRegistry registry) {
         return new PayrollReadinessHealthIndicator(
                 database, redisHealthProbe, deploymentMode, readinessDeps, registry);
+    }
+
+    /** /health 的组件快照：db/redis/nacos/es，只回状态，不暴露地址与账号。 */
+    @Bean
+    public RuntimeHealthService runtimeHealthService(
+            PayrollDatabase database,
+            RedisHealthProbe redisHealthProbe,
+            DeploymentMode deploymentMode,
+            NacosSkillRegistry skillRegistry,
+            VectorMemoryService vectorMemoryService,
+            @Value("${payroll.health.nacos-stale-seconds:300}") long nacosStaleSeconds) {
+        return new RuntimeHealthService(
+                database,
+                redisHealthProbe,
+                deploymentMode,
+                skillRegistry,
+                vectorMemoryService,
+                nacosStaleSeconds);
     }
 
     @Bean
@@ -333,22 +354,30 @@ public class PayrollCoreConfiguration {
         return new ApprovalService(store, runStore);
     }
 
+    /** 运行时设置单键文档：核算模式、默认流程、核算智能体与写操作确认共用一份。 */
+    @Bean
+    public NacosRuntimeSettings runtimeSettings() {
+        return new NacosRuntimeSettings();
+    }
+
     /** 智能体定义与全局核算智能体设置都以 Nacos 为存储，管理接口与运行时共享同一实例。 */
     @Bean
-    public NacosAgentRegistry agentRegistry() {
-        return new NacosAgentRegistry();
+    public NacosAgentRegistry agentRegistry(NacosRuntimeSettings runtimeSettings) {
+        return new NacosAgentRegistry(NacosSkillSettings.fromEnvironment(), runtimeSettings);
     }
 
     /** 流程定义与全局默认流程同样存储于 Nacos，管理台与对话运行时共享同一实例。 */
     @Bean
-    public NacosFlowRegistry flowRegistry() {
-        return new NacosFlowRegistry();
+    public NacosFlowRegistry flowRegistry(NacosRuntimeSettings runtimeSettings) {
+        return new NacosFlowRegistry(NacosSkillSettings.fromEnvironment(), runtimeSettings);
     }
 
     /** 技能管理直接读写 Nacos 中的 {@code <skill-id>.md}，与运行时技能仓库同源。 */
     @Bean
-    public NacosSkillRegistry skillRegistry() {
-        return new NacosSkillRegistry();
+    public NacosSkillRegistry skillRegistry(
+            @Value("${payroll.skill.file-cache.max-entries:128}") int fileCacheMaxEntries,
+            @Value("${payroll.skill.file-cache.max-bytes:33554432}") long fileCacheMaxBytes) {
+        return new NacosSkillRegistry(fileCacheMaxEntries, fileCacheMaxBytes);
     }
 
     /** 技能项目导入：Git 浅克隆或 ZIP 解压后解析并整体发布到 Nacos。 */
@@ -661,6 +690,7 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.chat.turn-retention-days:90}") int turnRetentionDays,
             @Value("${payroll.chat.turn-cleanup-interval-minutes:360}")
                     int turnCleanupIntervalMinutes,
+            @Value("${payroll.chat.event-poller-threads:4}") int eventPollerThreads,
             @Value("${payroll.node-role:all}") String nodeRole) {
         return new ChatSessionManager(
                 chatStore,
@@ -681,15 +711,17 @@ public class PayrollCoreConfiguration {
                 progressTimeoutSeconds,
                 // 清理只由 Web/all 节点执行，runtime 节点不重复扫库。
                 "runtime".equals(nodeRole) ? 0 : turnRetentionDays,
-                turnCleanupIntervalMinutes);
+                turnCleanupIntervalMinutes,
+                eventPollerThreads);
     }
 
     @Bean
     public AuthService authService(
             H2AdminRepository adminRepository,
             PasswordEncoder passwordEncoder,
-            @Value("${payroll.auth.enabled:true}") boolean authEnabled) {
-        return new AuthService(adminRepository, passwordEncoder, authEnabled);
+            @Value("${payroll.auth.enabled:true}") boolean authEnabled,
+            @Value("${payroll.auth.force-password-change:true}") boolean forcePasswordChange) {
+        return new AuthService(adminRepository, passwordEncoder, authEnabled, forcePasswordChange);
     }
 
     @Bean
@@ -713,6 +745,14 @@ public class PayrollCoreConfiguration {
     @Bean
     public LlmUsageService llmUsageService(LlmUsageStore llmUsageStore) {
         return new LlmUsageService(llmUsageStore);
+    }
+
+    /** 每用户每日 token 预算；0 表示不限，超限的新轮次直接 429。 */
+    @Bean
+    public TokenBudgetService tokenBudgetService(
+            LlmUsageStore llmUsageStore,
+            @Value("${payroll.usage.daily-token-budget:0}") long dailyTokenBudget) {
+        return new TokenBudgetService(llmUsageStore, dailyTokenBudget);
     }
 
     /** 模型连接整份存 Nacos；Nacos 未启用时只提供环境变量派生的只读连接。 */
@@ -871,5 +911,26 @@ public class PayrollCoreConfiguration {
             thread.setDaemon(true);
             return thread;
         };
+    }
+
+    /**
+     * SSE 尾随线程池：只承载订阅注册与事件转发，不执行模型或 runtime 提交。
+     *
+     * <p>纯续流请求也走这里，执行器线程只负责启动任务；队列满返回 429，语义是“订阅过多”。
+     */
+    @Bean(name = "sseTailExecutor", destroyMethod = "shutdown")
+    public ExecutorService sseTailExecutor(
+            @Value("${payroll.chat.sse-tail-threads:8}") int threads,
+            @Value("${payroll.chat.sse-tail-queue-capacity:64}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
+        return new ThreadPoolExecutor(
+                poolSize,
+                poolSize,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(capacity),
+                payrollThreadFactory("payroll-sse-tail"),
+                new ThreadPoolExecutor.AbortPolicy());
     }
 }

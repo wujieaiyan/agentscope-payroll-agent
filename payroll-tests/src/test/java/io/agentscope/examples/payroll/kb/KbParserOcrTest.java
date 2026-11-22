@@ -185,7 +185,7 @@ class KbParserOcrTest {
         private final boolean engineAvailable;
 
         private OcrStub(boolean enabled, boolean engineAvailable, int maxPages) {
-            super(enabled, "tesseract", "", "chi_sim+eng", 300, 60, maxPages);
+            super(enabled, "tesseract", "", "chi_sim+eng", 200, 60, maxPages, 2, 600);
             this.engineAvailable = engineAvailable;
         }
 

@@ -23,6 +23,8 @@ public class KbOcrService {
 
     private static final Logger log = LoggerFactory.getLogger(KbOcrService.class);
     private static final int PROBE_TIMEOUT_SECONDS = 10;
+    /** 探测失败只短时缓存：装好引擎后无需重启即可恢复。 */
+    private static final long PROBE_FAILURE_TTL_MS = 60_000L;
     /** TSV 置信度为 0-100；低于该值记入 lowConfidenceWords，供质量门与溯源参考。 */
     private static final double LOW_CONFIDENCE_PERCENT = 60;
 
@@ -31,18 +33,24 @@ public class KbOcrService {
     private final String tessdataDir;
     private final String defaultLanguages;
     private final int dpi;
-    private final int timeoutSeconds;
+    private final int pageTimeoutSeconds;
     private final int maxPages;
+    private final int concurrency;
+    private final int docBudgetSeconds;
     private volatile Boolean available;
+    private volatile long reprobeAt;
+    private volatile String probeFailureType;
 
     public KbOcrService(
             @Value("${payroll.kb.ocr.enabled:true}") boolean enabled,
             @Value("${payroll.kb.ocr.command:tesseract}") String command,
             @Value("${payroll.kb.ocr.tessdata-dir:}") String tessdataDir,
             @Value("${payroll.kb.ocr.languages:chi_sim+eng}") String defaultLanguages,
-            @Value("${payroll.kb.ocr.dpi:300}") int dpi,
-            @Value("${payroll.kb.ocr.timeout-seconds:120}") int timeoutSeconds,
-            @Value("${payroll.kb.ocr.max-pages:0}") int maxPages) {
+            @Value("${payroll.kb.ocr.dpi:200}") int dpi,
+            @Value("${payroll.kb.ocr.page-timeout-seconds:120}") int pageTimeoutSeconds,
+            @Value("${payroll.kb.ocr.max-pages:200}") int maxPages,
+            @Value("${payroll.kb.ocr.concurrency:2}") int concurrency,
+            @Value("${payroll.kb.ocr.timeout-seconds:600}") int docBudgetSeconds) {
         this.enabled = enabled;
         this.command = command == null || command.isBlank() ? "tesseract" : command.strip();
         this.tessdataDir = tessdataDir == null ? "" : tessdataDir.strip();
@@ -51,8 +59,10 @@ public class KbOcrService {
                         ? "chi_sim+eng"
                         : defaultLanguages.strip();
         this.dpi = Math.max(72, dpi);
-        this.timeoutSeconds = Math.max(10, timeoutSeconds);
+        this.pageTimeoutSeconds = Math.max(10, pageTimeoutSeconds);
         this.maxPages = Math.max(0, maxPages);
+        this.concurrency = Math.max(1, Math.min(concurrency, 4));
+        this.docBudgetSeconds = Math.max(30, docBudgetSeconds);
     }
 
     public boolean enabled() {
@@ -69,24 +79,50 @@ public class KbOcrService {
     }
 
     /** 单页识别超时，供外部档位（ImageTextExtractor）复用同一配置。 */
-    public int timeoutSeconds() {
-        return timeoutSeconds;
+    public int pageTimeoutSeconds() {
+        return pageTimeoutSeconds;
+    }
+
+    /** 单文档 OCR 总预算，超出后不再提交新的扫描页。 */
+    public int docBudgetSeconds() {
+        return docBudgetSeconds;
+    }
+
+    public int concurrency() {
+        return concurrency;
+    }
+
+    /** 最近一次探测失败的异常类型，供健康检查与日志定位。 */
+    public String probeFailureType() {
+        return probeFailureType;
     }
 
     public boolean available() {
         Boolean cached = available;
-        if (cached != null) {
+        long now = System.currentTimeMillis();
+        if (cached != null && (cached || now < reprobeAt)) {
             return cached;
         }
-        boolean probed = probe();
-        available = probed;
-        if (!probed) {
-            log.warn(
-                    "[知识库] OCR 引擎不可用：command={}，扫描件将无法入库；请安装 Tesseract（含 chi_sim 语言包）"
-                            + "或用 payroll.kb.ocr.command 指定可执行文件",
-                    command);
+        synchronized (this) {
+            if (available != null && (available || System.currentTimeMillis() < reprobeAt)) {
+                return available;
+            }
+            ProbeResult result = probe();
+            available = result.ok();
+            if (result.ok()) {
+                reprobeAt = 0;
+                probeFailureType = null;
+            } else {
+                probeFailureType = result.failureType();
+                reprobeAt = System.currentTimeMillis() + PROBE_FAILURE_TTL_MS;
+                log.warn(
+                        "[知识库] OCR 引擎不可用（{}）：command={}，扫描件将无法入库；"
+                                + "请安装 Tesseract（含 chi_sim 语言包）或用 payroll.kb.ocr.command 指定可执行文件",
+                        result.failureType(),
+                        command);
+            }
+            return available;
         }
-        return probed;
     }
 
     /** 知识库配置里的 zh/en 映射到 Tesseract 语言包名。 */
@@ -146,13 +182,17 @@ public class KbOcrService {
                             .redirectError(stderr.toFile())
                             .start();
             try {
-                if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                if (!process.waitFor(pageTimeoutSeconds, TimeUnit.SECONDS)) {
                     process.destroyForcibly();
-                    throw new IOException("OCR 超时（" + timeoutSeconds + "s）");
+                    throw new IOException("OCR 超时（" + pageTimeoutSeconds + "s）");
                 }
             } catch (InterruptedException e) {
                 process.destroyForcibly();
                 throw e;
+            } finally {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                }
             }
             if (process.exitValue() != 0) {
                 String message =
@@ -167,22 +207,27 @@ public class KbOcrService {
         }
     }
 
-    private boolean probe() {
+    private ProbeResult probe() {
         try {
             Process process =
                     new ProcessBuilder(command, "--version").redirectErrorStream(true).start();
             process.getInputStream().readAllBytes();
             if (!process.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                return false;
+                return new ProbeResult(false, "TIMEOUT");
             }
-            return process.exitValue() == 0;
+            return process.exitValue() == 0
+                    ? new ProbeResult(true, null)
+                    : new ProbeResult(false, "EXIT_CODE_" + process.exitValue());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return false;
+            return new ProbeResult(false, "INTERRUPTED");
         } catch (IOException e) {
-            return false;
+            return new ProbeResult(false, e.getClass().getSimpleName());
         }
+    }
+
+    private record ProbeResult(boolean ok, String failureType) {
     }
 
     private static String mapLanguage(String language) {

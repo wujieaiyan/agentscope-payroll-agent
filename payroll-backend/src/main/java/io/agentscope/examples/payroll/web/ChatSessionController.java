@@ -24,6 +24,7 @@ import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.SemanticCacheContext;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
+import io.agentscope.examples.payroll.service.TokenBudgetService;
 import io.agentscope.examples.payroll.service.TurnEventBus;
 import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.support.JsonSupport;
@@ -78,8 +79,10 @@ public class ChatSessionController {
     private final AuditService auditService;
     private final AuthService authService;
     private final ChatQuotaService chatQuotaService;
+    private final TokenBudgetService tokenBudgetService;
     private final AgentRuntimeClient runtimeClient;
     private final Executor chatStreamExecutor;
+    private final Executor sseTailExecutor;
     private final KbPermissionService kbPermissionService;
     private final KbSeriesStore kbSeriesStore;
     private final ChatAttachmentService attachmentService;
@@ -92,20 +95,24 @@ public class ChatSessionController {
             AuditService auditService,
             AuthService authService,
             ChatQuotaService chatQuotaService,
+            TokenBudgetService tokenBudgetService,
             AgentRuntimeClient runtimeClient,
             KbPermissionService kbPermissionService,
             KbSeriesStore kbSeriesStore,
             ChatAttachmentService attachmentService,
             @Value("${payroll.kb.chat.max-series:3}") int maxKbSeries,
-            @Qualifier("chatStreamExecutor") Executor chatStreamExecutor) {
+            @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
+            @Qualifier("sseTailExecutor") Executor sseTailExecutor) {
         this.manager = manager;
         this.feedbackService = feedbackService;
         this.teamQueryService = teamQueryService;
         this.auditService = auditService;
         this.authService = authService;
         this.chatQuotaService = chatQuotaService;
+        this.tokenBudgetService = tokenBudgetService;
         this.runtimeClient = runtimeClient;
         this.chatStreamExecutor = chatStreamExecutor;
+        this.sseTailExecutor = sseTailExecutor;
         this.kbPermissionService = kbPermissionService;
         this.kbSeriesStore = kbSeriesStore;
         this.attachmentService = attachmentService;
@@ -294,6 +301,7 @@ public class ChatSessionController {
         long userId = userId(request);
         String message = requireMessage(body == null ? null : body.message());
         List<Long> attachmentIds = attachmentIds(body);
+        tokenBudgetService.check(userId);
         requireRuntime();
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
@@ -406,6 +414,7 @@ public class ChatSessionController {
             channel.complete();
             return emitter;
         }
+        tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
@@ -413,7 +422,7 @@ public class ChatSessionController {
             String cacheScope = cacheScope(request);
             chatStreamExecutor.execute(
                     () ->
-                            stream(
+                            startTurn(
                                     userId,
                                     sessionId,
                                     message,
@@ -422,7 +431,7 @@ public class ChatSessionController {
                                     channel));
         } catch (RejectedExecutionException e) {
             chatQuotaService.release(userId);
-            ChatStreamRejection.record(chatStreamExecutor);
+            ChatStreamRejection.record(chatStreamExecutor, "executor");
             throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
@@ -441,7 +450,11 @@ public class ChatSessionController {
         }
     }
 
-    private void stream(
+    /**
+     * 执行线程只负责建轮次与提交运行期；此后阻塞的续流交给独立的尾随线程池，
+     * 避免长时间占用对话执行线程。
+     */
+    private void startTurn(
             long userId,
             long sessionId,
             String message,
@@ -450,6 +463,7 @@ public class ChatSessionController {
             ChatSse.Channel channel) {
         ChatSessionManager.TurnContext turn = null;
         AtomicBoolean finished = new AtomicBoolean(false);
+        AtomicBoolean quotaReleased = new AtomicBoolean(false);
         try {
             SemanticCacheContext.set(cacheScope);
             ChatAttachmentService.PreparedAttachments attachments =
@@ -469,6 +483,8 @@ public class ChatSessionController {
                         "error",
                         ChatSse.payload("message", "智能体运行期未配置，暂时无法回答问题"));
                 channel.complete();
+                chatQuotaService.release(userId);
+                quotaReleased.set(true);
                 return;
             }
             try {
@@ -478,8 +494,6 @@ public class ChatSessionController {
                         "[运行期] 轮次已提交：sessionId={}，turnId={}",
                         sessionId,
                         turn.turnId());
-                resumeEvents(userId, sessionId, turn.turnId(), 0L, channel);
-                return;
             } catch (RuntimeException e) {
                 if (!manager.turnEvents(userId, sessionId, turn.turnId(), 0L, 1).isEmpty()) {
                     log.warn(
@@ -487,29 +501,39 @@ public class ChatSessionController {
                             turn.turnId(),
                             e.getMessage());
                     finished.set(true);
-                    resumeEvents(userId, sessionId, turn.turnId(), 0L, channel);
+                } else {
+                    log.warn(
+                            "[运行期] 提交失败，不做本机兜底：turnId={}，原因={}",
+                            turn.turnId(),
+                            e.getMessage());
+                    String failure;
+                    String errorText;
+                    if (e instanceof TooManyRequestsException) {
+                        failure = "运行时繁忙";
+                        errorText = "运行时繁忙，请稍后重试";
+                    } else if (e instanceof PayrollUnavailableException) {
+                        failure = "运行时不可用";
+                        errorText = "运行时暂不可用，请稍后再试";
+                    } else {
+                        failure = "智能体运行期不可达";
+                        errorText = "智能体运行期不可达，请稍后再试";
+                    }
+                    manager.failTurn(turn, failure);
+                    finished.set(true);
+                    channel.send("error", ChatSse.payload("message", errorText));
+                    channel.complete();
+                    chatQuotaService.release(userId);
+                    quotaReleased.set(true);
                     return;
                 }
-                log.warn(
-                        "[运行期] 提交失败，不做本机兜底：turnId={}，原因={}",
-                        turn.turnId(),
-                        e.getMessage());
-                String failure;
-                String errorText;
-                if (e instanceof TooManyRequestsException) {
-                    failure = "运行时繁忙";
-                    errorText = "运行时繁忙，请稍后重试";
-                } else if (e instanceof PayrollUnavailableException) {
-                    failure = "运行时不可用";
-                    errorText = "运行时暂不可用，请稍后再试";
-                } else {
-                    failure = "智能体运行期不可达";
-                    errorText = "智能体运行期不可达，请稍后再试";
-                }
-                manager.failTurn(turn, failure);
-                finished.set(true);
-                channel.send("error", ChatSse.payload("message", errorText));
+            }
+            // 轮次已交给运行期，尾随被拒也不能回滚轮次状态；客户端可稍后用续流接口恢复。
+            if (!handoffTail(userId, sessionId, turn.turnId(), 0L, channel, true)) {
+                channel.send(
+                        "error", ChatSse.payload("message", "当前订阅过多，请稍后重试"));
                 channel.complete();
+                chatQuotaService.release(userId);
+                quotaReleased.set(true);
             }
         } catch (PayrollException e) {
             if (turn != null && finished.compareAndSet(false, true)) {
@@ -517,6 +541,8 @@ public class ChatSessionController {
             }
             channel.send("error", ChatSse.payload("message", e.getMessage()));
             channel.complete();
+            chatQuotaService.release(userId);
+            quotaReleased.set(true);
         } catch (RuntimeException e) {
             log.error("[会话] 流式对话异常：sessionId={}", sessionId, e);
             if (turn != null && finished.compareAndSet(false, true)) {
@@ -524,12 +550,46 @@ public class ChatSessionController {
             }
             channel.send("error", ChatSse.payload("message", "对话失败，请查看服务端日志"));
             channel.complete();
+            chatQuotaService.release(userId);
+            quotaReleased.set(true);
         } finally {
             SemanticCacheContext.clear();
             if (turn != null && finished.compareAndSet(false, true)) {
                 manager.releaseTurn(turn, "流式回答提前结束");
             }
-            chatQuotaService.release(userId);
+            if (!quotaReleased.get()) {
+                chatQuotaService.release(userId);
+            }
+        }
+    }
+
+    /**
+     * 把阻塞的续流交给尾随线程池。
+     *
+     * @return false 表示尾随队列已满；调用方负责结束本次订阅。
+     */
+    private boolean handoffTail(
+            long userId,
+            long sessionId,
+            String turnId,
+            long afterSeq,
+            ChatSse.Channel channel,
+            boolean releaseQuota) {
+        try {
+            sseTailExecutor.execute(
+                    () -> {
+                        try {
+                            resumeEvents(userId, sessionId, turnId, afterSeq, channel);
+                        } finally {
+                            if (releaseQuota) {
+                                chatQuotaService.release(userId);
+                            }
+                        }
+                    });
+            return true;
+        } catch (RejectedExecutionException e) {
+            ChatStreamRejection.record(sseTailExecutor, "tail");
+            return false;
         }
     }
 
@@ -583,13 +643,8 @@ public class ChatSessionController {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         ChatSse.Channel channel = ChatSse.attach(emitter);
         long from = Math.max(Math.max(0, afterSeq), parseEventId(lastEventId));
-        try {
-            chatStreamExecutor.execute(
-                    () -> resumeEvents(userId, sessionId, turnId, from, channel));
-        } catch (RejectedExecutionException e) {
-            ChatStreamRejection.record(chatStreamExecutor);
-            channel.send("error", ChatSse.payload("message", "当前续流请求过多，请稍后重试"));
-            channel.complete();
+        if (!handoffTail(userId, sessionId, turnId, from, channel, false)) {
+            throw new TooManyRequestsException("当前订阅过多，请稍后重试");
         }
         return emitter;
     }

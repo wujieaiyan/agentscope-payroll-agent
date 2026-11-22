@@ -9,10 +9,9 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -20,7 +19,6 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
@@ -378,8 +376,8 @@ class AgentAdminControllerTest {
     }
 
     @Test
-    @DisplayName("激活智能体先清默认流程，再写智能体设置")
-    void setActiveClearsFlowBeforeAgentWrite() {
+    @DisplayName("激活智能体只写一次运行时设置文档，默认流程随模式切换失效")
+    void setActiveClearsFlowThroughSinglePublish() {
         NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
         when(flowRegistry.activeFlowId()).thenReturn("flow-1");
         AgentAdminController withFlow =
@@ -393,33 +391,13 @@ class AgentAdminControllerTest {
 
         assertEquals("agent-1", data.get("activeAgentId"));
         assertEquals("flow-1", data.get("clearedFlowId"));
-        var order = inOrder(flowRegistry, registry);
-        order.verify(flowRegistry).clearActiveFlow();
-        order.verify(registry).setActiveAgent("agent-1", null);
+        verify(flowRegistry, never()).clearActiveFlow();
+        verify(registry, times(1)).setActiveAgent("agent-1", null);
     }
 
     @Test
-    @DisplayName("清默认流程失败时不触碰智能体设置")
-    void setActiveAbortsWhenFlowClearFails() {
-        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
-        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
-        doThrow(new PayrollUnavailableException("配置中心不可用"))
-                .when(flowRegistry)
-                .clearActiveFlow();
-        AgentAdminController withFlow =
-                new AgentAdminController(
-                        registry, skillRepository, flowRegistry, authService, auditService);
-        when(registry.list())
-                .thenReturn(List.of(agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE)));
-
-        assertThrows(
-                PayrollUnavailableException.class, () -> withFlow.setActive("agent-1", null));
-        verify(registry, never()).setActiveAgent(any(), any());
-    }
-
-    @Test
-    @DisplayName("写智能体失败时恢复原默认流程")
-    void setActiveRestoresFlowWhenAgentWriteFails() {
+    @DisplayName("写运行时设置失败时不补偿写流程文档")
+    void setActiveDoesNotRollbackWhenWriteFails() {
         NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
         when(flowRegistry.activeFlowId()).thenReturn("flow-1");
         AgentAdminController withFlow =
@@ -433,28 +411,8 @@ class AgentAdminControllerTest {
                 assertThrows(PayrollException.class, () -> withFlow.setActive("agent-1", null));
 
         assertTrue(error.getMessage().contains("写智能体失败"), error.getMessage());
-        verify(flowRegistry).setActiveFlow("flow-1");
-    }
-
-    @Test
-    @DisplayName("恢复默认流程也失败时返回 503 提示无激活模式")
-    void setActiveReportsUnavailableWhenRestoreFails() {
-        NacosFlowRegistry flowRegistry = mock(NacosFlowRegistry.class);
-        when(flowRegistry.activeFlowId()).thenReturn("flow-1");
-        doThrow(new PayrollException("恢复失败")).when(flowRegistry).setActiveFlow(anyString());
-        AgentAdminController withFlow =
-                new AgentAdminController(
-                        registry, skillRepository, flowRegistry, authService, auditService);
-        when(registry.list())
-                .thenReturn(List.of(agent("agent-1", "个税顾问", AgentDefinition.STATUS_ONLINE)));
-        when(registry.setActiveAgent(any(), any())).thenThrow(new PayrollException("写智能体失败"));
-
-        PayrollUnavailableException error =
-                assertThrows(
-                        PayrollUnavailableException.class,
-                        () -> withFlow.setActive("agent-1", null));
-
-        assertTrue(error.getMessage().contains("无法恢复默认流程"), error.getMessage());
+        verify(flowRegistry, never()).setActiveFlow(anyString());
+        verify(flowRegistry, never()).clearActiveFlow();
     }
 
     private static List<AgentDefinition> ids(ApiResponse response) {

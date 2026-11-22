@@ -3,7 +3,6 @@ package io.agentscope.examples.payroll.kb;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.examples.payroll.db.H2AdminRepository;
-import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -16,16 +15,19 @@ import io.agentscope.examples.payroll.kb.KbEnums.TaskType;
 import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbModels.IngestTask;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.web.TooManyRequestsException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -87,7 +89,7 @@ public class KbTaskService {
         }
         IngestTask task = insert(seriesId, documentId, type, configVersionId, user, null, 0);
         documentStore.updateStatus(documentId, DocStatus.PENDING, null, null);
-        executor.submit(() -> ingestService.run(task.id()));
+        submit(task.id());
         auditService.record(
                 "kb.task.create", "kb_ingest_task", String.valueOf(task.id()), null, task.type());
         return view(task);
@@ -118,7 +120,7 @@ public class KbTaskService {
             IngestTask task =
                     insert(seriesId, document.id(), TaskType.REBUILD, null, user, null, 0);
             documentStore.updateStatus(document.id(), DocStatus.PENDING, null, null);
-            executor.submit(() -> ingestService.run(task.id()));
+            submit(task.id());
             tasks.add(view(task));
         }
         auditService.record(
@@ -202,7 +204,7 @@ public class KbTaskService {
                         task.id(),
                         task.retryCount() + 1);
         documentStore.updateStatus(task.documentId(), DocStatus.PENDING, null, null);
-        executor.submit(() -> ingestService.run(created.id()));
+        submit(created.id());
         auditService.record(
                 "kb.task.retry", "kb_ingest_task", String.valueOf(taskId), task.status(), created.id());
         return view(created);
@@ -267,7 +269,7 @@ public class KbTaskService {
                     }
                     case QUEUED -> {
                         documentStore.updateStatus(document.id(), DocStatus.PENDING, null, null);
-                        executor.submit(() -> ingestService.run(current.id()));
+                        submit(current.id());
                         queued++;
                     }
                     case RUNNING -> {
@@ -286,7 +288,7 @@ public class KbTaskService {
                                             current.retryCount() + 1);
                             documentStore.updateStatus(
                                     document.id(), DocStatus.PENDING, null, null);
-                            executor.submit(() -> ingestService.run(next.id()));
+                            submit(next.id());
                             retried++;
                         } else {
                             documentStore.updateStatus(
@@ -347,6 +349,28 @@ public class KbTaskService {
             int queued, int retried, int exhausted, int canceled, int failed) {
         public int total() {
             return queued + retried + exhausted + canceled + failed;
+        }
+    }
+
+    /** 入库有界队列满时任务落为失败并对外返回 429，避免无限排队。 */
+    private void submit(long taskId) {
+        try {
+            executor.submit(() -> ingestService.run(taskId));
+        } catch (RejectedExecutionException e) {
+            log.warn("[知识库] 入库队列已满，拒绝任务：task={}", taskId);
+            taskStore.markFailed(taskId, "QUEUE_FULL", "入库队列已满，请稍后重试", null);
+            IngestTask task = taskStore.findById(taskId).orElse(null);
+            if (task != null) {
+                if (task.documentId() != null) {
+                    documentStore.updateStatus(
+                            task.documentId(),
+                            DocStatus.FAILED,
+                            "QUEUE_FULL",
+                            "入库队列已满，请稍后重试");
+                }
+                seriesService.refreshCounters(task.seriesId());
+            }
+            throw new TooManyRequestsException("入库队列已满，请稍后重试");
         }
     }
 
@@ -442,29 +466,39 @@ public class KbTaskService {
     }
 
     private Map<Long, String> documentNames(List<IngestTask> tasks) {
-        Map<Long, String> names = new HashMap<>();
+        Map<Long, Set<Long>> idsBySeries = new HashMap<>();
         for (IngestTask task : tasks) {
-            if (task.documentId() != null && !names.containsKey(task.documentId())) {
-                documentStore
-                        .findById(task.documentId())
-                        .ifPresent(document -> names.put(document.id(), document.name()));
+            if (task.documentId() != null) {
+                idsBySeries
+                        .computeIfAbsent(task.seriesId(), key -> new LinkedHashSet<>())
+                        .add(task.documentId());
             }
         }
+        Map<Long, String> names = new HashMap<>();
+        idsBySeries.forEach(
+                (seriesId, ids) ->
+                        documentStore
+                                .findByIds(seriesId, ids)
+                                .forEach(document -> names.put(document.id(), document.name())));
         return names;
     }
 
     private Map<Long, String> operatorNames(List<IngestTask> tasks) {
         Map<Long, String> names = new HashMap<>();
+        Set<Long> pending = new LinkedHashSet<>();
         for (IngestTask task : tasks) {
-            if (!names.containsKey(task.operatorId())) {
-                names.put(
-                        task.operatorId(),
-                        task.operatorId() == 0
-                                ? "系统管理员"
-                                : adminRepository
-                                        .findUser(task.operatorId())
-                                        .map(AppUser::displayName)
-                                        .orElse("用户#" + task.operatorId()));
+            if (task.operatorId() == 0) {
+                names.put(0L, "系统管理员");
+            } else {
+                pending.add(task.operatorId());
+            }
+        }
+        if (!pending.isEmpty()) {
+            adminRepository
+                    .findUsers(pending)
+                    .forEach(user -> names.put(user.id(), user.displayName()));
+            for (Long id : pending) {
+                names.putIfAbsent(id, "用户#" + id);
             }
         }
         return names;

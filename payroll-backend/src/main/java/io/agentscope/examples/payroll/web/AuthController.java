@@ -43,7 +43,7 @@ public class AuthController {
             AuditContext.setActor(system);
             auditService.record(
                     "auth.login", "user", "system", null, Map.of("auth_enabled", false));
-            return ApiResponse.ok(new AuthState(system, false, profileEnabled));
+            return ApiResponse.ok(new AuthState(system, false, profileEnabled, false));
         }
         if (request == null || request.username() == null || request.password() == null) {
             AuditContext.setActorName("anonymous");
@@ -78,7 +78,9 @@ public class AuthController {
                 String.valueOf(user.id()),
                 null,
                 Map.of("username", user.username(), "role_code", user.roleCode()));
-        return ApiResponse.ok(new AuthState(user, true, profileEnabled));
+        return ApiResponse.ok(
+                new AuthState(
+                        user, true, profileEnabled, authService.mustChangePassword(user.id())));
     }
 
     @PostMapping("/logout")
@@ -97,7 +99,12 @@ public class AuthController {
     @GetMapping("/me")
     public ApiResponse me(HttpServletRequest request) {
         AuthUser user = authService.currentUser(request);
-        return ApiResponse.ok(new AuthState(user, authService.enabled(), profileEnabled));
+        return ApiResponse.ok(
+                new AuthState(
+                        user,
+                        authService.enabled(),
+                        profileEnabled,
+                        authService.passwordChangeRequired(request)));
     }
 
     @PostMapping("/password")
@@ -109,6 +116,7 @@ public class AuthController {
             throw new IllegalArgumentException("请提供原密码与新密码");
         }
         authService.changePassword(user.id(), request.oldPassword(), request.newPassword());
+        authService.markPasswordChanged(http);
         auditService.record(
                 "auth.password",
                 "user",
@@ -124,6 +132,10 @@ public class AuthController {
     public record PasswordChangeRequest(String oldPassword, String newPassword) {
     }
 
-    public record AuthState(AuthUser user, boolean authEnabled, boolean profileEnabled) {
+    public record AuthState(
+            AuthUser user,
+            boolean authEnabled,
+            boolean profileEnabled,
+            boolean mustChangePassword) {
     }
 }

@@ -16,6 +16,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,6 +91,29 @@ public final class ModelConnectionRegistry {
 
     public Optional<ModelConnection> find(String id) {
         return catalog().connection(id);
+    }
+
+    /** 故障切换备用连接：按目录顺序取第一个已启用、且不是主连接的连接。 */
+    public Optional<ModelConnection> fallback(ModelConnection primary) {
+        return fallback(primary, null);
+    }
+
+    /** {@code filter} 用于附加能力约束（如编码面必须支持 tools 且上下文足够）。 */
+    public Optional<ModelConnection> fallback(
+            ModelConnection primary, Predicate<ModelConnection> filter) {
+        if (primary == null) {
+            return Optional.empty();
+        }
+        for (ModelConnection connection : connections()) {
+            if (!connection.isEnabled() || connection.id().equals(primary.id())) {
+                continue;
+            }
+            if (filter != null && !filter.test(connection)) {
+                continue;
+            }
+            return Optional.of(connection);
+        }
+        return Optional.empty();
     }
 
     public boolean envCodingLocked() {

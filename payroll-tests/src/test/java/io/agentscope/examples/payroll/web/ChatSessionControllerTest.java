@@ -24,6 +24,8 @@ import io.agentscope.examples.payroll.service.ChatFeedbackService;
 import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
+import io.agentscope.examples.payroll.service.TokenBudgetService;
+import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import java.util.Set;
@@ -45,6 +47,8 @@ class ChatSessionControllerTest {
     private final AuditService auditService = mock(AuditService.class);
     private final AuthService authService = mock(AuthService.class);
     private final ChatQuotaService chatQuotaService = mock(ChatQuotaService.class);
+    private final TokenBudgetService tokenBudgetService =
+            new TokenBudgetService(mock(LlmUsageStore.class), 0);
     private final AgentRuntimeClient runtimeClient = mock(AgentRuntimeClient.class);
     private final KbPermissionService kbPermissionService = mock(KbPermissionService.class);
     private final KbSeriesStore kbSeriesStore = mock(KbSeriesStore.class);
@@ -157,11 +161,13 @@ class ChatSessionControllerTest {
                 auditService,
                 authService,
                 chatQuotaService,
+                tokenBudgetService,
                 runtimeClient,
                 kbPermissionService,
                 kbSeriesStore,
                 attachmentService,
                 3,
+                executor,
                 executor);
     }
 

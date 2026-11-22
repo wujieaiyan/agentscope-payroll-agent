@@ -4,11 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import io.agentscope.examples.payroll.service.InternalAuth;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -20,6 +27,7 @@ import java.time.Instant;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -37,6 +45,11 @@ class KbWebTest {
     private static final Path OUTPUT_DIR = tempDir();
     private static final String DB_URL =
             "jdbc:h2:mem:kb-web-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+    private static final int EMBEDDING_DIM = 768;
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** 入库嵌入已禁止 HASH 降级（W4），这里用本地桩服务返回确定性向量，避免依赖 Ollama。 */
+    private static final HttpServer EMBEDDING_STUB = startEmbeddingStub();
 
     @DynamicPropertySource
     static void payrollProperties(DynamicPropertyRegistry registry) {
@@ -45,12 +58,22 @@ class KbWebTest {
         registry.add("payroll.db.password", () -> "");
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
         registry.add("payroll.auth.enabled", () -> "true");
+        // 新建用户默认强制首改密，本类聚焦其他能力，关闭该开关；专项覆盖见 ForcedPasswordChangeWebTest。
+        registry.add("payroll.auth.force-password-change", () -> "false");
         registry.add("payroll.auth.admin-password", () -> ADMIN_PASSWORD);
         registry.add("payroll.kb.storage-dir", () -> OUTPUT_DIR.resolve("kb").toString());
         registry.add("payroll.kb.es-enabled", () -> "false");
-        registry.add("payroll.kb.embedding-base-url", () -> "http://127.0.0.1:1");
+        registry.add(
+                "payroll.kb.embedding-base-url",
+                () -> "http://127.0.0.1:" + EMBEDDING_STUB.getAddress().getPort());
+        registry.add("payroll.kb.embedding-dim", () -> String.valueOf(EMBEDDING_DIM));
         registry.add("payroll.kb.answer-enabled", () -> "false");
         registry.add("payroll.internal.token", () -> INTERNAL_TOKEN);
+    }
+
+    @AfterAll
+    static void stopEmbeddingStub() {
+        EMBEDDING_STUB.stop(0);
     }
 
     @LocalServerPort
@@ -356,6 +379,49 @@ class KbWebTest {
         HttpResponse<String> response = signedPost("/internal/kb/execute", body);
         assertEquals(200, response.statusCode(), response.body());
         return response.body();
+    }
+
+    private static HttpServer startEmbeddingStub() {
+        try {
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext(
+                    "/api/embed",
+                    exchange -> {
+                        JsonNode input =
+                                JSON.readTree(exchange.getRequestBody().readAllBytes())
+                                        .path("input");
+                        ObjectNode body = JSON.createObjectNode();
+                        ArrayNode embeddings = body.putArray("embeddings");
+                        for (int i = 0; i < input.size(); i++) {
+                            ArrayNode vector = embeddings.addArray();
+                            vector.add(1.0);
+                            for (int d = 1; d < EMBEDDING_DIM; d++) {
+                                vector.add(0.0);
+                            }
+                        }
+                        writeJson(exchange, 200, JSON.writeValueAsBytes(body));
+                    });
+            server.createContext(
+                    "/api/tags",
+                    exchange ->
+                            writeJson(
+                                    exchange,
+                                    200,
+                                    "{\"models\":[{\"name\":\"nomic-embed-text\"}]}"
+                                            .getBytes(StandardCharsets.UTF_8)));
+            server.start();
+            return server;
+        } catch (IOException e) {
+            throw new IllegalStateException("无法启动嵌入桩服务", e);
+        }
+    }
+
+    private static void writeJson(HttpExchange exchange, int status, byte[] payload)
+            throws IOException {
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.sendResponseHeaders(status, payload.length);
+        exchange.getResponseBody().write(payload);
+        exchange.close();
     }
 
     private long createSeries(HttpClient admin, long deptId, String name) throws Exception {
