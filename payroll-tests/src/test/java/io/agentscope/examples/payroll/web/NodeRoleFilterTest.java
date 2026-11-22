@@ -18,6 +18,9 @@ class NodeRoleFilterTest {
         assertFiltered(filter, "/api/employees");
         assertAllowed(filter, "/internal/turns");
         assertAllowed(filter, "/actuator/health");
+        assertAllowed(filter, "/actuator/health/readiness");
+        assertAllowed(filter, "/livez");
+        assertAllowed(filter, "/readyz");
     }
 
     @Test

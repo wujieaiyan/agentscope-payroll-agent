@@ -1131,7 +1131,7 @@ function handleEvent(event, data) {
     case 'gap':
       // 断点已过期：丢弃残缺前缀并停止拼接，完成后以落库消息呈现完整回答。
       state.gap = true;
-      state.gapMessage = data.message || '部分回答过程已过期，完成后将以最终消息展示';
+      state.gapMessage = data.message || '部分回答过程已过期，回答已保存，完成后可刷新查看完整内容';
       state.text = '';
       state.pendingText = '';
       state.thinking = '';
@@ -1160,6 +1160,11 @@ function handleEvent(event, data) {
       state.cache = data.cache || null;
       if (Array.isArray(data.citations)) state.citations = data.citations;
       if (Array.isArray(data.proposals)) state.proposals = data.proposals;
+      // recovered=true 表示 done 由服务端按落库消息补发：断点过期清空拼接后仍要展示最终回答。
+      if (data.recovered) {
+        state.gap = false;
+        gapNotice.value = '';
+      }
       // 模型没有流式文本时才用 done 的整段回复兜底，避免与队列重复；断点过期时交给落库消息。
       if (!state.gap && !state.text && !state.pendingText && data.reply) enqueueText(data.reply);
       clearTurnMarker(activeId.value, turnState.turnId);

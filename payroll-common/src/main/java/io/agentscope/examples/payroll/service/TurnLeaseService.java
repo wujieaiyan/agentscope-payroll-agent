@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.config.DeploymentMode;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -20,7 +22,8 @@ import org.springframework.data.redis.core.script.RedisScript;
  * 轮次租约：同一会话同一时刻只允许一轮回答，节点崩溃后 30 秒内可被接管。
  *
  * <p>令牌形如 {@code turnId:fencing}，续约与释放都校验令牌，旧持有者无法续租或误删新锁。
- * Redis 不可用时退化为进程内租约，仅保证单实例内互斥。
+ * single 模式 Redis 不可用时退化为进程内租约；cluster 模式不回退，直接以 503 快速失败，
+ * 避免两个节点各持一份本地租约同时执行同一会话。
  */
 public final class TurnLeaseService implements AutoCloseable {
 
@@ -40,12 +43,25 @@ public final class TurnLeaseService implements AutoCloseable {
     private final StringRedisTemplate redis;
     private final Duration ttl;
     private final Duration heartbeat;
+    private final DeploymentMode mode;
     private final ScheduledExecutorService scheduler;
     private final Map<Long, String> tracked = new ConcurrentHashMap<>();
     private final Map<Long, LocalLease> local = new ConcurrentHashMap<>();
 
     public TurnLeaseService(StringRedisTemplate redis, int ttlSeconds, int heartbeatSeconds) {
+        this(redis, ttlSeconds, heartbeatSeconds, DeploymentMode.SINGLE);
+    }
+
+    public TurnLeaseService(
+            StringRedisTemplate redis,
+            int ttlSeconds,
+            int heartbeatSeconds,
+            DeploymentMode mode) {
         this.redis = redis;
+        this.mode = mode == null ? DeploymentMode.SINGLE : mode;
+        if (this.mode.cluster() && redis == null) {
+            throw new IllegalStateException("cluster 模式必须配置 Redis：轮次租约不再回退进程内实现");
+        }
         this.ttl = Duration.ofSeconds(Math.max(10, ttlSeconds));
         this.heartbeat =
                 Duration.ofSeconds(Math.max(2, Math.min(heartbeatSeconds, ttlSeconds / 2)));
@@ -81,6 +97,9 @@ public final class TurnLeaseService implements AutoCloseable {
                 }
                 return Optional.empty();
             } catch (RuntimeException e) {
+                if (mode.cluster()) {
+                    throw new PayrollUnavailableException("轮次租约服务不可用，请稍后重试", e);
+                }
                 log.warn("[轮次] Redis 租约不可用，回退进程内租约：{}", e.getMessage());
             }
         }
@@ -110,6 +129,9 @@ public final class TurnLeaseService implements AutoCloseable {
                 track(sessionId, token);
                 return true;
             } catch (RuntimeException e) {
+                if (mode.cluster()) {
+                    throw new PayrollUnavailableException("轮次租约服务不可用，无法接管轮次", e);
+                }
                 log.warn("[轮次] 接管租约失败：{}", e.getMessage());
                 return false;
             }
@@ -159,7 +181,11 @@ public final class TurnLeaseService implements AutoCloseable {
             try {
                 return Boolean.TRUE.equals(redis.hasKey(KEY_PREFIX + sessionId));
             } catch (RuntimeException e) {
-                log.debug("[轮次] 查询租约存活失败：sessionId={}，原因={}", sessionId, e.getMessage());
+                // 查询失败时保守视为存活：集群下宁可多等一轮，也不能因 Redis 抖动误杀正在执行的轮次。
+                log.warn("[轮次] 查询租约存活失败，按存活处理：sessionId={}，原因={}", sessionId, e.getMessage());
+                if (mode.cluster()) {
+                    return true;
+                }
             }
         }
         LocalLease existing = local.get(sessionId);
@@ -208,7 +234,8 @@ public final class TurnLeaseService implements AutoCloseable {
                             token,
                             String.valueOf(ttl.toMillis()));
                 } catch (RuntimeException e) {
-                    log.debug("[轮次] 续约失败：sessionId={}，原因={}", sessionId, e.getMessage());
+                    TurnMetrics.leaseRenewFailed();
+                    log.warn("[轮次] 续约失败：sessionId={}，原因={}", sessionId, e.getMessage());
                 }
                 continue;
             }

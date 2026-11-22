@@ -40,6 +40,12 @@ Web 无状态：登录态在 Redis Session，消息与轮次在 MySQL，事件�
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PAYROLL_NODE_ROLE` | `all` | `all` 单进程；`web` 只转发/续流并拒绝 `/internal/*`（返回 404）；`runtime` 只执行内部轮次 |
+| `PAYROLL_DEPLOYMENT_MODE` | `single` | `single` 保留本地降级；`cluster` 下租约/事件/配额硬依赖 Redis，故障直接 503，由 `/readyz` 摘流。多 Web 节点共享 Redis 时必须设为 `cluster` |
+| `PAYROLL_HEALTH_READINESS_DEPS` | `db,redis` | `/readyz` 的依赖集合；ES、Nacos 只出现在 Actuator 详情，不参与 readiness |
+| `PAYROLL_CHAT_QUOTA_FAIL_MODE` | 空 | 空时按模式取默认（cluster=`deny`、single=`local`）；`deny` 下 Redis 故障拒绝新请求（503），`local` 回退进程内计数。cluster 强制 `deny` |
+| `PAYROLL_CHAT_QUOTA_TTL_MINUTES` | `35` | 配额键 TTL；启动时自动提升到“轮次上限 + 1 分钟”，避免长轮次中途被回收 |
+| `PAYROLL_RUNTIME_PER_URL_TIMEOUT_MS` | `5000` | 单个 runtime 地址的提交超时 |
+| `PAYROLL_RUNTIME_SUBMIT_BUDGET_MS` | `10000` | 一次提交的总预算（含逐个节点重试）；耗尽后立即失败并释放轮次 |
 | `PAYROLL_NODE_ID` | `local` | 节点标识，写入 `chat_turns.owner_node` 与日志 |
 | `PAYROLL_AGENT_RUNTIME_URLS` | 空 | Web 调用的 runtime 地址，逗号分隔；为空时对话接口直接返回“智能体运行期未配置”，不做本机回退 |
 | `PAYROLL_AGENT_RUNTIME_TOKEN` | 空 | 内部接口 HMAC 密钥；为空时内部提交不可用。生产环境必须替换默认值 |
@@ -60,6 +66,41 @@ Web 无状态：登录态在 Redis Session，消息与轮次在 MySQL，事件�
 | `PAYROLL_MEMORY_ENABLED` | `true` | 向量长记忆；容器内默认关闭（未部署 ES） |
 
 `SPRING_PROFILES_ACTIVE=mysql,redis` 由 compose 统一注入；单体部署仍可用 `dept` 别名。
+
+### 2.1 部署模式、探针与 Redis 前提
+
+`payroll.deployment.mode`（`PAYROLL_DEPLOYMENT_MODE`）决定故障语义：
+
+| 能力 | `single`（默认） | `cluster` |
+| --- | --- | --- |
+| 轮次租约 | Redis 故障回退进程内租约 | 不回退；抢租约失败返回 503 |
+| 事件总线 | Redis 故障降级为进程内事件 | 写入失败直接上抛，由 `/readyz` 摘流 |
+| 对话配额 | Redis 故障回退进程内计数（`local`） | 不回退，拒绝新请求（`deny`） |
+| readiness | Redis 不可达/未开 AOF 只降级详情 | Redis 不可达、AOF 关闭或持久化未知均判 DOWN |
+| 提交 runtime | 每 URL 5s、总预算 10s | 同左；超预算立即失败并释放租约 |
+
+多 Web 节点共享同一个 Redis 时必须使用 `cluster`，否则每个节点各算一份租约/配额，
+会出现同一会话双跑和并发上限按节点放大。
+
+**探针契约**：
+
+- `/livez`：只看进程存活，映射 Actuator `health/liveness` 分组，恒不带详情。
+- `/readyz`：查 DB + Redis（可用 `payroll.health.readiness-deps` 调整），映射
+  `health/readiness` 分组；非 UP 返回 503。ES/Nacos 只进各自 Actuator 详情，不参与摘流。
+- `/actuator/health` 与旧 `/health` 保留 200/503 兼容，但只回依赖状态，不再返回数据库地址/用户名。
+
+**Redis 前提**（cluster 视为硬前提）：开启 AOF（`appendonly yes`，`appendfsync everysec`），
+并使用主从/哨兵等具备故障切换的部署。探针每 30 秒做一次 `SET key EX 30` + `DELETE` 写探测，
+持久化判定优先 `CONFIG GET appendonly`，被托管 Redis 禁用配置命令时退化为
+`INFO persistence` 的 `aof_enabled`；两者都不可用时 cluster 按“持久化未知”判 DOWN。
+对应指标：`payroll.readyz.status`、`payroll.readyz.failing{dep=db|redis}`、
+`payroll.redis.persistence.ok`、`payroll.runtime.submit.budget.exhausted`。
+
+**配额**：单个 Lua 完成“检查容量 + 登记许可 + 整键续期”，许可值记录后端标记，
+释放只回收本后端持有的许可，跨实例共享同一上限。
+
+**Nginx**：`/api/` 必须 `proxy_buffering off`、`proxy_cache off`，读写超时不低于续流窗口
+（现为 600s）；`/livez`、`/readyz` 直接转发到 web 上游，不带详情缓存。
 
 ## 3. 轮次生命周期与跨节点语义
 
@@ -149,6 +190,18 @@ docker compose -f docker/docker-compose.yml down -v
 docker compose -f docker/docker-compose.yml exec frontend \
   sh -c 'wget -qO- http://web-1:8080/actuator/health; echo; wget -qO- http://web-2:8080/actuator/health'
 
+# 编排探针（经 Nginx）：/livez 只看进程、恒 200；/readyz 查 DB + Redis
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18088/livez
+curl -s http://127.0.0.1:18088/readyz
+
+# 探针矩阵（本地演练预期）
+#   single + 停 Redis：/livez 200、/readyz 200（详情 DEGRADED），新轮次仍可走本地降级
+#   cluster + 停 Redis：/livez 200、/readyz 503（依赖明细查 /actuator/health/readiness），新轮次 503
+#   cluster + AOF 关闭（appendonly no）：/readyz 503，直到恢复 appendonly yes
+docker compose -f docker/docker-compose.yml stop redis
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18088/readyz
+docker compose -f docker/docker-compose.yml start redis
+
 # 前端静态页与 API 代理
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18088/
 curl -s http://127.0.0.1:18088/api/agents/route-preview -X POST \
@@ -197,3 +250,9 @@ curl -s -b /tmp/cj -X POST \
 - 跨节点迁移的是会话与事件流，不是正在推理的进程；runtime 崩溃后该轮会以 `EXPIRED` 收尾，
   用户重新提问即可由其它 runtime 接手。
 - 语义缓存的向量召回需要 Elasticsearch；未部署时仅精确命中有意义。
+- `cluster` 模式把 Redis 当硬前提：必须开启 AOF（`appendonly yes`，建议 `appendfsync everysec`）并做高可用，
+  否则 `/readyz` 会 503 摘流；Redis 故障期间新轮次直接拒绝，不再本地回退（这是可用性契约，不是缺陷）。
+  单体或单 Web 演练可用 `PAYROLL_DEPLOYMENT_MODE=single` 保留进程内降级。
+- `/actuator/health` 与 `/health` 仍返回 200/503 兼容旧编排；`/health` 只回 `db` 依赖状态，
+  `/actuator/health` 详情受 `show-details: when_authorized` 保护，不再默认暴露数据库地址、用户名与
+  Nacos/ES 连接细节。

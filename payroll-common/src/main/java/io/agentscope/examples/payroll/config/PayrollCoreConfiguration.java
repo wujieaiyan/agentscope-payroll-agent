@@ -16,6 +16,8 @@ import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.ModelCredentialStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
+import io.agentscope.examples.payroll.health.PayrollReadinessHealthIndicator;
+import io.agentscope.examples.payroll.health.RedisHealthProbe;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.model.ModelCredentialCipher;
 import io.agentscope.examples.payroll.agent.ConfirmationTools;
@@ -57,6 +59,7 @@ import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.service.TurnEventBus;
 import io.agentscope.examples.payroll.service.TurnLeaseService;
+import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
@@ -70,6 +73,7 @@ import io.agentscope.examples.payroll.team.TeamAdminService;
 import io.agentscope.examples.payroll.team.TeamMode;
 import io.agentscope.examples.payroll.team.TeamSettings;
 import io.agentscope.examples.payroll.usage.LlmUsageStore;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -124,11 +128,78 @@ public class PayrollCoreConfiguration {
         return new LoginRateLimiter(redisProvider.getIfAvailable(), maxFailures, lockMinutes);
     }
 
+    /** 部署模式：single 保留本地降级，cluster 对 Redis 能力快速失败。 */
+    @Bean
+    public DeploymentMode deploymentMode(@Value("${payroll.deployment.mode:single}") String mode) {
+        DeploymentMode parsed = DeploymentMode.parse(mode);
+        TurnMetrics.configureDeploymentMode(parsed.value());
+        log.info(
+                "[部署] 模式={}：{}",
+                parsed.value(),
+                parsed.cluster() ? "租约/事件/配额不回退进程内实现" : "Redis 故障时允许本地降级");
+        return parsed;
+    }
+
+    /** Redis 健康探针：30s 写探针 + 持久化判定；cluster 下参与 readiness 硬判定。 */
+    @Bean(destroyMethod = "close")
+    public RedisHealthProbe redisHealthProbe(
+            ObjectProvider<StringRedisTemplate> redisProvider,
+            DeploymentMode deploymentMode,
+            MeterRegistry registry) {
+        return new RedisHealthProbe(redisProvider.getIfAvailable(), deploymentMode, registry);
+    }
+
+    /** readiness 只查 DB + Redis；ES/Nacos 留在各自详情里，不参与摘流。 */
+    @Bean(name = "payrollReadiness")
+    public PayrollReadinessHealthIndicator payrollReadiness(
+            PayrollDatabase database,
+            RedisHealthProbe redisHealthProbe,
+            DeploymentMode deploymentMode,
+            @Value("${payroll.health.readiness-deps:db,redis}") String readinessDeps,
+            MeterRegistry registry) {
+        return new PayrollReadinessHealthIndicator(
+                database, redisHealthProbe, deploymentMode, readinessDeps, registry);
+    }
+
     @Bean
     public ChatQuotaService chatQuotaService(
             ObjectProvider<StringRedisTemplate> redisProvider,
-            @Value("${payroll.chat.max-concurrent-per-user:2}") int maxConcurrent) {
-        return new ChatQuotaService(redisProvider.getIfAvailable(), maxConcurrent);
+            DeploymentMode deploymentMode,
+            @Value("${payroll.chat.max-concurrent-per-user:2}") int maxConcurrent,
+            @Value("${payroll.chat.quota-ttl-minutes:35}") int quotaTtlMinutes,
+            @Value("${payroll.chat.turn-max-minutes:30}") int turnMaxMinutes,
+            @Value("${payroll.chat.quota-fail-mode:}") String quotaFailMode,
+            @Value("${payroll.node-id:local}") String nodeId) {
+        if (quotaTtlMinutes <= turnMaxMinutes) {
+            log.warn(
+                    "[对话] 配额 TTL {} 分钟不大于轮次上限 {} 分钟，已按轮次上限 +1 分钟生效",
+                    quotaTtlMinutes,
+                    turnMaxMinutes);
+        }
+        int ttlMinutes = Math.max(quotaTtlMinutes, turnMaxMinutes + 1);
+        boolean failFast;
+        if (quotaFailMode == null || quotaFailMode.isBlank()) {
+            failFast = deploymentMode.cluster();
+        } else if ("deny".equalsIgnoreCase(quotaFailMode.trim())) {
+            failFast = true;
+        } else if ("local".equalsIgnoreCase(quotaFailMode.trim())) {
+            failFast = false;
+            if (deploymentMode.cluster()) {
+                log.warn(
+                        "[对话] cluster 模式忽略 quota-fail-mode=local：Redis 故障时仍拒绝新请求");
+                failFast = true;
+            }
+        } else {
+            log.warn("[对话] 未知 quota-fail-mode={}，按部署模式默认处理", quotaFailMode);
+            failFast = deploymentMode.cluster();
+        }
+        return new ChatQuotaService(
+                redisProvider.getIfAvailable(),
+                maxConcurrent,
+                Duration.ofMinutes(ttlMinutes),
+                deploymentMode,
+                nodeId,
+                failFast);
     }
 
     @Bean
@@ -140,24 +211,31 @@ public class PayrollCoreConfiguration {
     @Bean(destroyMethod = "close")
     public TurnLeaseService turnLeaseService(
             ObjectProvider<StringRedisTemplate> redisProvider,
+            DeploymentMode deploymentMode,
             @Value("${payroll.chat.turn-lease-seconds:30}") int ttlSeconds,
             @Value("${payroll.chat.turn-heartbeat-seconds:10}") int heartbeatSeconds) {
         return new TurnLeaseService(
-                redisProvider.getIfAvailable(), ttlSeconds, heartbeatSeconds);
+                redisProvider.getIfAvailable(), ttlSeconds, heartbeatSeconds, deploymentMode);
     }
 
     /** 轮次事件：有 Redis 时跨节点续流，否则退化为进程内事件。 */
     @Bean
     public TurnEventBus turnEventBus(
             ObjectProvider<StringRedisTemplate> redisProvider,
+            DeploymentMode deploymentMode,
             @Value("${payroll.chat.turn-event-ttl-hours:24}") int ttlHours,
             @Value("${payroll.chat.turn-event-max:10000}") int maxEvents,
             @Value("${payroll.chat.turn-max-minutes:30}") int turnMaxMinutes) {
         StringRedisTemplate redis = redisProvider.getIfAvailable();
         if (redis == null) {
+            if (deploymentMode.cluster()) {
+                throw new IllegalStateException(
+                        "cluster 模式必须配置 Redis：轮次事件总线不再回退进程内实现");
+            }
             return new InMemoryTurnEventBus();
         }
-        return new RedisTurnEventBus(redis, ttlHours, maxEvents, turnMaxMinutes);
+        return new RedisTurnEventBus(
+                redis, ttlHours, maxEvents, turnMaxMinutes, deploymentMode);
     }
 
     /**

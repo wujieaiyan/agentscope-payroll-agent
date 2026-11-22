@@ -40,11 +40,16 @@ import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.actuate.health.HealthComponent;
+import org.springframework.boot.actuate.health.HealthEndpoint;
+import org.springframework.boot.actuate.health.Status;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -83,6 +88,7 @@ public class PayrollWebController {
     private final ApprovalService approvalService;
     private final NacosAgentRegistry agentRegistry;
     private final NacosFlowRegistry flowRegistry;
+    private final HealthEndpoint healthEndpoint;
 
     public PayrollWebController(
             PayrollServices services,
@@ -92,7 +98,8 @@ public class PayrollWebController {
             ChatQuotaService chatQuotaService,
             ApprovalService approvalService,
             NacosAgentRegistry agentRegistry,
-            NacosFlowRegistry flowRegistry) {
+            NacosFlowRegistry flowRegistry,
+            HealthEndpoint healthEndpoint) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
@@ -101,14 +108,18 @@ public class PayrollWebController {
         this.approvalService = approvalService;
         this.agentRegistry = agentRegistry;
         this.flowRegistry = flowRegistry;
+        this.healthEndpoint = healthEndpoint;
     }
 
+    /** 旧编排兼容：状态跟随 readiness（DB + Redis），不再返回数据库地址等敏感字段。 */
     @GetMapping("/health")
-    public ApiResponse health() {
+    public ResponseEntity<ApiResponse> health() {
+        HealthComponent readiness = readiness();
+        boolean up = readiness != null && Status.UP.equals(readiness.getStatus());
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("status", "UP");
+        payload.put("status", up ? "UP" : "DOWN");
         payload.put("data_through_period", services.engine().dataThroughPeriod());
-        payload.put("database", services.database().url());
+        payload.put("database", depDetail(readiness, "db", up));
         payload.put("email_mode", "DRY_RUN");
         payload.put("chat_model", services.chat().modelId());
         String flowId = flowRegistry.activeFlowId();
@@ -124,7 +135,31 @@ public class PayrollWebController {
                         : configuredAgent.isBlank()
                                 ? "默认三段流水线"
                                 : agentRegistry.activeAgent().name());
-        return ApiResponse.ok(payload);
+        if (up) {
+            return ResponseEntity.ok(ApiResponse.ok(payload));
+        }
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new ApiResponse("ERROR", payload, "服务未就绪"));
+    }
+
+    private HealthComponent readiness() {
+        try {
+            return healthEndpoint.healthForPath("readiness");
+        } catch (RuntimeException e) {
+            log.warn("[健康] 无法读取 readiness 分组：{}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static Object depDetail(HealthComponent readiness, String dep, boolean up) {
+        if (!(readiness instanceof Health health)) {
+            return "UNKNOWN";
+        }
+        Object value = health.getDetails().get(dep);
+        if (value != null) {
+            return value;
+        }
+        return up ? "UP" : "UNKNOWN";
     }
 
     @GetMapping("/employees")

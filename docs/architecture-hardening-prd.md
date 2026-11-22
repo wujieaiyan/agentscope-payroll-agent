@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | v0.3（批次 1–2 已实现，§14 待确认） |
+| 版本 | v0.4（批次 1–2、批次 4 已实现，§14 其余批次待确认） |
 | 日期 | 2026-11-22 |
-| 状态 | 批次 1–2 已编码并通过测试（未提交）；批次 3 与 §14 的批次 4–6 待评审 |
+| 状态 | 批次 1–2 与批次 4（V1–V5）已编码并通过离线测试（未提交）；批次 3、5、6 待评审 |
 | 关联文档 | `docs/model-and-skill-scale-prd.md`、`docs/three-module-split-spec.md`、`docs/chat-resume.md`、`docs/vector-memory-spec.md`、`docs/multi-node-deploy.md` |
 | 范围 | Nacos 配置面读写一致性、技能缓存可靠性、对话执行面并发与依赖降级、模型与路由缓存正确性、运维基线、KB 解析/检索与集群可用性 |
-| 输入 | 2026-11-21 架构评审（P0/P1/P2，证据见 §2）；2026-11-22 性能、高并发与可用性复核（见 §14）；v0.3 补齐探针契约、Redis 持久化探测、指标告警与前端契约 |
+| 输入 | 2026-11-21 架构评审（P0/P1/P2，证据见 §2）；2026-11-22 性能、高并发与可用性复核（见 §14）；v0.3 补齐探针契约、Redis 持久化探测、指标告警与前端契约；v0.4 记录批次 4（V1–V5）实现状态与代码入口 |
 
 > 本文把评审结论转成可执行的批次。批次 1 为正确性缺陷，必须先做；批次 2 为容量与依赖韧性；批次 3 为运维与安全基线。§14 是 v0.2 新增的专项复核，新增批次 4（可用性 P0）、批次 5（并发与 KB P1）、批次 6（效率 P2），不改变批次 1–3 的范围与顺序。所有改动默认向后兼容，旧前端在未传 `revision` 时按“跳过校验 + WARN”运行。
 
@@ -1028,6 +1028,17 @@ backlog 校正（对应任务 #142–#152）：
 | V3 | liveness/readiness 拆分 | 统一对外契约为 `/livez`、`/readyz` 两个薄别名，内部映射 Actuator 的 `health/liveness`、`health/readiness` 分组；`/actuator/health` 与现有 `/health` 保留 200/503 兼容但删除地址等敏感字段。`/livez` 只看进程；`/readyz` 查 DB + Redis（`payroll.health.readiness-deps`）；ES/Nacos 只进详情不进 readiness。Redis 探测同时校验持久化与写入：启动时优先 `CONFIG GET appendonly`，被托管 Redis 禁用时退化为 `INFO persistence` 的 `aof_enabled`，两者都拿不到则告警；运行期每 30s 做 `SET`+`EX` 写探针。`single` 只 WARN，`cluster` 视为硬前提（见 A-3） | 停 ES：`/readyz` 200；停 Redis 或 AOF 关闭（cluster）：`/readyz` 503；`/health` 响应无地址与用户名 |
 | V4 | 配额原子化 | 单条 Lua 完成 INCR + EXPIRE；TTL 取 `quota-ttl-minutes`（35）> 轮次上限 30；键内记录后端标记，release 只回原后端；cluster 故障拒绝新请求 | 50 并发 + Redis 重启：无泄漏；单用户第 3 路 429；轮次跨 TTL 不被提前放行 |
 | V5 | 提交预算 | 每 URL 5s、总预算 10s（`runtime.per-url-timeout-ms` / `runtime.submit-budget-ms`）；超预算立即 `failTurn` 并释放租约；保留 429/503 映射 | 3 个 runtime 全挂：10s 内失败；30s 内租约释放；用户看到“服务暂不可用” |
+
+> 实现状态（2026-11-22）：V1–V5 已编码并通过离线全量测试（`mvn -o test`：1205 tests、0 failures、3 skipped；**未提交**）。
+> 代码入口与落地决策：
+>
+> - **V1**：`DeploymentMode` + `PayrollCoreConfiguration.deploymentMode()`（`payroll.deployment.mode`）；`TurnLeaseService` 在 cluster 下取租约失败直接抛不可用（503 语义），`RedisTurnEventBus` 写失败上抛，`ChatQuotaService` 不再回退进程内计数；`TurnMetrics` 所有指标统一带 `deployment.mode` 标签。
+> - **V2**：`ChatSessionManager.heartbeatFresh()` 以 `chat_turns.heartbeat_at` 为准（`staleMillis = max(30s, 3×heartbeat)`），事件缺失先看心跳，心跳也过期才 expire；`H2ChatTurnStore` 心跳写入与失联扫描同源（`COALESCE(heartbeat_at, updated_at)`）。
+> - **V3**：`HealthEndpointsController` 提供 `/livez`、`/readyz` 薄别名（分别映射 Actuator `health/liveness`、`health/readiness`），仅 `UP` 返回 200；`PayrollReadinessHealthIndicator` 只查 `db` + `redis`（`payroll.health.readiness-deps`），cluster 下 Redis 不可达/持久化未知/AOF 关闭判 DOWN，single 仅 DEGRADED；`RedisHealthProbe` 30s `SET`+`EX` 写探针，持久化优先 `CONFIG GET appendonly`、退化 `INFO persistence`；`PayrollWebController.health()` 状态跟随 readiness，只回 `db` 依赖，不再输出地址/用户名。
+> - **V4**：`ChatQuotaService` 单条 Lua 完成 `HLEN` 判限 + `HSET` permit + `PEXPIRE`，TTL 取 `payroll.chat.quota-ttl-minutes`（默认 35，自动抬到轮次上限之上）；release 按 permit 前缀与 backend 标记匹配后 `HDEL`，键空再 `DEL`；cluster 下 `payroll.chat.quota-fail-mode` 强制 deny，Redis 缺失直接拒绝启动。
+> - **V5**：`AgentRuntimeClient` 每 URL 超时 `payroll.runtime.per-url-timeout-ms`（5000）+ 总预算 `payroll.runtime.submit-budget-ms`（10000）；预算耗尽计数 `payroll.runtime.submit.budget.exhausted` 并抛 `PayrollUnavailableException`，由上层 `failTurn` 释放租约；409/429/503 映射保持不变。
+>
+> 部署侧同步：`docker/nginx.conf` 增加 `/livez`、`/readyz` 直转；`docs/multi-node-deploy.md` §2.1 与 §7/§8 给出模式能力矩阵、探针预期与 Redis AOF 前提。
 
 ### 14.7 批次 5（P1，并发与 KB）
 

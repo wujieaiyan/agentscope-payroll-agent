@@ -1,15 +1,18 @@
 package io.agentscope.examples.payroll.service;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.web.TooManyRequestsException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -73,6 +76,66 @@ class AgentRuntimeClientTest {
         withRuntime(202, client -> assertDoesNotThrow(() -> client.submit(TURN, "算一下 11 月工资")));
     }
 
+    @Test
+    @DisplayName("剩余预算不足 250ms 时不再发起新提交，按 503 返回并累计指标")
+    void failsWhenBudgetExhausted() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        TurnMetrics.useRegistry(registry);
+        try {
+            withSlowRuntime(
+                    1_000,
+                    base -> {
+                        AgentRuntimeClient client =
+                                new AgentRuntimeClient(
+                                        List.of(base, base),
+                                        "test-token",
+                                        Duration.ofMillis(300),
+                                        Duration.ofMillis(500));
+                        PayrollUnavailableException error =
+                                assertThrows(
+                                        PayrollUnavailableException.class,
+                                        () -> client.submit(TURN, "算一下 11 月工资"));
+                        assertTrue(error.getMessage().contains("预算"), error.getMessage());
+                        assertEquals(
+                                1.0,
+                                registry.find(TurnMetrics.SUBMIT_BUDGET_EXHAUSTED)
+                                        .counter()
+                                        .count());
+                    });
+        } finally {
+            TurnMetrics.useRegistry(null);
+        }
+    }
+
+    @Test
+    @DisplayName("单地址超时按配置生效，不被总预算放大")
+    void appliesPerUrlTimeout() {
+        withSlowRuntime(
+                1_000,
+                base -> {
+                    AgentRuntimeClient client =
+                            new AgentRuntimeClient(
+                                    List.of(base),
+                                    "test-token",
+                                    Duration.ofMillis(200),
+                                    Duration.ofSeconds(10));
+                    IllegalStateException error =
+                            assertThrows(
+                                    IllegalStateException.class,
+                                    () -> client.submit(TURN, "算一下 11 月工资"));
+                    assertTrue(error.getMessage().contains("200ms"), error.getMessage());
+                });
+    }
+
+    @Test
+    @DisplayName("未配置 runtime 地址时提交直接返回不可用")
+    void rejectsEmptyUrls() {
+        AgentRuntimeClient client = new AgentRuntimeClient(List.of(), "test-token");
+
+        assertThrows(
+                PayrollUnavailableException.class, () -> client.submit(TURN, "算一下 11 月工资"));
+    }
+
     private static void withRuntime(int status, ClientAssertion assertion) {
         HttpServer server = null;
         try {
@@ -82,6 +145,35 @@ class AgentRuntimeClientTest {
                             List.of("http://127.0.0.1:" + server.getAddress().getPort()),
                             "test-token");
             assertion.run(client);
+        } catch (IOException e) {
+            throw new IllegalStateException("无法启动测试 runtime", e);
+        } finally {
+            if (server != null) {
+                server.stop(0);
+            }
+        }
+    }
+
+    private static void withSlowRuntime(long delayMillis, StringAssertion assertion) {
+        HttpServer server = null;
+        try {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext(
+                    "/internal/turns",
+                    exchange -> {
+                        exchange.getRequestBody().readAllBytes();
+                        try {
+                            Thread.sleep(delayMillis);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(202, body.length);
+                        exchange.getResponseBody().write(body);
+                        exchange.close();
+                    });
+            server.start();
+            assertion.run("http://127.0.0.1:" + server.getAddress().getPort());
         } catch (IOException e) {
             throw new IllegalStateException("无法启动测试 runtime", e);
         } finally {
@@ -110,5 +202,10 @@ class AgentRuntimeClientTest {
     @FunctionalInterface
     private interface ClientAssertion {
         void run(AgentRuntimeClient client);
+    }
+
+    @FunctionalInterface
+    private interface StringAssertion {
+        void run(String baseUrl);
     }
 }

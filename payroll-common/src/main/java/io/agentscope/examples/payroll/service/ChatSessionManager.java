@@ -864,6 +864,21 @@ public final class ChatSessionManager implements AutoCloseable {
         return leases.alive(sessionId);
     }
 
+    /**
+     * 判活契约：DB 心跳在 staleMillis 内说明执行端仍存活。
+     *
+     * <p>Redis 事件缺失或租约查询失败时，不能据此判定轮次死亡；以 runtime 每 10s 写入的
+     * {@code chat_turns.heartbeat_at} 为准，只有心跳也过期才允许 expire。
+     */
+    public boolean heartbeatFresh(ChatTurn turn) {
+        LocalDateTime beat = turn == null ? null : turn.heartbeatAt();
+        if (beat == null) {
+            return false;
+        }
+        long at = beat.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        return System.currentTimeMillis() - at <= staleMillis;
+    }
+
     /** 读取轮次：用于续流前确认归属与状态。 */
     public ChatTurn turn(long userId, long sessionId, String turnId) {
         store.requireOwned(sessionId, userId);

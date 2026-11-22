@@ -42,9 +42,18 @@ payroll:
   # all=单进程（默认）；web=只做鉴权/转发/SSE；runtime=只执行内部轮次。
   node-role: "${PAYROLL_NODE_ROLE:all}"
   node-id: "${PAYROLL_NODE_ID:local}"
+  deployment:
+    # single=单机，Redis 故障时允许本地降级；cluster=多实例，租约/事件/配额遇 Redis 故障直接 503。
+    mode: "${PAYROLL_DEPLOYMENT_MODE:single}"
   runtime:
     # Web 调用的 runtime 地址，逗号分隔；为空时 Web 节点无法执行模型，对话接口返回明确错误。
     urls: "${PAYROLL_AGENT_RUNTIME_URLS:}"
+    # 单个 runtime 地址的连接/响应超时，以及一次提交的总预算（含逐个重试）。
+    per-url-timeout-ms: "${PAYROLL_RUNTIME_PER_URL_TIMEOUT_MS:5000}"
+    submit-budget-ms: "${PAYROLL_RUNTIME_SUBMIT_BUDGET_MS:10000}"
+  health:
+    # readiness 只探测 DB + Redis；ES/Nacos 只进各自 Actuator 详情，不参与摘流。
+    readiness-deps: "${PAYROLL_HEALTH_READINESS_DEPS:db,redis}"
   internal:
     # runtime 内部接口 HMAC 密钥；null/空时内部提交不可用。
     token: "${PAYROLL_AGENT_RUNTIME_TOKEN:}"
@@ -64,6 +73,10 @@ payroll:
   chat:
     # 单个用户同时进行的流式生成数，超出返回 429。
     max-concurrent-per-user: "${PAYROLL_CHAT_MAX_CONCURRENT:2}"
+    # 配额键 TTL，必须大于 turn-max-minutes，避免长轮次执行期间配额被提前回收。
+    quota-ttl-minutes: "${PAYROLL_CHAT_QUOTA_TTL_MINUTES:35}"
+    # deny=Redis 故障时拒绝新请求；local=single 才允许回退进程内计数；空按部署模式默认。
+    quota-fail-mode: "${PAYROLL_CHAT_QUOTA_FAIL_MODE:}"
     # 对话附件：只支持 Word/Excel/图片，原文件与提取文本落在独立目录。
     attachment:
       dir: "${PAYROLL_CHAT_ATTACHMENT_DIR:./data/chat-uploads}"
@@ -279,6 +292,14 @@ management:
   endpoint:
     health:
       show-details: when_authorized
+      # /livez、/readyz 映射到下面两个分组；readiness 不含 ES/Nacos。
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState,ping
+        readiness:
+          include: readinessState,payrollReadiness
   metrics:
     tags:
       application: payroll-agent

@@ -16,6 +16,7 @@ import io.agentscope.examples.payroll.support.ModelEnv;
 import io.agentscope.examples.payroll.web.AuditFilter;
 import io.agentscope.examples.payroll.web.AuthInterceptor;
 import io.agentscope.examples.payroll.web.NodeRoleFilter;
+import java.time.Duration;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,12 +43,23 @@ public class PayrollBackendConfiguration {
     @Bean
     public AgentRuntimeClient agentRuntimeClient(
             @Value("${payroll.runtime.urls:}") String urls,
-            @Value("${payroll.internal.token:}") String token) {
+            @Value("${payroll.internal.token:}") String token,
+            @Value("${payroll.runtime.per-url-timeout-ms:5000}") long perUrlTimeoutMs,
+            @Value("${payroll.runtime.submit-budget-ms:10000}") long submitBudgetMs) {
         List<String> parsed =
                 urls == null || urls.isBlank() ? List.of() : List.of(urls.split("\\s*,\\s*"));
-        AgentRuntimeClient client = new AgentRuntimeClient(parsed, token);
+        AgentRuntimeClient client =
+                new AgentRuntimeClient(
+                        parsed,
+                        token,
+                        Duration.ofMillis(Math.max(200L, perUrlTimeoutMs)),
+                        Duration.ofMillis(Math.max(400L, submitBudgetMs)));
         if (client.enabled()) {
-            log.info("[运行期] 远程执行已启用：{}", parsed);
+            log.info(
+                    "[运行期] 远程执行已启用：{}（单地址 {}ms，总预算 {}ms）",
+                    parsed,
+                    perUrlTimeoutMs,
+                    submitBudgetMs);
         } else {
             log.warn("[运行期] 未配置远程执行地址或内部令牌：会话接口将只落轮次，模型调用返回明确错误");
         }

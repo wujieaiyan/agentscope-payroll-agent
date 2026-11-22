@@ -80,7 +80,8 @@ class ChatStreamExecutorTest {
             ChatStreamRejection.record(executor);
             ChatStreamRejection.record(executor);
 
-            assertEquals(2.0, registry.counter(TurnMetrics.STREAM_REJECTED).count());
+            assertEquals(
+                    2.0, registry.find(TurnMetrics.STREAM_REJECTED).counter().count());
         } finally {
             release.countDown();
             executor.shutdownNow();
@@ -92,8 +93,8 @@ class ChatStreamExecutorTest {
     void rejectionRecordsMetricForForeignExecutor() {
         ChatStreamRejection.record(Runnable::run);
 
-        assertEquals(1.0, registry.counter(TurnMetrics.STREAM_REJECTED).count());
-        assertTrue(registry.counter(TurnMetrics.STREAM_REJECTED).count() > 0);
+        assertEquals(1.0, registry.find(TurnMetrics.STREAM_REJECTED).counter().count());
+        assertTrue(registry.find(TurnMetrics.STREAM_REJECTED).counter().count() > 0);
     }
 
     private static void awaitQuietly(CountDownLatch latch) {

@@ -649,6 +649,7 @@ public class ChatSessionController {
             while (!channel.closed()) {
                 if (System.currentTimeMillis() >= deadlineMillis) {
                     manager.expireTurn(turnId, "轮次超过最长执行时间");
+                    TurnMetrics.turnExpired("deadline");
                     channel.send(
                             "error", ChatSse.payload("message", "回答超时，请重新发起提问"));
                     break;
@@ -712,7 +713,10 @@ public class ChatSessionController {
                 }
                 ChatTurn turn = manager.turn(userId, sessionId, turnId);
                 if (ChatTurn.terminal(turn.status())) {
-                    if (!ChatTurn.SUCCEEDED.equals(turn.status())) {
+                    if (ChatTurn.SUCCEEDED.equals(turn.status())) {
+                        // done 事件可能因 Redis 抖动丢失：终态已落库时用助手消息补齐，避免前端空白。
+                        replayFinalMessage(userId, sessionId, turn, channel);
+                    } else {
                         channel.send(
                                 "error",
                                 ChatSse.payload(
@@ -728,19 +732,45 @@ public class ChatSessionController {
                     lastPingAt = now;
                 }
                 if (now - lastEventAt >= TURN_LEASE_GRACE_MS) {
-                    if (!manager.leaseAlive(sessionId)) {
-                        TurnMetrics.leaseLost();
-                        manager.expireTurn(turnId, "执行节点租约失效，长时间无事件");
-                        channel.send(
-                                "error", ChatSse.payload("message", "回答中断，请重新发起提问"));
+                    ChatTurn current = manager.turn(userId, sessionId, turnId);
+                    if (ChatTurn.terminal(current.status())) {
+                        if (ChatTurn.SUCCEEDED.equals(current.status())) {
+                            replayFinalMessage(userId, sessionId, current, channel);
+                        } else {
+                            channel.send(
+                                    "error",
+                                    ChatSse.payload(
+                                            "message",
+                                            current.errorMessage() == null
+                                                    ? "回答中断，请重试"
+                                                    : current.errorMessage()));
+                        }
                         break;
                     }
-                    // 租约仍有效：模型或工具只是慢，继续尾随而不是误判为节点失效。
-                    log.info(
-                            "[会话] 轮次长时间无事件但租约有效，继续等待：turnId={}，lastSeq={}",
-                            turnId,
-                            lastSeq);
-                    lastEventAt = now;
+                    // 判活契约：先看 runtime 每 10s 写入的 DB 心跳，心跳新鲜就不是节点失效。
+                    if (manager.heartbeatFresh(current)) {
+                        log.info(
+                                "[会话] 轮次长时间无事件但 DB 心跳新鲜，继续等待：turnId={}，lastSeq={}",
+                                turnId,
+                                lastSeq);
+                        lastEventAt = now;
+                        continue;
+                    }
+                    if (manager.leaseAlive(sessionId)) {
+                        // 心跳写库失败但租约仍在续约：模型或工具只是慢，继续尾随。
+                        log.warn(
+                                "[会话] 轮次心跳过期但租约仍有效，继续等待：turnId={}，lastSeq={}",
+                                turnId,
+                                lastSeq);
+                        lastEventAt = now;
+                        continue;
+                    }
+                    TurnMetrics.leaseLost();
+                    TurnMetrics.turnExpired("no-events");
+                    manager.expireTurn(turnId, "执行节点心跳与租约均失效，长时间无事件");
+                    channel.send(
+                            "error", ChatSse.payload("message", "回答中断，请重新发起提问"));
+                    break;
                 }
             }
         } catch (RuntimeException e) {
@@ -757,6 +787,46 @@ public class ChatSessionController {
         }
     }
 
+    /**
+     * 终态已落库但 done 事件缺失（Redis 抖动或事件裁剪）：用助手消息补发 done。
+     *
+     * <p>带 {@code recovered=true}，前端在断点过期清空拼接后仍展示这段最终回答。
+     */
+    private void replayFinalMessage(
+            long userId, long sessionId, ChatTurn turn, ChatSse.Channel channel) {
+        long messageId = turn.assistantMessageId();
+        if (messageId <= 0) {
+            return;
+        }
+        ChatMessage message =
+                manager.messages(userId, sessionId).stream()
+                        .filter(item -> item.id() == messageId)
+                        .findFirst()
+                        .orElse(null);
+        if (message == null) {
+            log.warn(
+                    "[会话] 终态已落库但助手消息缺失：turnId={}，messageId={}",
+                    turn.turnId(),
+                    messageId);
+            return;
+        }
+        channel.send(
+                "done",
+                ChatSse.payload(
+                        "reply", message.content(),
+                        "tools", message.tools().isEmpty() ? null : message.tools(),
+                        "model", message.model(),
+                        "message_id", message.id(),
+                        "routing", message.routing(),
+                        "proposals", message.proposals().isEmpty() ? null : message.proposals(),
+                        "citations", message.citations().isEmpty() ? null : message.citations(),
+                        "recovered", true));
+        log.info(
+                "[会话] 终态已落库，补发最终回答：turnId={}，messageId={}",
+                turn.turnId(),
+                message.id());
+    }
+
     /** 断点已过期时下发一次性缺口提示；不带 SSE id，避免污染续传游标。 */
     private static void sendGap(ChatSse.Channel channel, long afterSeq, long earliestSeq) {
         TurnMetrics.gap();
@@ -769,7 +839,7 @@ public class ChatSessionController {
                 ChatSse.payload(
                         "after_seq", Math.max(0L, afterSeq),
                         "earliest_seq", Math.max(0L, earliestSeq),
-                        "message", "部分回答过程已过期，完成后将以最终消息展示"));
+                        "message", "部分回答过程已过期，回答已保存，完成后可刷新查看完整内容"));
     }
 
     private static long parseEventId(String value) {

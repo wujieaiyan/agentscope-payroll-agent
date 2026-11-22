@@ -31,9 +31,9 @@ class TurnMetricsTest {
         TurnMetrics.degraded();
         TurnMetrics.leaseLost();
 
-        assertEquals(2.0, registry.counter(TurnMetrics.GAP).count());
-        assertEquals(1.0, registry.counter(TurnMetrics.DEGRADE).count());
-        assertEquals(1.0, registry.counter(TurnMetrics.LEASE_LOST).count());
+        assertEquals(2.0, registry.find(TurnMetrics.GAP).counter().count());
+        assertEquals(1.0, registry.find(TurnMetrics.DEGRADE).counter().count());
+        assertEquals(1.0, registry.find(TurnMetrics.LEASE_LOST).counter().count());
     }
 
     @Test
@@ -43,8 +43,8 @@ class TurnMetricsTest {
         TurnMetrics.eventBytes(128);
         TurnMetrics.eventBytes(512);
 
-        assertEquals(2L, registry.summary(TurnMetrics.EVENT_BYTES).count());
-        assertEquals(640.0, registry.summary(TurnMetrics.EVENT_BYTES).totalAmount());
+        assertEquals(2L, registry.find(TurnMetrics.EVENT_BYTES).summary().count());
+        assertEquals(640.0, registry.find(TurnMetrics.EVENT_BYTES).summary().totalAmount());
     }
 
     @Test
@@ -54,8 +54,8 @@ class TurnMetricsTest {
         TurnMetrics.replayedEvents(7);
         TurnMetrics.resumeReplay(System.currentTimeMillis());
 
-        assertEquals(1L, registry.summary(TurnMetrics.REPLAY_EVENTS).count());
-        assertEquals(7.0, registry.summary(TurnMetrics.REPLAY_EVENTS).totalAmount());
-        assertEquals(1L, registry.timer(TurnMetrics.RESUME).count());
+        assertEquals(1L, registry.find(TurnMetrics.REPLAY_EVENTS).summary().count());
+        assertEquals(7.0, registry.find(TurnMetrics.REPLAY_EVENTS).summary().totalAmount());
+        assertEquals(1L, registry.find(TurnMetrics.RESUME).timer().count());
     }
 }
