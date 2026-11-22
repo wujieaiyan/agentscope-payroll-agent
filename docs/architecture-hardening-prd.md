@@ -4,7 +4,7 @@
 | --- | --- |
 | 版本 | v0.4（批次 1–2、批次 4 已实现，§14 其余批次待确认） |
 | 日期 | 2026-11-22 |
-| 状态 | 批次 1–2 与批次 4（V1–V5）已编码并通过离线测试（未提交）；批次 3、5、6 待评审 |
+| 状态 | 批次 1–2 与批次 4（V1–V5）已编码并通过离线测试，已提交并推送 `feature/dev-team`（批次 1–2：`5297c6c`；批次 4：`3816d02`）；批次 3、5、6 待评审 |
 | 关联文档 | `docs/model-and-skill-scale-prd.md`、`docs/three-module-split-spec.md`、`docs/chat-resume.md`、`docs/vector-memory-spec.md`、`docs/multi-node-deploy.md` |
 | 范围 | Nacos 配置面读写一致性、技能缓存可靠性、对话执行面并发与依赖降级、模型与路由缓存正确性、运维基线、KB 解析/检索与集群可用性 |
 | 输入 | 2026-11-21 架构评审（P0/P1/P2，证据见 §2）；2026-11-22 性能、高并发与可用性复核（见 §14）；v0.3 补齐探针契约、Redis 持久化探测、指标告警与前端契约；v0.4 记录批次 4（V1–V5）实现状态与代码入口 |
@@ -942,7 +942,7 @@ backlog 校正（对应任务 #142–#152）：
 
 ## 14. 复核：性能、高并发与可用性（2026-11-22）
 
-> 本节来源两次独立评审：一次以产品经理 + 资深架构师视角看知识库解析与对话性能，一次专门看高并发与可用性。它不改变批次 1–3 的范围与顺序，只新增批次 4–6。批次 1–2 已按 §5/§6 实现并通过 §6.6 测试（1184 项、0 失败、3 跳过），尚未提交；本节结论不要求回滚这两批。
+> 本节来源两次独立评审：一次以产品经理 + 资深架构师视角看知识库解析与对话性能，一次专门看高并发与可用性。它不改变批次 1–3 的范围与顺序，只新增批次 4–6。批次 1–2 已按 §5/§6 实现并通过 §6.6 测试（1184 项、0 失败、3 跳过），已随 `5297c6c` 提交；本节结论不要求回滚这两批。
 
 ### 14.1 复核结论
 
@@ -1026,10 +1026,10 @@ backlog 校正（对应任务 #142–#152）：
 | V1 | 部署模式显式化与故障语义 | 新增 `payroll.deployment.mode=single\|cluster`。`cluster` 下租约、配额、事件总线不再本地回退：Redis 不可用时租约返回 503、事件写入失败上抛，由 `/readyz` 503 让编排摘流；`single` 保留现有降级 | 双 Web + 停 Redis：新轮次 503，不出现两条模型调用；`single` 行为不变 |
 | V2 | 轮次中断的判活契约 | 事件缺失时先读 `chat_turns.heartbeat_at`（runtime 10s 心跳，`H2ChatTurnStore.java:331-348`）；心跳新鲜则继续等；DB 心跳也超过 `staleMillis` 才 expire；终态已落库则回放最终消息；缺口提示“回答已保存，请刷新” | 轮次中 kill Redis 10s：不误 expire；恢复后按 `Last-Event-ID` 续传；已落库回答不丢 |
 | V3 | liveness/readiness 拆分 | 统一对外契约为 `/livez`、`/readyz` 两个薄别名，内部映射 Actuator 的 `health/liveness`、`health/readiness` 分组；`/actuator/health` 与现有 `/health` 保留 200/503 兼容但删除地址等敏感字段。`/livez` 只看进程；`/readyz` 查 DB + Redis（`payroll.health.readiness-deps`）；ES/Nacos 只进详情不进 readiness。Redis 探测同时校验持久化与写入：启动时优先 `CONFIG GET appendonly`，被托管 Redis 禁用时退化为 `INFO persistence` 的 `aof_enabled`，两者都拿不到则告警；运行期每 30s 做 `SET`+`EX` 写探针。`single` 只 WARN，`cluster` 视为硬前提（见 A-3） | 停 ES：`/readyz` 200；停 Redis 或 AOF 关闭（cluster）：`/readyz` 503；`/health` 响应无地址与用户名 |
-| V4 | 配额原子化 | 单条 Lua 完成 INCR + EXPIRE；TTL 取 `quota-ttl-minutes`（35）> 轮次上限 30；键内记录后端标记，release 只回原后端；cluster 故障拒绝新请求 | 50 并发 + Redis 重启：无泄漏；单用户第 3 路 429；轮次跨 TTL 不被提前放行 |
+| V4 | 配额原子化 | 单条 Lua 完成判限 + 许可写入 + 过期（`HLEN` / `HSET` / `PEXPIRE`）；TTL 取 `quota-ttl-minutes`（35）> 轮次上限 30；键内记录后端标记，release 只回原后端；cluster 故障拒绝新请求 | 50 并发 + Redis 重启：无泄漏；单用户第 3 路 429；轮次跨 TTL 不被提前放行 |
 | V5 | 提交预算 | 每 URL 5s、总预算 10s（`runtime.per-url-timeout-ms` / `runtime.submit-budget-ms`）；超预算立即 `failTurn` 并释放租约；保留 429/503 映射 | 3 个 runtime 全挂：10s 内失败；30s 内租约释放；用户看到“服务暂不可用” |
 
-> 实现状态（2026-11-22）：V1–V5 已编码并通过离线全量测试（`mvn -o test`：1205 tests、0 failures、3 skipped；**未提交**）。
+> 实现状态（2026-11-22）：V1–V5 已编码并通过离线全量测试（`mvn -o test`：1205 tests、0 failures、3 skipped；已提交 `3816d02` 并推送 `feature/dev-team`）。
 > 代码入口与落地决策：
 >
 > - **V1**：`DeploymentMode` + `PayrollCoreConfiguration.deploymentMode()`（`payroll.deployment.mode`）；`TurnLeaseService` 在 cluster 下取租约失败直接抛不可用（503 语义），`RedisTurnEventBus` 写失败上抛，`ChatQuotaService` 不再回退进程内计数；`TurnMetrics` 所有指标统一带 `deployment.mode` 标签。
@@ -1127,23 +1127,23 @@ W6 的前后端契约（批次 5 一并落地）：
 
 ### 14.13 指标与告警
 
-沿用现有 Actuator/Prometheus 通道，批次 4–6 需补齐以下指标；阈值按单节点基线给出，集群按节点聚合。
+沿用现有 Actuator/Prometheus 通道，批次 4–6 需补齐以下指标；表内为 Micrometer meter ID，Prometheus 导出时 `.` 转 `_`、counter 追加 `_total`（如 `payroll.chat.quota.rejected` → `payroll_chat_quota_rejected_total`）。标注「待补」的随对应批次落地；阈值按单节点基线给出，集群按节点聚合。
 
-| 指标 | 类型 | 告警阈值 | 对应 |
+| 指标（Micrometer ID） | 类型 | 告警阈值 | 对应 |
 | --- | --- | --- | --- |
-| `chat_quota_rejected_total` | counter | 5 分钟内 > 20 持续告警 | V4、W6 |
-| `chat_stream_rejected_total`（reason=executor\|tail\|runtime） | counter | tail 占比 > 50% 时提示扩容 | W1、W6 |
-| `chat_turn_expired_total`（reason=no-events\|deadline\|lease） | counter | 15 分钟内 > 0 且 reason=no-events 即告警 | V2 |
-| `chat_lease_renew_failed_total` | counter | 1 分钟内 > 0 | V1、V2 |
-| `chat_event_poll_lag_seconds` | gauge | p99 > 3s | W2 |
-| `kb_query_embed_breaker_open` | gauge (0/1) | 1 持续 5 分钟 | W3 |
-| `kb_retrieval_duration_seconds` | histogram | p95 > 300ms | W3、X1 |
-| `kb_ingest_queue_depth` | gauge | 持续 > 80% 容量 5 分钟 | W4 |
-| `kb_ocr_failures_total` | counter | 10 分钟内 > 5 | W5 |
-| `readyz_status` / `readyz_failing_dep` | gauge / label | 非 UP 持续 2 分钟 | V3 |
-| `redis_persistence_ok` | gauge (0/1) | 0 时告警（cluster 为致命） | V3、A-3 |
-| `runtime_submit_budget_exhausted_total` | counter | 5 分钟内 > 0 | V5 |
-| `model_failover_total` | counter | 持续增长时检查主连接 | X6 |
+| `payroll.chat.quota.rejected` | counter | 5 分钟内 > 20 持续告警 | V4、W6 |
+| `payroll.chat.stream.rejected`（reason=executor\|tail\|runtime） | counter | tail 占比 > 50% 时提示扩容 | W1、W6 |
+| `payroll.chat.turn.expired`（reason=no-events\|deadline\|lease） | counter | 15 分钟内 > 0 且 reason=no-events 即告警 | V2 |
+| `payroll.chat.lease.renew.failed` | counter | 1 分钟内 > 0 | V1、V2 |
+| `payroll.chat.event.poll.lag`（待补） | gauge | p99 > 3s | W2 |
+| `payroll.kb.query.embed.breaker.open`（待补） | gauge (0/1) | 1 持续 5 分钟 | W3 |
+| `payroll.kb.retrieval.duration`（待补） | histogram | p95 > 300ms | W3、X1 |
+| `payroll.kb.ingest.queue.depth`（待补） | gauge | 持续 > 80% 容量 5 分钟 | W4 |
+| `payroll.kb.ocr.failures`（待补） | counter | 10 分钟内 > 5 | W5 |
+| `payroll.readyz.status` / `payroll.readyz.failing`（dep=db\|redis） | gauge | 非 UP 持续 2 分钟 | V3 |
+| `payroll.redis.persistence.ok` | gauge (0/1) | 0 时告警（cluster 为致命） | V3、A-3 |
+| `payroll.runtime.submit.budget.exhausted` | counter | 5 分钟内 > 0 | V5 |
+| `payroll.model.failover`（待补） | counter | 持续增长时检查主连接 | X6 |
 
 要求：所有指标带 `deployment.mode` 标签，便于区分单机与集群的降级行为。
 
