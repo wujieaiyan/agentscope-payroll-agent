@@ -9,15 +9,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** 无 Redis 时的进程内事件总线：仅保证单实例续流，用于测试与单机部署。 */
 public final class InMemoryTurnEventBus implements TurnEventBus {
 
-    private static final long MAX_EVENTS = 10_000L;
+    /** 每个轮次保留的事件上限；写满后覆盖最旧事件。 */
+    static final int MAX_EVENTS = 10_000;
 
-    private final Map<String, List<TurnEvent>> events = new ConcurrentHashMap<>();
+    private final Map<String, EventRing> events = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> seqs = new ConcurrentHashMap<>();
     private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
 
@@ -26,37 +26,19 @@ public final class InMemoryTurnEventBus implements TurnEventBus {
         long seq =
                 seqs.computeIfAbsent(turnId, ignored -> new AtomicLong())
                         .incrementAndGet();
-        List<TurnEvent> list =
-                events.computeIfAbsent(turnId, ignored -> new CopyOnWriteArrayList<>());
-        synchronized (list) {
-            list.add(
-                    new TurnEvent(
-                            seq,
-                            event,
-                            io.agentscope.examples.payroll.support.JsonSupport.toJson(data)));
-            while (list.size() > MAX_EVENTS) {
-                list.remove(0);
-            }
-        }
+        events.computeIfAbsent(turnId, ignored -> new EventRing())
+                .add(
+                        new TurnEvent(
+                                seq,
+                                event,
+                                io.agentscope.examples.payroll.support.JsonSupport.toJson(data)));
         return seq;
     }
 
     @Override
     public List<TurnEvent> read(String turnId, long afterSeq, int max) {
-        List<TurnEvent> source = events.get(turnId);
-        if (source == null) {
-            return List.of();
-        }
-        List<TurnEvent> result = new ArrayList<>();
-        for (TurnEvent event : source) {
-            if (event.seq() > afterSeq) {
-                result.add(event);
-                if (result.size() >= max) {
-                    break;
-                }
-            }
-        }
-        return result;
+        EventRing ring = events.get(turnId);
+        return ring == null ? List.of() : ring.after(afterSeq, max);
     }
 
     @Override
@@ -79,23 +61,18 @@ public final class InMemoryTurnEventBus implements TurnEventBus {
 
     @Override
     public long earliestSeq(String turnId) {
-        List<TurnEvent> source = events.get(turnId);
-        if (source == null) {
-            return 0L;
-        }
-        synchronized (source) {
-            return source.isEmpty() ? 0L : source.get(0).seq();
-        }
+        EventRing ring = events.get(turnId);
+        return ring == null ? 0L : ring.earliestSeq();
     }
 
     @Override
     public TurnSnapshot snapshot(String turnId) {
-        List<TurnEvent> source = events.get(turnId);
-        if (source == null) {
+        EventRing ring = events.get(turnId);
+        if (ring == null) {
             return null;
         }
         TurnSnapshotState state = new TurnSnapshotState();
-        for (TurnEvent event : source) {
+        for (TurnEvent event : ring.after(0L, Integer.MAX_VALUE)) {
             Map<String, Object> data;
             try {
                 data =
@@ -132,5 +109,58 @@ public final class InMemoryTurnEventBus implements TurnEventBus {
         events.remove(turnId);
         seqs.remove(turnId);
         cancelled.remove(turnId);
+    }
+
+    /**
+     * 固定上限的环形缓冲：写满后覆盖最旧事件，追加与裁剪都是 O(1)。
+     *
+     * <p>容量按需从 64 扩容到 {@link #MAX_EVENTS}，避免为每个空会话预分配大数组。
+     */
+    private static final class EventRing {
+
+        private TurnEvent[] slots = new TurnEvent[64];
+        private int head;
+        private int size;
+
+        synchronized void add(TurnEvent event) {
+            if (size == slots.length) {
+                if (slots.length < MAX_EVENTS) {
+                    grow();
+                } else {
+                    slots[head] = event;
+                    head = (head + 1) % slots.length;
+                    return;
+                }
+            }
+            slots[(head + size) % slots.length] = event;
+            size++;
+        }
+
+        synchronized List<TurnEvent> after(long afterSeq, int max) {
+            List<TurnEvent> result = new ArrayList<>(Math.min(size, Math.max(0, max)));
+            for (int i = 0; i < size; i++) {
+                TurnEvent event = slots[(head + i) % slots.length];
+                if (event != null && event.seq() > afterSeq) {
+                    result.add(event);
+                    if (result.size() >= max) {
+                        break;
+                    }
+                }
+            }
+            return result;
+        }
+
+        synchronized long earliestSeq() {
+            return size == 0 ? 0L : slots[head].seq();
+        }
+
+        private void grow() {
+            TurnEvent[] bigger = new TurnEvent[Math.min(MAX_EVENTS, slots.length * 2)];
+            for (int i = 0; i < size; i++) {
+                bigger[i] = slots[(head + i) % slots.length];
+            }
+            slots = bigger;
+            head = 0;
+        }
     }
 }

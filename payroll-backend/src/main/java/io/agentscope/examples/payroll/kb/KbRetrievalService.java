@@ -23,6 +23,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -37,6 +42,15 @@ public class KbRetrievalService {
     private static final int MAX_PARENT_CONTENT = 1200;
     /** 主题词在语料中至少出现这么多次才视为“收录”，避免书单页/命令列表里的一次顺带提及。 */
     private static final int MIN_TOPIC_MENTIONS = 3;
+    /** 仅用于并行的非嵌入召回阶段；嵌入本身在进入并行前已完成。 */
+    private static final ExecutorService RECALL_POOL =
+            Executors.newFixedThreadPool(
+                    3,
+                    r -> {
+                        Thread thread = new Thread(r, "kb-recall");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
     private final KbChunkStore chunkStore;
     private final KbDocumentStore documentStore;
@@ -91,9 +105,13 @@ public class KbRetrievalService {
     private record RouteHit(Chunk chunk, double score) {
     }
 
-    private record RouteHits(List<RouteHit> hits, boolean elasticsearch) {
+    private record RouteHits(List<RouteHit> hits, boolean elasticsearch, boolean degraded) {
         static RouteHits empty() {
-            return new RouteHits(List.of(), false);
+            return new RouteHits(List.of(), false, false);
+        }
+
+        static RouteHits local(List<RouteHit> hits) {
+            return new RouteHits(hits, false, false);
         }
     }
 
@@ -108,6 +126,15 @@ public class KbRetrievalService {
     }
 
     public RetrievalResult search(long seriesId, RetrievalTestRequest request, AuthUser user) {
+        return search(seriesId, request, user, null);
+    }
+
+    /** 多库检索时由调用方预计算查询向量，避免每个库重复调用嵌入服务。 */
+    public RetrievalResult search(
+            long seriesId,
+            RetrievalTestRequest request,
+            AuthUser user,
+            KbEmbeddingService.Embedding precomputed) {
         permissionService.requireRead(seriesId, user);
         long started = System.currentTimeMillis();
         String query = request == null || request.query() == null ? "" : request.query().trim();
@@ -139,12 +166,15 @@ public class KbRetrievalService {
             return empty(query, strategy, started, false, hybrid);
         }
 
-        KbEmbeddingService.Embedding embedding = embeddingService.embed(List.of(query));
+        KbEmbeddingService.Embedding embedding =
+                precomputed == null ? embeddingService.embedQuery(query) : precomputed;
         float[] queryVector =
                 embedding.vectors().isEmpty() ? null : embedding.vectors().get(0);
         String engine = "LOCAL";
         List<ScoredHit> hits;
         Map<String, Object> routeDiagnostics = new LinkedHashMap<>();
+        // 同一轮检索内复用分词结果：各召回、重排与相邻合并都按内容字符串命中同一份缓存。
+        Map<String, List<String>> tokenCache = new ConcurrentHashMap<>();
 
         if (settings.fusionEnabled()) {
             FusionOutcome outcome =
@@ -156,12 +186,13 @@ public class KbRetrievalService {
                             config,
                             hybrid,
                             threshold,
-                            recallLimit);
+                            recallLimit,
+                            tokenCache);
             hits = outcome.hits();
             engine = outcome.engine();
             routeDiagnostics.putAll(outcome.diagnostics());
             if (config.rerankEnabled && !hits.isEmpty()) {
-                hits = rerank(query, hits);
+                hits = rerank(query, hits, tokenCache);
             }
         } else {
             LegacyOutcome outcome =
@@ -173,7 +204,8 @@ public class KbRetrievalService {
                             config,
                             hybrid,
                             threshold,
-                            recallLimit);
+                            recallLimit,
+                            tokenCache);
             hits = outcome.hits();
             engine = outcome.engine();
             routeDiagnostics.put("fusion", false);
@@ -223,6 +255,33 @@ public class KbRetrievalService {
                 diagnostics);
     }
 
+    /** 检索候选只取元数据并按上限截断，向量在评分阶段再按需批量回取。 */
+    private List<Chunk> loadCandidates(long seriesId, Map<Long, Document> readyDocuments) {
+        List<Chunk> candidates = new ArrayList<>();
+        for (Chunk chunk :
+                chunkStore.findActiveMetaBySeries(seriesId, settings.maxCandidates())) {
+            if (valid(chunk, readyDocuments)) {
+                candidates.add(chunk);
+            }
+        }
+        return candidates;
+    }
+
+    /** 批量回取向量的浮点表示；缺失或解析失败的分块按无向量处理。 */
+    private Map<Long, float[]> loadVectors(List<Chunk> candidates) {
+        List<Long> ids = candidates.stream().map(Chunk::id).toList();
+        Map<Long, String> raw = chunkStore.findVectorsByIds(ids);
+        Map<Long, float[]> vectors = new HashMap<>(raw.size());
+        raw.forEach(
+                (id, json) -> {
+                    float[] vector = embeddingService.fromJson(json);
+                    if (vector != null) {
+                        vectors.put(id, vector);
+                    }
+                });
+        return vectors;
+    }
+
     /** 融合关闭时的旧路径，保留用于灰度回滚。 */
     private LegacyOutcome legacy(
             long seriesId,
@@ -232,16 +291,12 @@ public class KbRetrievalService {
             RetrievalConfig config,
             boolean hybrid,
             double threshold,
-            int recallLimit) {
+            int recallLimit,
+            Map<String, List<String>> tokenCache) {
         String engine = "LOCAL";
+        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments);
         List<String> topics = LexicalTokens.asciiTerms(query);
         if (!topics.isEmpty()) {
-            List<Chunk> candidates = new ArrayList<>();
-            for (Chunk chunk : chunkStore.findActiveBySeries(seriesId)) {
-                if (valid(chunk, readyDocuments)) {
-                    candidates.add(chunk);
-                }
-            }
             if (!mentionsAnyTopic(topics, candidates, readyDocuments)) {
                 log.info("[知识库] 检索主题不在库内：series={}，terms={}", seriesId, topics);
                 return new LegacyOutcome(List.of(), engine);
@@ -260,12 +315,12 @@ public class KbRetrievalService {
             }
         }
         if (hits.isEmpty()) {
-            hits = searchLocally(seriesId, query, queryVector, readyDocuments, hybrid, config);
+            hits = searchLocally(query, queryVector, candidates, hybrid, config, tokenCache);
             engine = "LOCAL";
         }
         hits = hits.stream().filter(hit -> hit.score() >= threshold).toList();
         if (config.rerankEnabled && !hits.isEmpty()) {
-            hits = rerank(query, hits);
+            hits = rerank(query, hits, tokenCache);
         }
         return new LegacyOutcome(hits, engine);
     }
@@ -279,13 +334,9 @@ public class KbRetrievalService {
             RetrievalConfig config,
             boolean hybrid,
             double threshold,
-            int recallLimit) {
-        List<Chunk> candidates = new ArrayList<>();
-        for (Chunk chunk : chunkStore.findActiveBySeries(seriesId)) {
-            if (valid(chunk, readyDocuments)) {
-                candidates.add(chunk);
-            }
-        }
+            int recallLimit,
+            Map<String, List<String>> tokenCache) {
+        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments);
         List<Route> routes = new ArrayList<>(settings.recallRoutes());
         if (!hybrid) {
             routes.removeIf(route -> route != Route.VECTOR);
@@ -309,31 +360,65 @@ public class KbRetrievalService {
             byId.put(chunk.id(), chunk);
         }
         Map<String, Object> routeStats = new LinkedHashMap<>();
-        RouteHits vector = RouteHits.empty();
+        Map<Route, Long> routeTook = new ConcurrentHashMap<>();
+        // 查询向量已在进入融合前算好，这里并行的是纯召回/评分阶段，不会并发压嵌入服务。
+        boolean concurrent = routes.size() > 1;
+        CompletableFuture<RouteHits> vectorFuture =
+                routes.contains(Route.VECTOR)
+                        ? submitRoute(
+                                concurrent,
+                                () ->
+                                        timed(
+                                                Route.VECTOR,
+                                                routeTook,
+                                                () ->
+                                                        vectorRoute(
+                                                                seriesId,
+                                                                queryVector,
+                                                                candidates,
+                                                                byId,
+                                                                readyDocuments,
+                                                                threshold,
+                                                                recallLimit)))
+                        : CompletableFuture.completedFuture(RouteHits.empty());
+        CompletableFuture<RouteHits> bm25Future =
+                routes.contains(Route.BM25)
+                        ? submitRoute(
+                                concurrent,
+                                () ->
+                                        timed(
+                                                Route.BM25,
+                                                routeTook,
+                                                () -> bm25Route(query, candidates, recallLimit, tokenCache)))
+                        : CompletableFuture.completedFuture(RouteHits.empty());
+        CompletableFuture<RouteHits> titleFuture =
+                routes.contains(Route.TITLE_PATH)
+                        ? submitRoute(
+                                concurrent,
+                                () ->
+                                        timed(
+                                                Route.TITLE_PATH,
+                                                routeTook,
+                                                () ->
+                                                        titleRoute(
+                                                                query,
+                                                                candidates,
+                                                                readyDocuments,
+                                                                recallLimit,
+                                                                tokenCache)))
+                        : CompletableFuture.completedFuture(RouteHits.empty());
+        RouteHits vector = vectorFuture.join();
+        RouteHits bm25 = bm25Future.join();
+        RouteHits title = titleFuture.join();
         if (routes.contains(Route.VECTOR)) {
-            long routeStarted = System.currentTimeMillis();
-            vector =
-                    vectorRoute(
-                            seriesId,
-                            queryVector,
-                            candidates,
-                            byId,
-                            readyDocuments,
-                            threshold,
-                            recallLimit);
-            routeStats.put("VECTOR", routeStat(vector.hits().size(), routeStarted));
+            routeStats.put("VECTOR", routeStat(vector.hits().size(), routeTook.get(Route.VECTOR)));
         }
-        RouteHits bm25 = RouteHits.empty();
         if (routes.contains(Route.BM25)) {
-            long routeStarted = System.currentTimeMillis();
-            bm25 = bm25Route(query, candidates, recallLimit);
-            routeStats.put("BM25", routeStat(bm25.hits().size(), routeStarted));
+            routeStats.put("BM25", routeStat(bm25.hits().size(), routeTook.get(Route.BM25)));
         }
-        RouteHits title = RouteHits.empty();
         if (routes.contains(Route.TITLE_PATH)) {
-            long routeStarted = System.currentTimeMillis();
-            title = titleRoute(query, candidates, readyDocuments, recallLimit);
-            routeStats.put("TITLE_PATH", routeStat(title.hits().size(), routeStarted));
+            routeStats.put(
+                    "TITLE_PATH", routeStat(title.hits().size(), routeTook.get(Route.TITLE_PATH)));
         }
 
         Map<Long, AccumulatedHit> accumulated = new LinkedHashMap<>();
@@ -353,17 +438,37 @@ public class KbRetrievalService {
         int fusedCount = fused.size();
 
         DedupeResult deduped = dedupeByFingerprint(fused);
-        DedupeResult merged = adjacentMerge(deduped.hits());
+        DedupeResult merged = adjacentMerge(deduped.hits(), tokenCache);
         List<ScoredHit> capped = capPerDocument(merged.hits());
         int removed = deduped.removed() + merged.removed();
         String engine = vector.elasticsearch() ? "ELASTICSEARCH" : "LOCAL";
         Map<String, Object> diagnostics = diagnostics(true, fusedCount, removed, routeStats);
+        if (vector.degraded()) {
+            diagnostics.put("vectorFallback", "LOCAL");
+            diagnostics.put("esDegraded", true);
+        }
         return new FusionOutcome(capped, engine, diagnostics);
     }
 
-    /**
-     * 主题词必须出现在文档名/标题路径，或在语料中反复出现（≥3 次）才算库内覆盖；单次顺带提及多为无关页面噪声。
-     */
+    private static CompletableFuture<RouteHits> submitRoute(
+            boolean concurrent, Supplier<RouteHits> task) {
+        if (!concurrent) {
+            return CompletableFuture.completedFuture(task.get());
+        }
+        return CompletableFuture.supplyAsync(task, RECALL_POOL);
+    }
+
+    private static RouteHits timed(
+            Route route, Map<Route, Long> took, Supplier<RouteHits> task) {
+        long started = System.currentTimeMillis();
+        try {
+            return task.get();
+        } finally {
+            took.put(route, System.currentTimeMillis() - started);
+        }
+    }
+
+    /** 主题词必须出现在文档名/标题路径，或在语料中反复出现（≥3 次）才算库内覆盖；单次顺带提及多为无关页面噪声。 */
     private static boolean mentionsAnyTopic(
             List<String> topics, List<Chunk> candidates, Map<Long, Document> documents) {
         Map<String, Integer> mentions = new HashMap<>();
@@ -409,10 +514,10 @@ public class KbRetrievalService {
         return diagnostics;
     }
 
-    private static Map<String, Object> routeStat(int candidates, long started) {
+    private static Map<String, Object> routeStat(int candidates, Long tookMs) {
         Map<String, Object> stat = new LinkedHashMap<>();
         stat.put("candidates", candidates);
-        stat.put("took_ms", System.currentTimeMillis() - started);
+        stat.put("took_ms", tookMs == null ? 0L : tookMs);
         return stat;
     }
 
@@ -427,8 +532,10 @@ public class KbRetrievalService {
         if (queryVector == null) {
             return RouteHits.empty();
         }
+        boolean degraded = false;
         if (elasticsearchService.available()) {
             List<RouteHit> hits = new ArrayList<>();
+            boolean failed = false;
             try {
                 for (KbElasticsearchService.SearchHit hit :
                         elasticsearchService.search(seriesId, queryVector, null, limit, false, 1.0)) {
@@ -442,34 +549,40 @@ public class KbRetrievalService {
                     }
                 }
             } catch (RuntimeException e) {
-                log.warn("[知识库] ES 向量召回失败，退化本地余弦：{}", e.getMessage());
-                hits.clear();
+                failed = true;
+                log.warn("[知识库] ES 向量召回失败，本次降级关键词：{}", e.getMessage());
             }
-            if (!hits.isEmpty()) {
-                hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
-                return new RouteHits(limit(hits, limit), true);
+            if (!failed) {
+                if (!hits.isEmpty()) {
+                    hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
+                    return new RouteHits(limit(hits, limit), true, false);
+                }
+                return RouteHits.local(List.of());
             }
+            degraded = true;
         }
+        // ES 未配置时的离线兜底：仅对已截断的候选加载向量，避免大库全量扫描。
+        Map<Long, float[]> vectors = loadVectors(candidates);
         List<RouteHit> hits = new ArrayList<>();
         for (Chunk chunk : candidates) {
-            double score =
-                    Math.max(0, cosine(queryVector, embeddingService.fromJson(chunk.vector())));
+            double score = Math.max(0, cosine(queryVector, vectors.get(chunk.id())));
             if (score >= threshold) {
                 hits.add(new RouteHit(chunk, score));
             }
         }
         hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
-        return new RouteHits(limit(hits, limit), false);
+        return new RouteHits(limit(hits, limit), false, degraded);
     }
 
-    private RouteHits bm25Route(String query, List<Chunk> candidates, int limit) {
-        List<String> queryTokens = tokens(query);
+    private RouteHits bm25Route(
+            String query, List<Chunk> candidates, int limit, Map<String, List<String>> tokenCache) {
+        List<String> queryTokens = tokensCached(query, tokenCache);
         if (queryTokens.isEmpty()) {
             return RouteHits.empty();
         }
         Map<Long, List<String>> chunkTokens = new HashMap<>();
         for (Chunk chunk : candidates) {
-            chunkTokens.put(chunk.id(), tokens(chunk.content()));
+            chunkTokens.put(chunk.id(), tokensCached(chunk.content(), tokenCache));
         }
         Map<Long, Double> scores = bm25(queryTokens, candidates, chunkTokens);
         double max = scores.values().stream().mapToDouble(Double::doubleValue).max().orElse(0);
@@ -484,7 +597,7 @@ public class KbRetrievalService {
             }
         }
         hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
-        return new RouteHits(limit(hits, limit), false);
+        return new RouteHits(limit(hits, limit), false, false);
     }
 
     /** 标题/文档名命中：查询词覆盖率高，或整串命中时给小幅加成。 */
@@ -492,8 +605,9 @@ public class KbRetrievalService {
             String query,
             List<Chunk> candidates,
             Map<Long, Document> documents,
-            int limit) {
-        Set<String> queryTokens = new HashSet<>(tokens(query));
+            int limit,
+            Map<String, List<String>> tokenCache) {
+        Set<String> queryTokens = new HashSet<>(tokensCached(query, tokenCache));
         if (queryTokens.isEmpty()) {
             return RouteHits.empty();
         }
@@ -511,7 +625,7 @@ public class KbRetrievalService {
             if (title.isEmpty()) {
                 continue;
             }
-            Set<String> titleTokens = new HashSet<>(tokens(title));
+            Set<String> titleTokens = new HashSet<>(tokensCached(title, tokenCache));
             long matched = queryTokens.stream().filter(titleTokens::contains).count();
             double coverage = (double) matched / queryTokens.size();
             double bonus = title.toLowerCase(Locale.ROOT).contains(queryLower) ? 0.1 : 0;
@@ -521,7 +635,7 @@ public class KbRetrievalService {
             }
         }
         hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
-        return new RouteHits(limit(hits, limit), false);
+        return new RouteHits(limit(hits, limit), false, false);
     }
 
     private void addRoute(
@@ -561,7 +675,8 @@ public class KbRetrievalService {
         return new DedupeResult(new ArrayList<>(unique.values()), removed);
     }
 
-    private DedupeResult adjacentMerge(List<ScoredHit> hits) {
+    private DedupeResult adjacentMerge(
+            List<ScoredHit> hits, Map<String, List<String>> tokenCache) {
         Map<String, List<ScoredHit>> groups = new LinkedHashMap<>();
         for (ScoredHit hit : hits) {
             String key =
@@ -594,7 +709,8 @@ public class KbRetrievalService {
                 boolean canMerge =
                         adjacent
                                 && current.mergedChunks() < maxChunks
-                                && overlap(current.content(), hit.content()) > ADJACENT_OVERLAP;
+                                && overlap(current.content(), hit.content(), tokenCache)
+                                        > ADJACENT_OVERLAP;
                 if (canMerge) {
                     current = merge(current, hit, maxChunks);
                     representatives.put(current.chunk().id(), current);
@@ -668,32 +784,27 @@ public class KbRetrievalService {
     }
 
     private List<ScoredHit> searchLocally(
-            long seriesId,
             String query,
             float[] queryVector,
-            Map<Long, Document> readyDocuments,
+            List<Chunk> candidates,
             boolean hybrid,
-            RetrievalConfig config) {
-        List<Chunk> candidates = new ArrayList<>();
-        for (Chunk chunk : chunkStore.findActiveBySeries(seriesId)) {
-            if (valid(chunk, readyDocuments)) {
-                candidates.add(chunk);
-            }
-        }
+            RetrievalConfig config,
+            Map<String, List<String>> tokenCache) {
         if (candidates.isEmpty()) {
             return List.of();
         }
-        List<String> queryTokens = tokens(query);
+        Map<Long, float[]> vectors = loadVectors(candidates);
+        List<String> queryTokens = tokensCached(query, tokenCache);
         Map<Long, List<String>> chunkTokens = new HashMap<>();
         for (Chunk chunk : candidates) {
-            chunkTokens.put(chunk.id(), tokens(chunk.content()));
+            chunkTokens.put(chunk.id(), tokensCached(chunk.content(), tokenCache));
         }
         Map<Long, Double> bm25 = hybrid ? bm25(queryTokens, candidates, chunkTokens) : Map.of();
         double maxBm25 = bm25.values().stream().mapToDouble(Double::doubleValue).max().orElse(0);
         double vectorWeight = Math.max(0, Math.min(1, config.vectorWeight));
         List<ScoredHit> hits = new ArrayList<>();
         for (Chunk chunk : candidates) {
-            double cosine = cosine(queryVector, embeddingService.fromJson(chunk.vector()));
+            double cosine = cosine(queryVector, vectors.get(chunk.id()));
             double vectorScore = Math.max(0, cosine);
             double keywordScore = maxBm25 == 0 ? 0 : bm25.getOrDefault(chunk.id(), 0.0) / maxBm25;
             double score =
@@ -706,12 +817,13 @@ public class KbRetrievalService {
         return hits;
     }
 
-    private List<ScoredHit> rerank(String query, List<ScoredHit> hits) {
-        Set<String> queryTokens = new HashSet<>(tokens(query));
+    private List<ScoredHit> rerank(
+            String query, List<ScoredHit> hits, Map<String, List<String>> tokenCache) {
+        Set<String> queryTokens = new HashSet<>(tokensCached(query, tokenCache));
         String queryLower = query.toLowerCase(Locale.ROOT);
         List<ScoredHit> reranked = new ArrayList<>(hits.size());
         for (ScoredHit hit : hits) {
-            Set<String> tokens = new HashSet<>(tokens(hit.content()));
+            Set<String> tokens = new HashSet<>(tokensCached(hit.content(), tokenCache));
             long matched = tokens.stream().filter(queryTokens::contains).count();
             double coverage = queryTokens.isEmpty() ? 0 : (double) matched / queryTokens.size();
             double titleBonus =
@@ -907,12 +1019,29 @@ public class KbRetrievalService {
         return builder.toString();
     }
 
-    private static double overlap(String left, String right) {
-        Set<String> leftTokens = new HashSet<>(tokens(left));
+    /** 检索轮内复用分词结果：同一段文本只切一次，列表保持词频信息供 BM25 使用。 */
+    private static List<String> tokensCached(String text, Map<String, List<String>> cache) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        if (cache == null) {
+            return tokens(text);
+        }
+        List<String> cached = cache.get(text);
+        if (cached == null) {
+            cached = List.copyOf(tokens(text));
+            cache.put(text, cached);
+        }
+        return cached;
+    }
+
+    private static double overlap(
+            String left, String right, Map<String, List<String>> tokenCache) {
+        Set<String> leftTokens = new HashSet<>(tokensCached(left, tokenCache));
         if (leftTokens.isEmpty()) {
             return 0;
         }
-        Set<String> rightTokens = new HashSet<>(tokens(right));
+        Set<String> rightTokens = new HashSet<>(tokensCached(right, tokenCache));
         if (rightTokens.isEmpty()) {
             return 0;
         }

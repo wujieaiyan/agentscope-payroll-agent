@@ -29,12 +29,16 @@ public final class Permissions {
     public static final String ROLE_MANAGE = "role:manage";
     public static final String USER_MANAGE = "user:manage";
     public static final String AUDIT_READ = "audit:read";
+    public static final String USAGE_READ = "usage:read";
     public static final String AGENT_MANAGE = "agent:manage";
     public static final String SKILL_MANAGE = "skill:manage";
     public static final String FLOW_MANAGE = "flow:manage";
     public static final String KB_READ = "kb:read";
     public static final String KB_CREATE = "kb:create";
     public static final String KB_MANAGE = "kb:manage";
+    public static final String PROFILE_READ = "profile:read";
+    public static final String PROFILE_WRITE = "profile:write";
+    public static final String PROFILE_MANAGE = "profile:manage";
 
     public static final String ROLE_ADMIN = "ADMIN";
     public static final String ROLE_HR = "HR";
@@ -60,7 +64,9 @@ public final class Permissions {
                     DEPARTMENT_READ,
                     ROLE_READ,
                     KB_READ,
-                    KB_CREATE);
+                    KB_CREATE,
+                    PROFILE_READ,
+                    PROFILE_WRITE);
 
     private static final Set<String> VIEWER =
             Set.of(
@@ -72,7 +78,9 @@ public final class Permissions {
                     DEPARTMENT_READ,
                     ROLE_READ,
                     CHAT_USE,
-                    KB_READ);
+                    KB_READ,
+                    PROFILE_READ,
+                    PROFILE_WRITE);
 
     private Permissions() {
     }
@@ -103,12 +111,16 @@ public final class Permissions {
         labels.put(ROLE_MANAGE, "管理角色");
         labels.put(USER_MANAGE, "管理用户");
         labels.put(AUDIT_READ, "查看审计日志");
+        labels.put(USAGE_READ, "查看用量看板");
         labels.put(AGENT_MANAGE, "管理智能体");
         labels.put(SKILL_MANAGE, "管理技能");
         labels.put(FLOW_MANAGE, "管理流程编排");
         labels.put(KB_READ, "查看知识库");
         labels.put(KB_CREATE, "新建知识库");
         labels.put(KB_MANAGE, "管理知识库");
+        labels.put(PROFILE_READ, "查看我的工作偏好");
+        labels.put(PROFILE_WRITE, "维护我的工作偏好");
+        labels.put(PROFILE_MANAGE, "合规删除工作偏好");
         return labels;
     }
 

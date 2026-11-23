@@ -6,33 +6,27 @@
 核心原则：**大模型负责“听懂”和“解释”，确定性引擎负责“算对”。** 模型不参与任何金额计算，
 所有数字都来自 `PayrollEngine`，保证结果可复算、可审计。
 
-## 架构
+## 定位与架构
 
-```
-自然语言对话（CLI / 管理台“智能问答”）   本地 Web 管理台（Spring Boot 3 / 127.0.0.1）
-      │                                     │
-      ▼                                     ▼
-PayrollChatService（固定三阶段编排）   PayrollWebController（REST）
-  ├─ ① 计算智能体：理解诉求 / 调用工具        ├─ 员工 / 考核 / 城市政策 / 考勤维护
-  ├─ ② 验证智能体：对核算对象独立校验        │  （含 Excel 导入与模板下载）
-  └─ ③ 核算智能体：汇总记录生成最终答复      ├─ 工资批次预览、微调、出账
-      │                                     ├─ 对话式问答（SSE 流式）
-      ▼ @Tool（8 个，返回结构化 JSON）        └─ 确认后 dry-run 全员发信
-PayrollTools
-      │
-      └──────────────┬───────────────────────┘
-                     ▼
-PayrollEngine（BigDecimal 全链路）
-  ├─ 个税累计预扣法（跨月递推）
-  ├─ 城市社保 / 公积金（基数上下限）
-  ├─ 绩效奖金系数 + 出账前人工微调
-  ├─ 考勤扣款 / 三类加班 / 入职首月折算
-  └─ 发薪前勾稽校验
-                     │
-      ┌──────────────┴───────────────┐
-      ▼                              ▼
-关系库（默认 MySQL，测试用 H2；主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
-```
+产品主线为 **Agent 平台 + 薪酬运营** 双主线：平台提供智能体、流程、技能、模型连接与知识库，
+薪酬是首个旗舰场景包；两个工作台共享同一套对话入口、权限与审计。金额计算始终由确定性
+`PayrollEngine` 完成，模型只负责理解与解释。
+
+一轮对话可能的执行链路为 **流程（FLOW）→ 单智能体（AGENT）→ 动态团队（TEAM_ACTIVE）→
+图编排 POC（GRAPH）→ 流水线（PIPELINE）**，按可用性与能力门禁逐级选择，失败按类型回退；
+每条消息都落库路由快照，前端以 chip 展示。
+
+架构的单一事实源见 [`docs/architecture.md`](docs/architecture.md)（进程、模块、路由、配置矩阵、质量门）。
+变更纪律与整改计划见 [`docs/architecture-review.md`](docs/architecture-review.md)、
+[`docs/architecture-remediation-spec.md`](docs/architecture-remediation-spec.md)。
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | 进程 / 模块 / 路由 / 配置矩阵 |
+| [`docs/agent-orchestration.md`](docs/agent-orchestration.md) | 流程 DAG 模型与执行语义 |
+| [`docs/scenario-packs.md`](docs/scenario-packs.md) | 场景包接入契约 |
+| [`docs/deployment-matrix.md`](docs/deployment-matrix.md) | profile × 依赖 × 允许组合 |
+| [`docs/restore-runbook.md`](docs/restore-runbook.md) | 备份与恢复 |
 
 ## 功能
 
@@ -47,7 +41,7 @@ PayrollEngine（BigDecimal 全链路）
 | 用户与权限 | 登录后按角色控制接口与页面：内置管理员 / 人事 / 只读访客，支持自定义角色与 23 项权限码；用户、部门、角色均可在管理台维护 |
 | 管理台导航 | 侧边栏为树状分组菜单：分组可折叠，宽屏可整体收起为图标栏，折叠状态保存在浏览器本地 |
 | Agent 管理 | 专家智能体定义（名称、头像、标签、绑定技能、上下架、公开/私有）存储于 Nacos，支持搜索筛选与增删改；头像可选内置 Ant Design 图标或 Emoji；未启用 Nacos 时只读回退三个内置智能体 |
-| 技能管理 | 以 `<技能ID>.md` 形式维护 Nacos 中的技能提示词，支持新增、编辑、删除；内置技能可被 Nacos 版本覆盖，删除覆盖后回退内置；被智能体引用的自定义技能禁止删除 |
+| 技能管理 | 以 `<技能ID>.md` 形式维护 Nacos 中的技能提示词，支持新增、编辑、删除；内置技能可被 Nacos 版本覆盖，删除覆盖后回退内置；被智能体引用的自定义技能禁止删除。`PAYROLL_SKILLS_SOURCE=db` 时正文与文件包改落 MySQL（V22 四表）+ 本地 blob 目录，见「技能存储来源」 |
 | 流程编排 | 拖拽画布把已注册智能体与条件判断组成 DAG：分支、汇合、同层并行；可保存多条流程并指定全局默认，下一轮对话生效；未设置时沿用原流水线 |
 | 多用户会话 | 每个登录用户拥有独立会话列表；同一用户可打开多个会话窗口，消息按会话持久化并按用户隔离 |
 | Excel 导入 | 员工、考核、考勤支持 `.xlsx/.xls` 批量导入：表头别名匹配、逐行校验、部分成功并返回行号与失败原因 |
@@ -265,6 +259,16 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
   保存 `activeFlowId`。画布与执行语义详见 [docs/agent-orchestration.md](docs/agent-orchestration.md)，
   配置模板见 `docs/nacos-skills/payroll-flows.json`。
 
+定义存储来源（M5.1）：
+
+- `PAYROLL_DEFINITIONS_SOURCE=nacos`（默认）：整份列表存 Nacos，行为与本节一致。
+- `PAYROLL_DEFINITIONS_SOURCE=db`：定义落 `agent_definition` 表（共享 Flyway V21），
+  数据库为权威；写入成功后 best-effort 发布 Nacos 变更通知，通知失败只告警不回滚。
+  读失败直接返回 503，不会静默回退 Nacos 旧文档。
+- `PAYROLL_DEFINITIONS_IMPORT_FROM_NACOS=true`：仅 db 模式且表为空时，启动从 Nacos 导入一次；
+  重复启动或已有数据时跳过，不产生重复行。
+- 更新/删除沿用 revision 契约：写前重读比对，不一致返回 409（带 `currentRevision`），前端提示刷新。
+
 配置结构（字段为 camelCase，时间为 ISO-8601）：
 
 ```json
@@ -286,7 +290,6 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 ```
 
 Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口需要该账号拥有配置发布权限。
-多个实例同时编辑时按“最后一次写入”覆盖，暂未做版本号或乐观锁。
 
 ## 技能管理（Nacos）
 
@@ -309,6 +312,84 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
   审计元数据只含 ID、描述、来源、是否内置与正文长度，不保存提示词正文。
 - 只读回退：`PAYROLL_NACOS_ENABLED=false` 时页面只读，仍可查看内置技能内容；
   已启用但 Nacos 连接失败时列表回退内置技能，保存会提示写入失败。
+
+### 技能存储来源（Nacos / MySQL + 本地 blob）
+
+正文与文件包可以留在 Nacos（默认），也可以改落数据库 + 本地对象目录。语义、权限、审计与
+管理台页面两边一致，只有权威存储不同。规格见 `docs/skill-storage-mysql-oss-spec.md`。
+
+- `PAYROLL_SKILLS_SOURCE=nacos`（默认）：正文 `<技能ID>.md` + 文件包 `<技能ID>.files.json` 都在
+  Nacos，行为与本节上文一致；不注册任何技能仓库 bean。
+- `PAYROLL_SKILLS_SOURCE=db`：正文与文件清单落共享 Flyway V22 的四张表
+  （`skill_definition` 目录与当前版本指针、`skill_version` 不可变正文快照、`skill_resource` 文件
+  清单与哈希、`skill_blob` blob 记账），文件字节落 `PAYROLL_SKILL_BLOB_ROOT`
+  （默认 `./data/skill-blobs`，内容寻址 `<sha[0:2]>/<sha>`，单文件上限
+  `PAYROLL_SKILL_BLOB_MAX_BYTES`，默认 512KB）。三个内置角色技能同样保留代码内置回退，
+  删除库里记录不会让角色失能。
+- 切换要重启，运行期不热切。db 源跨实例的目录失效靠轮询聚合指纹：
+  `PAYROLL_SKILL_INVALIDATION_POLL_MS`（默认 15000，`<=0` 关闭并退化为只靠
+  `PAYROLL_SKILL_CATALOG_TTL_MS`（默认 60000）兜底）。同进程的写在事务提交后立刻生效。
+- `PAYROLL_SKILLS_IMPORT_FROM_NACOS=true`：仅 db 模式且技能表为空时，启动从 Nacos 整体导入一次；
+  表非空即跳过，重复启动不产生重复行。Nacos 模式下该键无效（打一条 INFO 直接返回，
+  免得制造两个权威）。只在 Web/all 侧开，避免两进程并发灌同一批技能。
+- 质量门槛不因换存储而放宽：正文 `strip()` 后仍需 ≥200 字、至少一个 Markdown 标题（1–3 个 `#` 后跟空格）、
+  并出现「角色 / 规则 / 步骤 / 流程 / 输出 / 要求 / 职责」之一。超限或不合规在导入时就被拒收，
+  对账里表现为 `missingInDb`——**切库前 Nacos 里那些短正文技能要先补全或删除**，否则它们不会出现在库里。
+- 切库前对账（只读，不改任何东西）：
+
+  ```bash
+  # 需与目标实例同一套 PAYROLL_DB_* 与同一个 PAYROLL_SKILL_BLOB_ROOT
+  java -cp <模块 classes 与依赖> io.agentscope.examples.payroll.PayrollApplication --skill-migration-check
+  ```
+
+  一致退出码 0（打印「一致，可以切换」），有不一致退出码 1 并按差异类型列出（`missingInDb`、
+  `bodyMismatch`、`fileMissing`、`fileExtra`、`fileHashMismatch`、`executionMismatch`、
+  `resourceHashMismatch`、`orphanEnvelope`、`problems`；`extraInDb` 只报不拦）。
+  这条只在命令行提供，没做管理台接口：对账要在还没切库之前跑，而接口只有应用起来后才存在。
+  ⚠️ 对账命令行用 `LocalDiskSkillBlobStore.fromEnvironment()` 取 blob 目录，**只认 `PAYROLL_SKILL_BLOB_ROOT`
+  这个环境变量**（不读 `payroll.skill.blob.root` Spring 键），且必须与写入实例同值——
+  指错目录时资源字节整批读不回，对账只记一条 `读取技能资源失败，本轮未比对文件包…`（文案带
+  `<技能 id>/<路径>`，指向最先撞上的那条）、`checkedFiles` 报未执行、四个文件桶保持为空，
+  不会再级联成每人一条「库内运行期数据缺失」；但**它只能告诉你读不出，不能告诉你哪个根是对的**，
+  同值这件事仍得靠人工核对。见规格 §11.3 第 4 条与 §19 P0-8b。
+- 切库前后的系统提示词按「遮掉 `_nacos`/`_db` 源标签、正文 `strip()` 归一后逐字符一致」验收：技能目录行
+  只渲染 `id：描述`（不渲染正文字节数，它在两侧会差 1 个字），剩余确定差异只有正文首尾空白被归一、
+  以及文件包指纹由空串变实值导致的智能体实例重建一次。超预算时的截断点允许漂移。见规格 §17 V-12。
+- 管理台写接口的乐观并发（db 源）：`PUT /api/admin/skills/{id}`、`DELETE /api/admin/skills/{id}`、
+  `PUT /{id}/files`、`DELETE /{id}/files/{路径}`、`POST /{id}/versions/{versionNo}/rollback`、
+  `POST /import/git`、`POST /import/zip` 七个接口接受可选的 `?revision=`。带上即与库里
+  `skill_definition.revision` 比对，不一致返回 409 并回显
+  `currentRevision`；不带 = 不做并发检查（写仍然在行锁里完成，只是不做条件判断）。Nacos 源没有行级
+  revision，传了也照旧忽略。**改文件包同样会递增 revision**（版本行不动、行令牌动），所以那两个文件
+  接口的响应体除 `{count, files}` 外还回吐写后的新 `revision`，调用方要拿它覆盖手里的旧值。
+  **导入会有两类 409，前端必须分开提示**：库里已有同名技能且没带 `overwrite` 是「先确认覆盖」，
+  响应里**没有** `currentRevision`；带了 `revision` 但对不上才是真冲突，**有**这个字段。把前者当成
+  「刷新重试」等于替用户按下覆盖。`dryRun=true` 的预览一个字节都不写，也不进审计（见规格 §9.3 末「P1-3 已落」）。
+- 技能类审计事件的 `detail` 快照在 db 源下带 `revision` 与 `versionNo` 两个键（camelCase，与其余键一致）；
+  内置项与 Nacos 源没有行，两键都不出现——写 0 会被读成「第一个版本被覆盖」。见规格 §13-6。
+- 版本历史与回滚（仅 db 源）：`GET /api/admin/skills/{id}/versions` 按版本序号倒序返回
+  `versionNo/changeNote/contentLength/createdBy/createdAt/current`，**不返回正文**；
+  `POST /api/admin/skills/{id}/versions/{versionNo}/rollback`（同样接受可选 `?revision=`）
+  **新增一条版本行**把正文与文件包清单复用过去，历史行一字不改，所以序号只增不减——
+  「回到 v2」在库里是一条新的 v5。两个接口在 Nacos 源下的行为不同且是故意的：列表返回空、
+  回滚直接报错（Nacos 没有 `skill_version` 行，静默成功会让管理台以为回滚生效）。
+  `meta_json`/描述/执行开关沿用当前版本而不是目标版本：回滚只换正文与文件包两维。
+  **目标版本的文件字节已被回收时拒绝回滚**（报「vN 文件字节缺失：<路径>」），否则指针一移
+  运行期就撞「技能资源缺失」；`PAYROLL_SKILL_FILES_ENABLED=false` 时跳过这道体检。
+  见规格 §9.2 末「P1-2 落地补充」。
+- 保存正文时的可选「变更说明」（`change_note`，≤200 字符，超限整笔写不生效）：**正文变了就落在新版本行，
+  正文没变（只改描述/开关）就补写在当前版本行**，空白表示不改而不是清空。回滚自动写「回滚自 vN」。
+- 写接口的操作者会落库（仅 db 源）：`skill_definition.created_by` 只在**新建**时写、之后任何保存都不动它，
+  `updated_by` 每次写都刷；`skill_version.created_by` 记「造出这一版的人」，所以**回滚追加的那条新版本行归按下回滚的人**，
+  不是原作者。名字取自登录上下文（与审计页 `actor_name` 同源），**没有操作者时落 NULL 而不是假造一个 "admin"**——
+  一次性迁移灌进来的那批技能因此天然与「页面上改过的」分得开。时间线条目里的 `createdBy` 在归属未知时回读为空串；
+  要查得更细（谁在什么时候改的、改前改后是什么）仍走审计页按 `skill.update` + `versionNo` 过滤。见规格 §8 末「P1-3 落地情况」。
+- 单个参考文件接口 `GET /{id}/files/{路径}` 的响应带 `ETag`（内容是 sha256，现算不读库里的清单列，
+  这样两条源给出同一指纹）；带 `If-None-Match` 重开同一个文件命中即 304 空体，`*`、多值与 `W/` 前缀都算命中。
+- `PAYROLL_TEST_MYSQL_JDBC`/`_USER`/`_PASSWORD`：仅测试用。三者齐全时 `DdlSyntaxTest` 会在真
+  MySQL 8 上跑一遍共享迁移并断言索引与列宽；未配置时该用例自动跳过，不影响 `mvn -o test`。
+- `/health` 里该组件的键是 `skills`（原来叫 `nacos`，db 源沿用同名会误导告警），
+  陈旧阈值 `PAYROLL_HEALTH_SKILLS_STALE_SECONDS`（默认 300）。
 
 ### 参考文件与脚本文件
 
@@ -503,7 +584,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 ## 多智能体编排
 
-对话不是单 Agent ReAct 循环，而是由 `PayrollChatService` 固定编排的三段流水线：
+一轮对话默认按「流程 → 单智能体 → 动态团队」选择链路，均不可用时才落到下面的三段流水线兜底。
+流水线由 `PayrollChatService` 固定编排，不依赖模型判断顺序：
 
 | 阶段 | 智能体 | 可用工具 | 职责与产出 |
 | --- | --- | --- | --- |
@@ -582,6 +664,13 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
   提案生成、确认、执行、取消、过期以及分类覆盖都会写入 `audit_log`
   （`chat.action.propose/confirm/execute/cancel/expire`、`chat.action.safety.override`）。
   设计细节与决策记录见 [`docs/routing-action-confirm-spec.md`](docs/routing-action-confirm-spec.md)。
+
+- **点击式人工确认**：管理台「智能体 → 写操作确认」可直接开关（写入 Nacos
+  `payroll-agent-settings.json` 的 `actionConfirm`，运行期按 TTL 生效，未启用 Nacos 时回退
+  `payroll.chat.action-confirm.enabled`）。开启后**所有**写工具都先生成卡片，点「确认执行」才执行。
+  另有 `request_confirmation` 工具，让模型把“要我继续吗”这类正文问句变成确认卡片（带可选细节），
+  确认后前端自动把卡片里的 `followup` 作为下一轮输入发送；该工具始终强制确认，不受开关影响。
+  见 [`docs/chat-confirm-click-spec.md`](docs/chat-confirm-click-spec.md)。
 
 - **角色 Skill 外置（可选）**：三个角色的提示词已拆成 AgentScope 动态技能，系统提示只保留
   金额安全规则与“第一步加载技能”的指令，模型通过 `load_skill_through_path` 按需读取角色说明。
@@ -817,7 +906,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 本地默认已启用 `mysql` profile；Web 与 agent-runtime 拆分部署时必须用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`），轮次租约与事件流依赖 Redis 跨进程共享：
 
-- MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
+- MySQL：Flyway 版本化建表（`db/migration/common`，与 H2 共用同一套迁移）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
   目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。
 - Redis：Spring Session 会话共享、登录失败锁定、单用户对话并发配额（超出返回 429）、
   同一会话跨实例互斥（`payroll:chat:lock:<sessionId>`，锁随请求结束释放，实例崩溃后按 TTL 自动过期）。

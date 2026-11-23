@@ -1,0 +1,5 @@
+-- H2(MySQL 模式) 不支持单条 ALTER 多列 ADD，拆成独立语句保持双库一致。
+ALTER TABLE dev_tasks ADD COLUMN attempt INT NOT NULL DEFAULT 0;
+ALTER TABLE dev_tasks ADD COLUMN error VARCHAR(500) NOT NULL DEFAULT '';
+ALTER TABLE dev_tasks ADD COLUMN started_at TIMESTAMP NULL;
+ALTER TABLE dev_tasks ADD COLUMN finished_at TIMESTAMP NULL;

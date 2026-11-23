@@ -29,10 +29,10 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 技能项目导入：Git 浅克隆或 ZIP 解压到临时目录后交给 {@link SkillProjectParser}，
- * 校验通过再整体写入 Nacos。
+ * 校验通过再整体写入 {@link SkillStore}。
  *
  * <p>导入只读取公共仓库（https + 主机白名单）；ZIP 拒绝绝对路径、{@code ..}、
- * 符号链接与加密条目，并限制解压总量，避免把大仓库或恶意压缩包塞进 Nacos。
+ * 符号链接与加密条目，并限制解压总量，避免把大仓库或恶意压缩包塞进技能存储。
  * 临时目录在导入结束后删除；{@code data/} 不参与导入。
  */
 public final class SkillImportService {
@@ -43,20 +43,20 @@ public final class SkillImportService {
     private static final int MAX_ENTRY_NAME_LENGTH = 1_024;
     private static final long MAX_EXTRACT_BYTES = 64L * 1024 * 1024;
 
-    private final NacosSkillRegistry registry;
+    private final SkillStore store;
     private final SkillFileSettings fileSettings;
     private final SkillImportSettings settings;
 
     public SkillImportService(
-            NacosSkillRegistry registry,
+            SkillStore store,
             SkillFileSettings fileSettings,
             SkillImportSettings settings) {
-        this.registry = registry;
+        this.store = store;
         this.fileSettings = fileSettings == null ? SkillFileSettings.defaults() : fileSettings;
         this.settings = settings == null ? SkillImportSettings.defaults() : settings;
     }
 
-    /** 导入预览/结果；dryRun 时不写 Nacos，只返回解析结果与冲突状态。 */
+    /** 导入预览/结果；dryRun 时不写存储，只返回解析结果与冲突状态。 */
     public record ImportResult(
             String id,
             String commitSha,
@@ -72,6 +72,23 @@ public final class SkillImportService {
 
     public ImportResult importGit(
             String url, String ref, String id, boolean overwrite, boolean dryRun) {
+        return importGit(url, ref, id, overwrite, dryRun, null, "");
+    }
+
+    /**
+     * 管理台导入的完整形状：Git 拉下来是整包覆盖，最容易盖掉别人刚改的一版，所以它也吃行级令牌。
+     *
+     * @param expectedRevision 覆盖写时的行令牌；空串/{@code null} 跳过检查（灰度期允许缺失）
+     * @param operator 写入者，进 {@code created_by}，让时间线区分「谁从仓库灌的」与「谁在页面上手改的」
+     */
+    public ImportResult importGit(
+            String url,
+            String ref,
+            String id,
+            boolean overwrite,
+            boolean dryRun,
+            String expectedRevision,
+            String operator) {
         URI uri = validateGitUrl(url);
         Path temp = createTempDirectory("payroll-skill-git-");
         try {
@@ -79,13 +96,24 @@ public final class SkillImportService {
             String commitSha = clone(uri, ref, cloneDir);
             SkillProjectParser.ParsedProject project =
                     SkillProjectParser.parse(projectRoot(cloneDir), fileSettings, id);
-            return commit(project, commitSha, overwrite, dryRun);
+            return commit(project, commitSha, overwrite, dryRun, expectedRevision, operator);
         } finally {
             deleteRecursively(temp);
         }
     }
 
     public ImportResult importZip(Path archive, String id, boolean overwrite, boolean dryRun) {
+        return importZip(archive, id, overwrite, dryRun, null, "");
+    }
+
+    /** 同 {@link #importGit(String, String, String, boolean, boolean, String, String)}。 */
+    public ImportResult importZip(
+            Path archive,
+            String id,
+            boolean overwrite,
+            boolean dryRun,
+            String expectedRevision,
+            String operator) {
         if (archive == null || !Files.isRegularFile(archive)) {
             throw new PayrollException("请选择要导入的 ZIP 文件");
         }
@@ -104,7 +132,7 @@ public final class SkillImportService {
             extract(archive, root);
             SkillProjectParser.ParsedProject project =
                     SkillProjectParser.parse(projectRoot(root), fileSettings, id);
-            return commit(project, null, overwrite, dryRun);
+            return commit(project, null, overwrite, dryRun, expectedRevision, operator);
         } finally {
             deleteRecursively(temp);
         }
@@ -114,15 +142,17 @@ public final class SkillImportService {
             SkillProjectParser.ParsedProject project,
             String commitSha,
             boolean overwrite,
-            boolean dryRun) {
+            boolean dryRun,
+            String expectedRevision,
+            String operator) {
         boolean existing =
-                registry.list().stream().anyMatch(skill -> skill.id().equals(project.id()));
+                store.list().stream().anyMatch(skill -> skill.id().equals(project.id()));
         if (existing && !overwrite) {
             throw new PayrollConflictException(
                     "技能已存在：" + project.id() + "；覆盖导入需要显式确认");
         }
         if (!dryRun) {
-            registry.importProject(project, existing);
+            store.importProject(project, existing, expectedRevision, operator);
         }
         List<SkillFilePackage.Summary> files =
                 project.files().stream().map(SkillFilePackage::summary).toList();

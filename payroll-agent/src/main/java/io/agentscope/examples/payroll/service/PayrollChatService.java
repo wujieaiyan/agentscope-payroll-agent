@@ -43,6 +43,7 @@ import io.agentscope.examples.payroll.team.TeamPlan;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.SemanticCachePolicy;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.profile.ProfileMemory;
 import io.agentscope.examples.payroll.repository.ChatContextStore;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
@@ -61,7 +62,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -94,6 +97,8 @@ public final class PayrollChatService implements PayrollChat {
             "(?is)(load_skill_through_path\\s*\\(|\"tool_calls\"\\s*:|<tool_call>|<function_call>"
                     + "|请求使用其他相关技能"
                     + "|由于[^\\n]{0,40}技能[^\\n]{0,20}(?:无法|不能)[^\\n]{0,20}(?:满足|完成))");
+    /** 回答中实际使用的材料角标；B2 引用过滤只保留这些序号。 */
+    private static final Pattern CITE_MARK = Pattern.compile("\\[(\\d{1,2})\\]");
 
     private final PayrollEngine engine;
     private final ChatContextStore contextStore;
@@ -107,7 +112,7 @@ public final class PayrollChatService implements PayrollChat {
     private final Supplier<List<AgentDefinition>> agentCatalogSupplier;
     private final ActiveTeamService activeTeam;
     private final boolean routingEnabled;
-    private final boolean actionConfirmEnabled;
+    private final BooleanSupplier actionConfirmEnabled;
     private final int actionProposalTtlMinutes;
     private final Set<String> alwaysConfirmTools;
     private final ToolSafety toolSafety;
@@ -116,6 +121,8 @@ public final class PayrollChatService implements PayrollChat {
     private final KbRoutingPolicy.Options kbPolicy;
     private final SemanticRouteClassifier semantic;
     private final PayrollRouteAdvisor routeAdvisor;
+    private final KbChatSettings kbSettings;
+    private final KbContextPrefetcher kbPrefetcher;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final KbCitationCollector citationCollector = new KbCitationCollector();
@@ -126,6 +133,8 @@ public final class PayrollChatService implements PayrollChat {
     private final RuntimeContext sessionContext;
     private volatile TraceScope runScope = TraceScope.none();
     private volatile ActionGuard roundGuard;
+    /** 本轮启动时解析的模型标识；轮次内连接被切换也不影响本轮。 */
+    private volatile String activeTurnModelId = "";
     private PayrollAgentFactory.Team team;
     private ConversationContext context;
 
@@ -461,6 +470,60 @@ public final class PayrollChatService implements PayrollChat {
             KbRoutingPolicy.Options kbPolicy,
             SemanticRouteClassifier semantic,
             PayrollRouteAdvisor routeAdvisor) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                routingEnabled,
+                actionConfirmEnabled,
+                actionProposalTtlMinutes,
+                toolSafety,
+                answerCache,
+                router,
+                alwaysConfirmTools,
+                kbPolicy,
+                semantic,
+                routeAdvisor,
+                KbChatSettings.defaults(),
+                null);
+    }
+
+    /**
+     * @param kbSettings 方案 B 的分阶段开关与材料预算；null 时全部关闭
+     * @param kbPrefetcher 执行前知识库预取；null 或未启用时不预取
+     */
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled,
+            BooleanSupplier actionConfirmEnabled,
+            int actionProposalTtlMinutes,
+            ToolSafety toolSafety,
+            AnswerCache answerCache,
+            AgentRouter router,
+            Set<String> alwaysConfirmTools,
+            KbRoutingPolicy.Options kbPolicy,
+            SemanticRouteClassifier semantic,
+            PayrollRouteAdvisor routeAdvisor,
+            KbChatSettings kbSettings,
+            KbContextPrefetcher kbPrefetcher) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -473,7 +536,8 @@ public final class PayrollChatService implements PayrollChat {
         this.agentCatalogSupplier = agentCatalogSupplier;
         this.activeTeam = activeTeam == null ? ActiveTeamService.disabled() : activeTeam;
         this.routingEnabled = routingEnabled;
-        this.actionConfirmEnabled = actionConfirmEnabled;
+        this.actionConfirmEnabled =
+                actionConfirmEnabled == null ? () -> false : actionConfirmEnabled;
         this.actionProposalTtlMinutes = Math.max(1, actionProposalTtlMinutes);
         this.alwaysConfirmTools = alwaysConfirmTools;
         this.toolSafety = toolSafety == null ? ToolSafety.defaults() : toolSafety;
@@ -483,6 +547,8 @@ public final class PayrollChatService implements PayrollChat {
         this.semantic = semantic == null ? SemanticRouteClassifier.disabled("未配置") : semantic;
         this.routeAdvisor =
                 routeAdvisor == null ? PayrollRouteAdvisor.disabled() : routeAdvisor;
+        this.kbSettings = kbSettings == null ? KbChatSettings.defaults() : kbSettings;
+        this.kbPrefetcher = kbPrefetcher;
         this.sessionContext =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
@@ -493,6 +559,57 @@ public final class PayrollChatService implements PayrollChat {
                         .put(SkillReadBudget.class, skillReadBudget)
                         .build();
         this.context = loadContext(contextStore, sessionId);
+    }
+
+    /** 固定开关的兼容入口；需要运行期联动时使用 {@link BooleanSupplier} 重载。 */
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled,
+            boolean actionConfirmEnabled,
+            int actionProposalTtlMinutes,
+            ToolSafety toolSafety,
+            AnswerCache answerCache,
+            AgentRouter router,
+            Set<String> alwaysConfirmTools,
+            KbRoutingPolicy.Options kbPolicy,
+            SemanticRouteClassifier semantic,
+            PayrollRouteAdvisor routeAdvisor,
+            KbChatSettings kbSettings,
+            KbContextPrefetcher kbPrefetcher) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                routingEnabled,
+                () -> actionConfirmEnabled,
+                actionProposalTtlMinutes,
+                toolSafety,
+                answerCache,
+                router,
+                alwaysConfirmTools,
+                kbPolicy,
+                semantic,
+                routeAdvisor,
+                kbSettings,
+                kbPrefetcher);
     }
 
     /** 每轮重新读取会话绑定，保证顶部切换知识库后本轮立即生效。 */
@@ -529,7 +646,10 @@ public final class PayrollChatService implements PayrollChat {
 
     @Override
     public Reply chat(String message) {
-        return run(message, null, ChatStreamListener.NOOP);
+        String turnModelId = PayrollAgentFactory.modelId();
+        Reply reply = run(message, null, ChatStreamListener.NOOP, turnModelId);
+        logModelDrift(turnModelId);
+        return reply;
     }
 
     @Override
@@ -540,8 +660,10 @@ public final class PayrollChatService implements PayrollChat {
     @Override
     public void stream(String message, String attachmentText, ChatStreamListener listener) {
         Objects.requireNonNull(listener, "listener");
-        listener.onStart(modelId());
-        Reply reply = run(message, attachmentText, listener);
+        String turnModelId = PayrollAgentFactory.modelId();
+        listener.onStart(turnModelId);
+        Reply reply = run(message, attachmentText, listener, turnModelId);
+        logModelDrift(turnModelId);
         listener.onCitations(reply.citations());
         listener.onDone(reply);
     }
@@ -557,11 +679,23 @@ public final class PayrollChatService implements PayrollChat {
      * <p>同一时间只允许一轮对话，避免共享的 HarnessAgent 上下文交错。
      */
     private Reply run(String message, String attachmentText, ChatStreamListener listener) {
+        return run(message, attachmentText, listener, PayrollAgentFactory.modelId());
+    }
+
+    /**
+     * @param turnModelId 本轮启动时解析的模型标识：全程使用同一个值，连接中途切换不影响本轮
+     */
+    private Reply run(
+            String message,
+            String attachmentText,
+            ChatStreamListener listener,
+            String turnModelId) {
         if (message == null || message.isBlank()) {
             throw new PayrollException("请输入要咨询的问题");
         }
         ChatStreamListener events = listener == null ? ChatStreamListener.NOOP : listener;
         synchronized (lock) {
+            activeTurnModelId = turnModelId;
             String question = message.trim();
             boolean hasAttachments = attachmentText != null && !attachmentText.isBlank();
             long startedAt = System.currentTimeMillis();
@@ -596,8 +730,10 @@ public final class PayrollChatService implements PayrollChat {
 
             ResolvedFlow resolvedFlow = resolveActiveFlow();
             // 规格 5.6：流程绑定先解析，非薪酬轮次再问一次路由，need_kb 才能影响流程取舍。
+            // 追问/续写要留在上一轮的角色里，否则小模型会把"只为苟活"判给别的专家。
+            AgentRouter.Prior prior = resolvedFlow == null ? priorTurn(payroll) : AgentRouter.Prior.none();
             RouteDecision routeDecision =
-                    resolvedFlow == null || !payroll ? route(question, payroll) : null;
+                    resolvedFlow == null || !payroll ? route(question, payroll, prior) : null;
             SemanticRouteClassifier.Decision semanticDecision =
                     semanticDecision(kbRoute, payroll, question);
             KbRoutePlanner.Plan kbPlan =
@@ -641,8 +777,8 @@ public final class PayrollChatService implements PayrollChat {
                     routerSignature = route.signature();
                     routerNote = route.note() + " ";
                     if (RouteDecision.TARGET_AGENT.equals(route.target())) {
-                        if (needsKbReroute(needKb, route)) {
-                            // 显式改道：不允许静默丢弃检索需求。
+                        if (shouldRerouteForKb(kbSettings.executorEnabled(), needKb, route)) {
+                            // 显式改道：不允许静默丢弃检索需求。开关关闭时保留旧路径。
                             kbRerouted = true;
                             current = routedTeam(null);
                             plannedPath =
@@ -651,6 +787,7 @@ public final class PayrollChatService implements PayrollChat {
                                     "[知识库][路由] 模型选中智能体 {}，但未声明 kb:read，本轮改道 PayrollKbAgent",
                                     route.agent().id());
                         } else {
+                            // 方案 B：need_kb 只决定给不给材料，不再更换执行者。
                             current = routedTeam(route.agent());
                             plannedPath = ChatRouting.AGENT;
                         }
@@ -668,6 +805,28 @@ public final class PayrollChatService implements PayrollChat {
                             current.activeAgent() == null ? "" : current.activeAgent().id(),
                             needKb,
                             kbRerouted);
+                }
+            }
+            // B1：路由器把 need_kb 当成"交给知识库智能体"而退回默认流水线时，
+            // 保留管理员配置的执行者，材料由预取注入（B0 的执行者语义延伸）。
+            if (keepPreferredExecutorForKb(
+                    kbSettings.executorEnabled(),
+                    kbSettings.contextEnabled(),
+                    needKb,
+                    payroll,
+                    resolvedFlow != null,
+                    routeDecision,
+                    kbPlan.kind(),
+                    kbPlan.source())) {
+                AgentDefinition preferred = preferredActiveAgent();
+                if (preferred != null
+                        && !PayrollAgentFactory.isPipeline(preferred)
+                        && !AgentCapabilities.supportsKbRead(preferred)) {
+                    current = routedTeam(preferred);
+                    plannedPath = ChatRouting.AGENT;
+                    log.info(
+                            "[知识库][执行者] need_kb=true 且路由器退回默认流水线，保留已配置智能体 {}，由预取材料作答",
+                            preferred.id());
                 }
             }
             String persona =
@@ -692,17 +851,45 @@ public final class PayrollChatService implements PayrollChat {
                                     ? "内置三段流水线"
                                     : "单个智能体");
 
+            // 方案 B（B1）：执行者已确定；need_kb 只决定是否预取材料，具备 kb:read 的智能体自检索。
+            KbContextPrefetcher.Result kbContext = KbContextPrefetcher.Result.none();
+            boolean kbContextRound = false;
+            if (kbSettings.contextEnabled()
+                    && needKb
+                    && RouteDecision.KB_READ.equals(kbPlan.kind())
+                    && !payroll
+                    && resolvedFlow == null
+                    && ChatRouting.AGENT.equals(plannedPath)
+                    && current.activeAgent() != null
+                    && !AgentCapabilities.supportsKbRead(current.activeAgent())
+                    && !RouteDecision.KB_SOURCE_FORCE.equals(kbPlan.source())
+                    && kbPrefetcher != null) {
+                kbContextRound = true;
+                kbContext =
+                        kbPrefetcher.prefetch(
+                                question,
+                                context.lastQuestion(),
+                                kbScope.bound() ? kbScope.seriesIds() : List.of(),
+                                userId,
+                                KbContextPrefetcher.isCreativeAgent(current.activeAgent()));
+            }
+
+            // 画像必须在缓存查找之前读取：画像非空即视为个性化答复，缓存作用域追加用户维度。
+            ProfileMemory.Injection profile = ProfileMemory.load(userId, question);
             // 附件内容只进入执行输入，路由、缓存与历史仍按原始问题判断。
+            // 预取轮次跳过缓存读写：既不命中无引用的旧答复，也不把带材料的答复存成缓存。
             String cacheScope =
                     ChatRouting.AGENT.equals(plannedPath)
                                     && answerCache.enabled()
                                     && !hasAttachments
+                                    && !kbContextRound
                             ? "v1|"
                                     + persona
                                     + "|"
-                                    + modelId()
+                                    + turnModelId()
                                     + "|"
                                     + SemanticCacheContext.scope()
+                                    + profile.cacheSuffix()
                             : "";
             if (!cacheScope.isEmpty()) {
                 Optional<AnswerCache.Hit> cached = answerCache.lookup(cacheScope, question);
@@ -738,7 +925,7 @@ public final class PayrollChatService implements PayrollChat {
                     return new Reply(
                             cachedReply,
                             List.of(),
-                            modelId(),
+                            turnModelId(),
                             List.of(),
                             null,
                             routing,
@@ -751,7 +938,7 @@ public final class PayrollChatService implements PayrollChat {
                             userId,
                             sessionId,
                             plannedPath,
-                            actionConfirmEnabled,
+                            actionConfirmEnabled.getAsBoolean(),
                             actionProposalTtlMinutes,
                             toolSafety,
                             events,
@@ -766,7 +953,14 @@ public final class PayrollChatService implements PayrollChat {
                 }
                 String calculatorInput =
                         context.augment(
-                                AttachmentContext.compose(question, attachmentText), memoryBlock);
+                                AttachmentContext.compose(question, attachmentText),
+                                memoryBlock,
+                                profile.block(),
+                                kbContext.material(),
+                                continuationBlock(previousPersona, persona, payroll));
+                // D11=B：团队规划吃 question，执行节点吃 executionInput，两处都要带偏好。
+                String planningQuestion =
+                        profile.present() ? profile.block() + "\n\n" + question : question;
 
                 ActiveTeamService.Attempt teamAttempt = ActiveTeamService.Attempt.skipped();
                 // 规格 6.4：不再按“制度类”硬编码绕过团队；仅当当前智能体已具备 kb:read，
@@ -788,16 +982,16 @@ public final class PayrollChatService implements PayrollChat {
                                 && activeTeam.enabled()
                                 && !kbDirect
                                 && !skipTeamWithoutKb
-                                && (needKb
-                                        || ChatRouting.TEAM_ACTIVE.equals(plannedPath)
-                                        || (!routerDecided && current.pipeline()));
+                                && (ChatRouting.TEAM_ACTIVE.equals(plannedPath)
+                                        || (!routerDecided && current.pipeline())
+                                        || (!kbSettings.executorEnabled() && needKb));
                 if (teamGate) {
                     teamAttempt =
                             activeTeam.attempt(
                                     this,
                                     userId,
                                     sessionId,
-                                    question,
+                                    planningQuestion,
                                     calculatorInput,
                                     events,
                                     needKb);
@@ -839,7 +1033,7 @@ public final class PayrollChatService implements PayrollChat {
                         return new Reply(
                                 teamReply,
                                 teamAttempt.tools(),
-                                modelId(),
+                                turnModelId(),
                                 teamAttempt.traces(),
                                 teamAttempt.teamReply(),
                                 routing,
@@ -866,14 +1060,7 @@ public final class PayrollChatService implements PayrollChat {
                 List<String> agentIds;
                 // 规格 6.2 选择顺序：流程（kb:read）→ 智能体（kb:read）→ 团队（KB 角色）→
                 // PayrollKbAgent；到这里流程已过滤，团队也已失败或跳过，只剩当前智能体或兜底。
-                HarnessAgent kbAgent =
-                        needKb
-                                        && resolvedFlow == null
-                                        && (current.pipeline()
-                                                || !AgentCapabilities.supportsKbRead(
-                                                        current.activeAgent()))
-                                ? PayrollAgentFactory.sharedKbAgent(engine)
-                                : null;
+                HarnessAgent kbAgent = kbAgentFallback(needKb, kbPlan, resolvedFlow, current);
                 if (kbAgent != null) {
                     reply = kbAgentReply(calculatorInput, kbAgent, events, tools);
                     path = ChatRouting.AGENT;
@@ -938,6 +1125,7 @@ public final class PayrollChatService implements PayrollChat {
                         "[多智能体] 工具追溯汇总：{} 次调用，金额类 {} 次",
                         collectedTraces.size(),
                         collectedTraces.stream().filter(trace -> !trace.amounts().isEmpty()).count());
+                List<Citation> citations = resolveCitations(reply, kbContext);
                 ChatRouting routing =
                         buildRouting(
                                 path,
@@ -950,18 +1138,23 @@ public final class PayrollChatService implements PayrollChat {
                                 0L,
                                 startedAt,
                                 stageKeys(),
-                                kbRouting(kbPlan, kbScope.bound(), kbRerouted && kbAgent != null));
+                                kbRouting(
+                                        kbPlan,
+                                        kbScope.bound(),
+                                        kbRerouted && kbAgent != null,
+                                        kbContext,
+                                        citations));
                 logRouting(routing);
                 return new Reply(
                         reply,
                         List.copyOf(tools),
-                        modelId(),
+                        turnModelId(),
                         List.copyOf(collectedTraces),
                         teamAttempt.teamReply(),
                         routing,
                         guard.proposals(),
                         null,
-                        citationCollector.citations());
+                        citations);
             } finally {
                 roundGuard = null;
                 sessionContext.put(ActionGuard.class, null);
@@ -1045,7 +1238,7 @@ public final class PayrollChatService implements PayrollChat {
                 reason,
                 fromPath,
                 fallbackReason,
-                modelId(),
+                turnModelId(),
                 signature,
                 agentIds,
                 teamRunId,
@@ -1056,12 +1249,112 @@ public final class PayrollChatService implements PayrollChat {
 
     private static ChatRouting.Kb kbRouting(
             KbRoutePlanner.Plan plan, boolean bound, boolean reroute) {
+        return kbRouting(plan, bound, reroute, null, List.of());
+    }
+
+    private static ChatRouting.Kb kbRouting(
+            KbRoutePlanner.Plan plan,
+            boolean bound,
+            boolean reroute,
+            KbContextPrefetcher.Result prefetched,
+            List<Citation> citations) {
+        ChatRouting.Kb.Context context = null;
+        if (prefetched != null && prefetched.attempted()) {
+            List<Integer> cited =
+                    citations == null
+                            ? List.of()
+                            : citations.stream().map(Citation::index).toList();
+            context =
+                    new ChatRouting.Kb.Context(
+                            true,
+                            prefetched.injected(),
+                            prefetched.hits(),
+                            prefetched.chars(),
+                            prefetched.dropped(),
+                            prefetched.status(),
+                            cited);
+        }
         return new ChatRouting.Kb(
                 plan.need(),
                 plan.kind(),
                 plan.source(),
                 bound ? "session" : "all",
-                reroute);
+                reroute,
+                context);
+    }
+
+    /**
+     * 回答定稿后的引用：材料包优先；B2 只保留正文真正出现过的角标且不重编号。
+     * 采集器与材料包同时非空属于异常，按旧口径保留采集器结果并记 WARN。
+     */
+    private List<Citation> resolveCitations(String reply, KbContextPrefetcher.Result prefetched) {
+        List<Citation> collected = citationCollector.citations();
+        List<Citation> injected =
+                prefetched != null && prefetched.injected()
+                        ? prefetched.citations()
+                        : List.of();
+        if (injected.isEmpty()) {
+            return collected;
+        }
+        if (!collected.isEmpty()) {
+            log.warn(
+                    "[知识库][材料] 采集器与材料包同时存在引用（{} / {}），保留采集器结果",
+                    collected.size(),
+                    injected.size());
+            return collected;
+        }
+        if (!kbSettings.citationFilterEnabled()) {
+            return injected;
+        }
+        List<Citation> filtered = filterCitations(injected, reply);
+        log.info(
+                "[知识库][材料] 引用过滤：保留 {}/{} 条",
+                filtered.size(),
+                injected.size());
+        return filtered;
+    }
+
+    /** B2：只保留正文真正引用过的角标，序号保持注入时的原值，避免来源区与正文错位。 */
+    static List<Citation> filterCitations(List<Citation> injected, String reply) {
+        if (injected == null || injected.isEmpty()) {
+            return List.of();
+        }
+        Set<Integer> used = new LinkedHashSet<>();
+        Matcher matcher = CITE_MARK.matcher(reply == null ? "" : reply);
+        while (matcher.find()) {
+            used.add(Integer.parseInt(matcher.group(1)));
+        }
+        if (used.isEmpty()) {
+            return List.of();
+        }
+        return injected.stream().filter(citation -> used.contains(citation.index())).toList();
+    }
+
+    /** 方案 B：静态流水线始终可兜底；强制检索时仅当前智能体无 kb:read 才换 KB 智能体。 */
+    private HarnessAgent kbAgentFallback(
+            boolean needKb,
+            KbRoutePlanner.Plan kbPlan,
+            ResolvedFlow resolvedFlow,
+            PayrollAgentFactory.Team current) {
+        if (!needKb || resolvedFlow != null) {
+            return null;
+        }
+        boolean supportsKbRead =
+                !current.pipeline() && AgentCapabilities.supportsKbRead(current.activeAgent());
+        boolean forced = RouteDecision.KB_SOURCE_FORCE.equals(kbPlan.source());
+        return shouldUseKbFallback(
+                        kbSettings.executorEnabled(), current.pipeline(), supportsKbRead, forced)
+                ? PayrollAgentFactory.sharedKbAgent(engine)
+                : null;
+    }
+
+    /** 方案 B 的 KB 兜底判据：流水线始终可兜底；强制检索且执行者无 kb:read 时才换 KB 智能体。 */
+    static boolean shouldUseKbFallback(
+            boolean executorEnabled, boolean pipeline, boolean supportsKbRead, boolean forced) {
+        if (!executorEnabled) {
+            return pipeline || !supportsKbRead;
+        }
+        return pipeline || (forced && !supportsKbRead);
     }
 
     private static void logRouting(ChatRouting routing) {
@@ -1223,7 +1516,7 @@ public final class PayrollChatService implements PayrollChat {
                             : "智能体「"
                                     + agent.name()
                                     + "」未返回内容，请重试或更换模型（当前 "
-                                    + modelId()
+                                    + turnModelId()
                                     + "）。");
         }
         return reply;
@@ -1417,6 +1710,42 @@ public final class PayrollChatService implements PayrollChat {
             log.warn("[会话] 保存角色绑定失败：sessionId={}，原因={}", sessionId, rootMessage(e));
         }
         return previous;
+    }
+
+    /**
+     * 上一轮执行者与问答：仅在角色绑定为单智能体且本轮非薪酬时提供，
+     * 让路由把追问、续写留在同一角色；薪酬问题继续走核算链路。
+     */
+    private AgentRouter.Prior priorTurn(boolean payroll) {
+        if (payroll || context == null || context.isEmpty() || sessionId <= 0 || contextStore == null) {
+            return AgentRouter.Prior.none();
+        }
+        String previous;
+        try {
+            previous = contextStore.persona(sessionId);
+        } catch (RuntimeException e) {
+            log.warn("[智能体路由] 读取上一轮角色失败，按无延续处理：{}", rootMessage(e));
+            return AgentRouter.Prior.none();
+        }
+        if (previous == null || !previous.startsWith("agent:")) {
+            return AgentRouter.Prior.none();
+        }
+        String agentId = previous.substring("agent:".length()).trim();
+        if (agentId.isEmpty()) {
+            return AgentRouter.Prior.none();
+        }
+        return new AgentRouter.Prior(agentId, context.lastQuestion(), context.lastAnswer());
+    }
+
+    /** 同一智能体被追问或改稿时，把上一轮答复作为续写依据注入执行输入。 */
+    private String continuationBlock(String previousPersona, String persona, boolean payroll) {
+        if (payroll
+                || previousPersona == null
+                || !previousPersona.equals(persona)
+                || !persona.startsWith("agent:")) {
+            return "";
+        }
+        return ConversationContext.continuationBlock(context.lastAnswer());
     }
 
     private String flowReply(
@@ -1965,7 +2294,7 @@ public final class PayrollChatService implements PayrollChat {
         if (pseudoToolCall) {
             throw new PayrollException(
                     "智能体「" + stageLabel + "」返回了工具或技能调用说明而不是答复；角色技能已由系统预加载，"
-                            + "无需再次加载。请重试，或改用更大的模型（当前 " + modelId() + "）");
+                            + "无需再次加载。请重试，或改用更大的模型（当前 " + turnModelId() + "）");
         }
         return new StageResult(text, List.copyOf(targets), elapsedMs, toolError[0]);
     }
@@ -2287,6 +2616,20 @@ public final class PayrollChatService implements PayrollChat {
         return PayrollAgentFactory.modelId();
     }
 
+    /** 本轮固定模型标识：SSE start、路由、缓存作用域与答复元数据必须一致。 */
+    private String turnModelId() {
+        String value = activeTurnModelId;
+        return value == null || value.isBlank() ? PayrollAgentFactory.modelId() : value;
+    }
+
+    /** 轮次结束后比较连接是否被切换；仅告警，本轮结果不改用新连接。 */
+    private void logModelDrift(String turnModelId) {
+        String current = PayrollAgentFactory.modelId();
+        if (!current.equals(turnModelId)) {
+            log.warn("[模型] 轮次内连接变更，本轮沿用 turnModelId={}，当前={}", turnModelId, current);
+        }
+    }
+
     @Override
     public void reset() {
         synchronized (lock) {
@@ -2331,6 +2674,36 @@ public final class PayrollChatService implements PayrollChat {
         return !needKb || flowKbCapable;
     }
 
+    /** 方案 B（B0）：执行者开关打开后不再因 need_kb 改道；关闭时保留旧语义。 */
+    static boolean shouldRerouteForKb(boolean executorEnabled, boolean needKb, RouteDecision route) {
+        return !executorEnabled && needsKbReroute(needKb, route);
+    }
+
+    /**
+     * 方案 B（B1）：路由器把 need_kb 当成"交给知识库智能体"而退回默认流水线时，
+     * 是否改回管理员配置的执行者。仅只读检索且 B0/B1 同时开启时成立。
+     */
+    static boolean keepPreferredExecutorForKb(
+            boolean executorEnabled,
+            boolean contextEnabled,
+            boolean needKb,
+            boolean payroll,
+            boolean flowResolved,
+            RouteDecision route,
+            String kbKind,
+            String kbSource) {
+        return executorEnabled
+                && contextEnabled
+                && needKb
+                && !payroll
+                && !flowResolved
+                && route != null
+                && route.routed()
+                && RouteDecision.TARGET_PIPELINE.equals(route.target())
+                && RouteDecision.KB_READ.equals(kbKind)
+                && !RouteDecision.KB_SOURCE_FORCE.equals(kbSource);
+    }
+
     /** 模型选中了没有 kb:read 的单智能体时必须显式改道，不能静默丢弃检索需求。 */
     static boolean needsKbReroute(boolean needKb, RouteDecision route) {
         return needKb
@@ -2341,7 +2714,7 @@ public final class PayrollChatService implements PayrollChat {
     }
 
     /** 纯模型路由；目录读取或调用失败时折成回退决策，不打断对话。 */
-    private RouteDecision route(String question, boolean payroll) {
+    private RouteDecision route(String question, boolean payroll, AgentRouter.Prior prior) {
         if (!router.enabled()) {
             return null;
         }
@@ -2372,7 +2745,8 @@ public final class PayrollChatService implements PayrollChat {
             } catch (RuntimeException e) {
                 log.debug("[智能体路由] 读取活跃智能体失败，按无偏好处理：{}", rootMessage(e));
             }
-            AgentDefinition preferred = activeHint;
+            AgentDefinition priorPreferred = priorPreferred(candidates, prior);
+            AgentDefinition preferred = priorPreferred == null ? activeHint : priorPreferred;
             Supplier<RouteDecision> llm =
                     () ->
                             router.decide(
@@ -2381,7 +2755,8 @@ public final class PayrollChatService implements PayrollChat {
                                     teamOn,
                                     sessionId + ":" + userId,
                                     payroll,
-                                    preferred);
+                                    preferred,
+                                    prior);
             // 规格 7：薪酬轮次先过语义桶；off 档直接调用 LLM，与改造前完全一致。
             if (payroll && routeAdvisor.mode().semanticEnabled()) {
                 String personaBinding = activeHint == null ? "" : activeHint.id();
@@ -2389,11 +2764,72 @@ public final class PayrollChatService implements PayrollChat {
                         .decide(question, candidates, teamOn, "", personaBinding, llm)
                         .decision();
             }
-            return llm.get();
+            return nonPayrollFallback(
+                    question, payroll, candidates, preferred, llm.get());
         } catch (RuntimeException e) {
             log.warn("[智能体路由] 决策异常，沿用默认链路：{}", rootMessage(e));
-            return RouteDecision.fallback(rootMessage(e));
+            return nonPayrollFallback(
+                    question,
+                    payroll,
+                    candidates,
+                    null,
+                    RouteDecision.fallback(rootMessage(e)));
         }
+    }
+
+    /**
+     * 非薪酬问题的确定性兜底：路由超时、调用失败或低置信度时，不能一律回退薪酬流水线，
+     * 否则问候、闲聊与其它专家问题都会由薪酬计算智能体作答。
+     */
+    static RouteDecision nonPayrollFallback(
+            String question,
+            boolean payroll,
+            List<AgentDefinition> candidates,
+            AgentDefinition preferred,
+            RouteDecision decision) {
+        if (payroll) {
+            return decision;
+        }
+        // 已选到具体智能体或团队时尊重模型；只有"未生效"或"非薪酬却选流水线"才兜底。
+        boolean pipelineOnNonPayroll =
+                decision != null
+                        && decision.routed()
+                        && RouteDecision.TARGET_PIPELINE.equals(decision.target());
+        if (decision != null && decision.routed() && !pipelineOnNonPayroll) {
+            return decision;
+        }
+        AgentDefinition fallback = AgentRouter.fallbackAgent(question, candidates, preferred);
+        if (fallback == null) {
+            return decision;
+        }
+        log.info(
+                "[智能体路由] 非薪酬问题改走语义兜底（{}）：{}（{}）",
+                decision == null
+                        ? "路由返回空"
+                        : pipelineOnNonPayroll ? "模型选了薪酬流水线" : decision.failureReason(),
+                fallback.name(),
+                fallback.id());
+        return new RouteDecision(
+                RouteDecision.TARGET_AGENT,
+                fallback,
+                pipelineOnNonPayroll
+                        ? "非薪酬问题，按语义兜底到匹配智能体"
+                        : "路由未生效，按非薪酬问题语义兜底",
+                0D,
+                null,
+                false,
+                RouteDecision.KB_NONE,
+                RouteDecision.KB_SOURCE_FALLBACK);
+    }
+
+    /** 上一轮执行者仍在线且可路由时作为首选，保证追问不换人。 */
+    private static AgentDefinition priorPreferred(
+            List<AgentDefinition> candidates, AgentRouter.Prior prior) {
+        if (prior == null || !prior.present()) {
+            return null;
+        }
+        return candidates.stream().filter(agent -> agent.id().equals(prior.agentId())).findFirst()
+                .orElse(null);
     }
 
     /** 加载路由目标对应的智能体实例；null 表示内置三段流水线。 */
@@ -2440,6 +2876,19 @@ public final class PayrollChatService implements PayrollChat {
             // 与 resolveActiveFlow 对齐：未知异常视为配置/程序故障，直接报错而非更换回答角色。
             throw new PayrollException(
                     "读取核算智能体配置失败，已阻止回退薪酬流水线：" + rootMessage(e), e);
+        }
+    }
+
+    /** 仅用于 B1 可选改道：配置不可读时保持默认流水线，不阻断本轮对话。 */
+    private AgentDefinition preferredActiveAgent() {
+        if (activeAgentSupplier == null) {
+            return null;
+        }
+        try {
+            return activeAgentSupplier.get();
+        } catch (RuntimeException e) {
+            log.debug("[知识库][执行者] 读取活跃智能体失败，保持默认流水线：{}", rootMessage(e));
+            return null;
         }
     }
 

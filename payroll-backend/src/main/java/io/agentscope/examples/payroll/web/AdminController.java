@@ -35,18 +35,23 @@ public class AdminController {
     private final PasswordEncoder passwordEncoder;
     private final ChatSessionManager chatManager;
     private final AuditService auditService;
+    private final boolean forcePasswordChange;
 
     public AdminController(
             H2AdminRepository repository,
             AuthService authService,
             PasswordEncoder passwordEncoder,
             ChatSessionManager chatManager,
-            AuditService auditService) {
+            AuditService auditService,
+            @org.springframework.beans.factory.annotation.Value(
+                            "${payroll.auth.force-password-change:true}")
+                    boolean forcePasswordChange) {
         this.repository = repository;
         this.authService = authService;
         this.passwordEncoder = passwordEncoder;
         this.chatManager = chatManager;
         this.auditService = auditService;
+        this.forcePasswordChange = forcePasswordChange;
     }
 
     @GetMapping("/permissions")
@@ -90,7 +95,8 @@ public class AdminController {
                         request.displayName(),
                         passwordEncoder.encode(request.password()),
                         request.roleCode(),
-                        request.departmentId());
+                        request.departmentId(),
+                        forcePasswordChange);
         auditService.record("user.create", "user", String.valueOf(created.id()), null, created);
         return ApiResponse.ok(created);
     }
@@ -128,7 +134,8 @@ public class AdminController {
         H2AdminRepository.validatePassword(request.password());
         repository.findAccount(id).orElseThrow(() -> new PayrollException("用户不存在：" + id));
         AppUser target = repository.findUser(id).orElse(null);
-        repository.updatePassword(id, passwordEncoder.encode(request.password()));
+        repository.resetPassword(
+                id, passwordEncoder.encode(request.password()), forcePasswordChange);
         auditService.record(
                 "user.reset_password", "user", String.valueOf(id), target, Map.of("changed", true));
         return ApiResponse.ok(Map.of("changed", true));

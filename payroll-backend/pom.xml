@@ -35,4 +35,29 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- -Prapidocr：引入 PP-OCRv4 原生识别（约 33MB Windows x64 原生库与模型），
+             默认构建不打包，RapidOCR 档位自动不可用并回落到 Tesseract。 -->
+        <profile>
+            <id>rapidocr</id>
+            <dependencies>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr</artifactId>
+                    <version>0.0.7</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr-onnx-windows-x86_64</artifactId>
+                    <version>1.2.2</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr-onnx-models</artifactId>
+                    <version>1.2.2</version>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
 </project>

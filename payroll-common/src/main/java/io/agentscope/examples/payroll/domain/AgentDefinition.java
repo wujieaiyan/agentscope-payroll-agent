@@ -2,6 +2,7 @@ package io.agentscope.examples.payroll.domain;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
@@ -20,7 +21,8 @@ public record AgentDefinition(
         String createdBy,
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
-        List<String> capabilities) {
+        List<String> capabilities,
+        AgentModelSettings model) {
 
     public static final String VISIBILITY_PUBLIC = "PUBLIC";
     public static final String VISIBILITY_PRIVATE = "PRIVATE";
@@ -36,9 +38,40 @@ public record AgentDefinition(
         tags = tags == null ? List.of() : List.copyOf(tags);
         skillIds = skillIds == null ? List.of() : List.copyOf(skillIds);
         capabilities = capabilities == null ? List.of() : List.copyOf(capabilities);
+        model = model == null ? AgentModelSettings.none() : model;
     }
 
-    /** 兼容未声明 capabilities 的存量配置与调用方。 */
+    /** 兼容未声明 model 的存量配置与调用方。 */
+    public AgentDefinition(
+            String id,
+            String name,
+            String avatar,
+            String description,
+            List<String> tags,
+            List<String> skillIds,
+            String visibility,
+            String status,
+            String createdBy,
+            LocalDateTime createdAt,
+            LocalDateTime updatedAt,
+            List<String> capabilities) {
+        this(
+                id,
+                name,
+                avatar,
+                description,
+                tags,
+                skillIds,
+                visibility,
+                status,
+                createdBy,
+                createdAt,
+                updatedAt,
+                capabilities,
+                AgentModelSettings.none());
+    }
+
+    /** 兼容未声明 capabilities 与 model 的存量配置与调用方。 */
     public AgentDefinition(
             String id,
             String name,
@@ -63,7 +96,8 @@ public record AgentDefinition(
                 createdBy,
                 createdAt,
                 updatedAt,
-                List.of());
+                List.of(),
+                AgentModelSettings.none());
     }
 
     /** 仅匹配显式声明；未声明时由 {@code AgentCapabilities} 按标签/角色推断。 */

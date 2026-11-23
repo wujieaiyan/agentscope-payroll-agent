@@ -131,7 +131,7 @@ class NacosFlowRegistryTest {
 
         assertEquals(saved.id(), registry.activeFlowId());
         assertEquals(saved.id(), registry.activeFlow().id());
-        assertTrue(nacos.configs.get(NacosFlowRegistry.SETTINGS_DATA_ID).contains(saved.id()));
+        assertTrue(nacos.configs.get(NacosRuntimeSettings.DATA_ID).contains(saved.id()));
 
         NacosFlowRegistry reloaded = registry(true);
         assertEquals(saved.id(), reloaded.activeFlowId());

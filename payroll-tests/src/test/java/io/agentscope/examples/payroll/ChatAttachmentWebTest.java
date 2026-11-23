@@ -33,6 +33,7 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -48,6 +49,7 @@ import org.springframework.test.context.DynamicPropertySource;
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(ChatAttachmentWebTest.StubChatConfig.class)
+@Tag("integration")
 class ChatAttachmentWebTest {
 
     private static final String ADMIN_PASSWORD = "attachment-admin-pass";
@@ -93,13 +95,13 @@ class ChatAttachmentWebTest {
         HttpResponse<String> uploaded =
                 upload(client, sessionId, "notes.docx", document);
         assertEquals(200, uploaded.statusCode(), uploaded.body());
-        assertTrue(uploaded.body().contains("\"status\":\"READY\""), uploaded.body());
+        assertTrue(uploaded.body().contains("\"status\":\"PARSING\""), uploaded.body());
         assertTrue(uploaded.body().contains("\"name\":\"notes.docx\""), uploaded.body());
         long attachmentId = parseField(uploaded.body(), "id");
-        assertTrue(parseField(uploaded.body(), "text_chars") > 0, uploaded.body());
 
-        String pending = get(client, attachmentsPath(sessionId)).body();
+        String pending = awaitReady(client, sessionId, attachmentId);
         assertTrue(pending.contains("\"name\":\"notes.docx\""), pending);
+        assertTrue(parseField(pending, "text_chars") > 0, pending);
 
         String preview =
                 get(client, attachmentsPath(sessionId) + "/" + attachmentId + "/text").body();
@@ -156,7 +158,7 @@ class ChatAttachmentWebTest {
         assertEquals(400, unsupported.statusCode(), unsupported.body());
         assertTrue(unsupported.body().contains("暂不支持"), unsupported.body());
 
-        long attachmentId =
+        long draftId =
                 parseField(
                         upload(
                                         client,
@@ -165,9 +167,10 @@ class ChatAttachmentWebTest {
                                         docx("草稿正文"))
                                 .body(),
                         "id");
+        awaitReady(client, sessionId, draftId);
         assertEquals(
                 200,
-                delete(client, attachmentsPath(sessionId) + "/" + attachmentId).statusCode());
+                delete(client, attachmentsPath(sessionId) + "/" + draftId).statusCode());
         assertEquals("[]", dataOf(get(client, attachmentsPath(sessionId)).body()));
 
         long sentId =
@@ -179,6 +182,7 @@ class ChatAttachmentWebTest {
                                         docx("已发送正文"))
                                 .body(),
                         "id");
+        awaitReady(client, sessionId, sentId);
         assertEquals(200, stream(client, sessionId, sentId).statusCode());
 
         HttpResponse<String> again = stream(client, sessionId, sentId);
@@ -201,6 +205,29 @@ class ChatAttachmentWebTest {
 
     private String attachmentsPath(long sessionId) {
         return "/api/chat/sessions/" + sessionId + "/attachments";
+    }
+
+    /** 上传接口异步返回 PARSING；等到该附件由解析队列落为 READY 后再继续。 */
+    private String awaitReady(HttpClient client, long sessionId, long attachmentId)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + 20_000;
+        String body = "";
+        while (System.currentTimeMillis() < deadline) {
+            body = get(client, attachmentsPath(sessionId)).body();
+            for (String item : body.split("\\{")) {
+                if (!item.contains("\"id\":" + attachmentId + ",")) {
+                    continue;
+                }
+                if (item.contains("\"status\":\"READY\"")) {
+                    return body;
+                }
+                if (item.contains("\"status\":\"FAILED\"")) {
+                    throw new AssertionError("附件解析失败：" + item);
+                }
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("附件未在超时内完成解析：" + body);
     }
 
     private HttpResponse<String> upload(

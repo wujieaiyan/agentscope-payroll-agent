@@ -23,14 +23,36 @@ public record ChatRouting(
 
     /**
      * 本轮知识库判定：{@code source} 为 router / force / fallback，{@code scope} 为 session / all，
-     * {@code reroute} 表示模型选中了不具备检索能力的智能体、被显式改道到检索智能体。
+     * {@code reroute} 表示模型选中了不具备检索能力的智能体、被显式改道到检索智能体；
+     * {@code context} 只在服务端预取轮次出现，旧快照为 null。
      */
-    public record Kb(boolean need, String kind, String source, String scope, boolean reroute) {
+    public record Kb(
+            boolean need, String kind, String source, String scope, boolean reroute, Context context) {
 
         public Kb {
             kind = kind == null || kind.isBlank() ? "none" : kind;
             source = source == null ? "" : source;
             scope = scope == null ? "" : scope;
+        }
+
+        public Kb(boolean need, String kind, String source, String scope, boolean reroute) {
+            this(need, kind, source, scope, reroute, null);
+        }
+
+        /** 预取材料快照：是否发起、是否注入、命中数、材料字数、丢弃数与实际被引用序号。 */
+        public record Context(
+                boolean attempted,
+                boolean injected,
+                int hits,
+                int chars,
+                int dropped,
+                String status,
+                List<Integer> cited) {
+
+            public Context {
+                status = status == null ? "" : status;
+                cited = cited == null ? List.of() : List.copyOf(cited);
+            }
         }
     }
 

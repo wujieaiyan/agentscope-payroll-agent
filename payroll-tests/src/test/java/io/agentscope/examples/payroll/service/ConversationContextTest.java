@@ -129,6 +129,79 @@ class ConversationContextTest {
         assertTrue(input.endsWith("【本轮问题】\n再算一次"));
     }
 
+    @Test
+    @DisplayName("知识库材料位于历史线索之后、本轮问题之前")
+    void augmentPlacesMaterialAfterMemory() {
+        ConversationContext context = new ConversationContext("", 0);
+        context.append("年假有几天", "5 天");
+        String memory = "【相关历史片段】\n- 用户问过休假";
+        String material = "【知识库参考材料】\n[1]《员工手册》· 年假 · 第3页\n满一年 5 天";
+
+        String input = context.augment("陪产假呢", memory, "", material);
+
+        int memoryAt = input.indexOf("【相关历史片段】");
+        int materialAt = input.indexOf("【知识库参考材料】");
+        int questionAt = input.indexOf("【本轮问题】\n陪产假呢");
+        assertTrue(memoryAt >= 0 && materialAt > memoryAt && questionAt > materialAt);
+    }
+
+    @Test
+    @DisplayName("材料块为空时与旧重载逐字一致")
+    void emptyMaterialKeepsLegacyOutput() {
+        ConversationContext context = new ConversationContext("", 0);
+        context.append("年假有几天", "5 天");
+
+        assertEquals(context.augment("陪产假呢", "记忆"), context.augment("陪产假呢", "记忆", "", ""));
+    }
+
+    @Test
+    @DisplayName("lastQuestion 返回最近一轮用户问题，空上下文返回空串")
+    void lastQuestionTracksLatestTurn() {
+        ConversationContext context = new ConversationContext("", 0);
+        assertEquals("", context.lastQuestion());
+        context.append("年假有几天", "5 天");
+        context.append("陪产假呢", "15 天");
+        assertEquals("陪产假呢", context.lastQuestion());
+    }
+
+    @Test
+    @DisplayName("lastAnswer 返回最近一轮助手答复，空上下文返回空串")
+    void lastAnswerTracksLatestTurn() {
+        ConversationContext context = new ConversationContext("", 0);
+        assertEquals("", context.lastAnswer());
+        context.append("写一首关于加班的诗", "灯火通明夜未央，员工挥汗待晨光。");
+        assertEquals("灯火通明夜未央，员工挥汗待晨光。", context.lastAnswer());
+    }
+
+    @Test
+    @DisplayName("续写块位于历史线索之后、本轮问题之前，并禁止复述数值")
+    void continuationBlockPlacedAfterHistoryBeforeQuestion() {
+        ConversationContext context = new ConversationContext("", 0);
+        context.append("写一首关于加班的诗", "灯火通明夜未央，员工挥汗待晨光。");
+        String continuation = ConversationContext.continuationBlock(context.lastAnswer());
+
+        String input = context.augment("不能为公司，只为苟活。", "", "", "", continuation);
+
+        int historyAt = input.indexOf("【会话上下文｜仅用于理解指代，不是数据来源】");
+        int continuationAt = input.indexOf("【上一轮助手答复｜仅用于延续语气与内容】");
+        int questionAt = input.indexOf("【本轮问题】\n不能为公司，只为苟活。");
+        assertTrue(historyAt >= 0 && continuationAt > historyAt && questionAt > continuationAt);
+        assertTrue(input.contains("灯火通明夜未央"));
+        assertTrue(input.contains("禁止直接复述其中数值"));
+    }
+
+    @Test
+    @DisplayName("空答复不生成续写块，输出与旧重载逐字一致")
+    void blankAnswerKeepsLegacyOutput() {
+        ConversationContext context = new ConversationContext("", 0);
+        context.append("年假有几天", "5 天");
+        assertTrue(ConversationContext.continuationBlock("  ").isEmpty());
+
+        assertEquals(
+                context.augment("陪产假呢", "记忆", "", ""),
+                context.augment("陪产假呢", "记忆", "", "", ""));
+    }
+
     private static ChatMessage message(long id, String role, String content) {
         return new ChatMessage(id, 1L, role, content, List.of(), "test", LocalDateTime.now());
     }

@@ -15,15 +15,27 @@ public final class AuthService {
     static final String SESSION_USER_ID = "payroll.auth.userId";
     private static final String REQUEST_USER = "payroll.auth.user";
 
+    private static final String REQUEST_MUST_CHANGE = "payroll.auth.mustChangePassword";
+
     private final H2AdminRepository repository;
     private final PasswordEncoder passwordEncoder;
     private final boolean enabled;
+    private final boolean forcePasswordChange;
 
     public AuthService(
             H2AdminRepository repository, PasswordEncoder passwordEncoder, boolean enabled) {
+        this(repository, passwordEncoder, enabled, true);
+    }
+
+    public AuthService(
+            H2AdminRepository repository,
+            PasswordEncoder passwordEncoder,
+            boolean enabled,
+            boolean forcePasswordChange) {
         this.repository = repository;
         this.passwordEncoder = passwordEncoder;
         this.enabled = enabled;
+        this.forcePasswordChange = forcePasswordChange;
     }
 
     public boolean enabled() {
@@ -97,6 +109,34 @@ public final class AuthService {
 
     public AuthUser currentUser(HttpServletRequest request) {
         return resolve(request).orElseThrow(() -> new PayrollException("未登录或会话已过期"));
+    }
+
+    /** 首改密开关；关闭时既不写标记也不拦截请求。 */
+    public boolean forcePasswordChange() {
+        return enabled && forcePasswordChange;
+    }
+
+    public boolean mustChangePassword(long userId) {
+        return forcePasswordChange() && userId != 0 && repository.isPasswordChangeRequired(userId);
+    }
+
+    /** 当前用户是否必须先改密；结果按请求缓存，避免每个接口重复查库。 */
+    public boolean passwordChangeRequired(HttpServletRequest request) {
+        if (!forcePasswordChange()) {
+            return false;
+        }
+        Object cached = request.getAttribute(REQUEST_MUST_CHANGE);
+        if (cached instanceof Boolean value) {
+            return value;
+        }
+        AuthUser user = resolve(request).orElse(null);
+        boolean required = user != null && mustChangePassword(user.id());
+        request.setAttribute(REQUEST_MUST_CHANGE, required);
+        return required;
+    }
+
+    public void markPasswordChanged(HttpServletRequest request) {
+        request.setAttribute(REQUEST_MUST_CHANGE, Boolean.FALSE);
     }
 
     public void changePassword(long userId, String oldPassword, String newPassword) {

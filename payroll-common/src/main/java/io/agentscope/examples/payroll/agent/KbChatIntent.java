@@ -23,6 +23,14 @@ public final class KbChatIntent {
                     "福利", "权限", "目录", "分块", "检索", "召回", "topk", "top k", "rerank",
                     "重建索引", "解析任务", "入库任务");
 
+    /** 文学创作请求：其中的“加班”“考勤”等词只是在描述主题，不应触发制度检索。 */
+    private static final List<String> CREATIVE_MARKERS =
+            List.of("诗", "歌词", "散文", "小说", "剧本", "创作", "续写", "文案", "故事");
+
+    /** 明确要求查阅制度/资料时，创作类问题仍可检索。 */
+    private static final List<String> KB_EXPLICIT_MARKERS =
+            List.of("知识库", "制度", "规定", "条款", "手册", "指南", "文件", "资料", "检索", "引用");
+
     private KbChatIntent() {
     }
 
@@ -32,6 +40,9 @@ public final class KbChatIntent {
             return false;
         }
         if (containsAny(text, PAYROLL_MARKERS)) {
+            return false;
+        }
+        if (containsAny(text, CREATIVE_MARKERS) && !containsAny(text, KB_EXPLICIT_MARKERS)) {
             return false;
         }
         return containsAny(text, KB_MARKERS);

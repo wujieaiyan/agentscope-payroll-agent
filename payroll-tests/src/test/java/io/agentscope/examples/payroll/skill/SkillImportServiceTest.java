@@ -5,6 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -26,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 class SkillImportServiceTest {
 
@@ -133,6 +140,30 @@ class SkillImportServiceTest {
         service.importZip(zip, RoleSkills.CALCULATOR, true, false);
         NacosSkillRegistry reloaded = registry();
         assertTrue(reloaded.detail(RoleSkills.CALCULATOR).overridden());
+    }
+
+    @Test
+    @DisplayName("导入把 revision 与操作者透传给写端口；dryRun 一个字节都不写")
+    void forwardsRevisionAndOperator() throws IOException {
+        SkillStore store = mock(SkillStore.class);
+        SkillImportService service =
+                new SkillImportService(
+                        store,
+                        SkillFileSettings.defaults(),
+                        new SkillImportSettings(
+                                Set.of("github.com"), SkillImportSettings.DEFAULT_MAX_ZIP_BYTES));
+        Path zip = temp.resolve("poetry.zip");
+        zipFixture(zip, "poetry/");
+
+        service.importZip(zip, null, false, false, "9", "hr01");
+
+        ArgumentCaptor<SkillProjectParser.ParsedProject> project =
+                ArgumentCaptor.forClass(SkillProjectParser.ParsedProject.class);
+        verify(store).importProject(project.capture(), eq(false), eq("9"), eq("hr01"));
+        assertEquals("poetry", project.getValue().id());
+
+        service.importZip(zip, null, false, true, "9", "hr01");
+        verify(store, times(1)).importProject(any(), anyBoolean(), any(), any());
     }
 
     @ParameterizedTest

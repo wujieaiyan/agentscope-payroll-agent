@@ -31,6 +31,7 @@ public class KbRetrievalSettings {
     private final double titleThreshold;
     private final int maxPerDocument;
     private final int maxMergeChunks;
+    private final int maxCandidates;
 
     public KbRetrievalSettings(
             @Value("${payroll.kb.retrieval.fusion-enabled:true}") boolean fusionEnabled,
@@ -42,7 +43,8 @@ public class KbRetrievalSettings {
             @Value("${payroll.kb.retrieval.keyword-threshold:0.3}") double keywordThreshold,
             @Value("${payroll.kb.retrieval.title-threshold:0.3}") double titleThreshold,
             @Value("${payroll.kb.retrieval.max-per-document:3}") int maxPerDocument,
-            @Value("${payroll.kb.retrieval.max-merge-chunks:3}") int maxMergeChunks) {
+            @Value("${payroll.kb.retrieval.max-merge-chunks:3}") int maxMergeChunks,
+            @Value("${payroll.kb.retrieval.max-candidates:2000}") int maxCandidates) {
         this.fusionEnabled = fusionEnabled;
         this.recallRoutes = parseRoutes(recallRoutes);
         this.rrfK = Math.max(1, rrfK);
@@ -53,6 +55,7 @@ public class KbRetrievalSettings {
         this.titleThreshold = clamp01(titleThreshold);
         this.maxPerDocument = Math.max(1, maxPerDocument);
         this.maxMergeChunks = Math.max(1, maxMergeChunks);
+        this.maxCandidates = Math.max(1, maxCandidates);
     }
 
     public boolean fusionEnabled() {
@@ -93,6 +96,11 @@ public class KbRetrievalSettings {
 
     public int maxMergeChunks() {
         return maxMergeChunks;
+    }
+
+    /** 本地兜底时一次最多加载的候选分块数，避免大库把全部向量读入堆。 */
+    public int maxCandidates() {
+        return maxCandidates;
     }
 
     private static List<Route> parseRoutes(String csv) {

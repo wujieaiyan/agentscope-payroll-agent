@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -322,6 +323,31 @@ public final class H2AdminRepository {
         }
     }
 
+    public List<AppUser> findUsers(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", ids.stream().map(id -> "?").toList());
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                USER_SELECT + " WHERE u.user_id IN (" + placeholders + ")")) {
+            int index = 1;
+            for (Long id : ids) {
+                statement.setLong(index++, id);
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<AppUser> users = new ArrayList<>();
+                while (rs.next()) {
+                    users.add(mapUser(rs));
+                }
+                return List.copyOf(users);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询用户失败：" + e.getMessage(), e);
+        }
+    }
+
     public Optional<AppUser> findUser(long id) {
         try (Connection connection = database.connection();
                 PreparedStatement statement =
@@ -372,6 +398,21 @@ public final class H2AdminRepository {
         }
     }
 
+    /** 是否需要先修改初始密码；未知用户按不需要处理。 */
+    public boolean isPasswordChangeRequired(long id) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "SELECT must_change_password FROM app_users WHERE user_id = ?")) {
+            statement.setLong(1, id);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() && rs.getBoolean(1);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询改密标记失败：" + e.getMessage(), e);
+        }
+    }
+
     public Optional<AuthUser> findAuthUser(long id) {
         String sql =
                 """
@@ -410,7 +451,8 @@ public final class H2AdminRepository {
             String displayName,
             String passwordHash,
             String roleCode,
-            Long departmentId) {
+            Long departmentId,
+            boolean mustChangePassword) {
         String normalized = normalizeUsername(username);
         if (findAccountByUsername(normalized).isPresent()) {
             throw new PayrollException("用户名已存在：" + normalized);
@@ -421,8 +463,8 @@ public final class H2AdminRepository {
                 """
                 INSERT INTO app_users
                     (username, display_name, password_hash, role_code, department_id,
-                     active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, TRUE, ?, ?)
+                     active, must_change_password, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, TRUE, ?, ?, ?)
                 """;
         long id;
         try (Connection connection = database.connection();
@@ -437,9 +479,10 @@ public final class H2AdminRepository {
             } else {
                 statement.setLong(5, departmentId);
             }
+            statement.setBoolean(6, mustChangePassword);
             LocalDateTime now = LocalDateTime.now();
-            statement.setObject(6, now);
             statement.setObject(7, now);
+            statement.setObject(8, now);
             statement.executeUpdate();
             try (ResultSet keys = statement.getGeneratedKeys()) {
                 keys.next();
@@ -499,17 +542,29 @@ public final class H2AdminRepository {
         return findUser(id).orElseThrow();
     }
 
+    /** 用户自助改密：更新密码的同时清除首改密标记。 */
     public void updatePassword(long id, String passwordHash) {
+        updatePassword(id, passwordHash, false);
+    }
+
+    /** 管理员重置密码：可再次要求用户下次登录先改密。 */
+    public void resetPassword(long id, String passwordHash, boolean mustChangePassword) {
+        updatePassword(id, passwordHash, mustChangePassword);
+    }
+
+    private void updatePassword(long id, String passwordHash, boolean mustChangePassword) {
         try (Connection connection = database.connection();
                 PreparedStatement statement =
                         connection.prepareStatement(
                                 """
-                                UPDATE app_users SET password_hash = ?, updated_at = ?
+                                UPDATE app_users
+                                SET password_hash = ?, must_change_password = ?, updated_at = ?
                                 WHERE user_id = ?
                                 """)) {
             statement.setString(1, passwordHash);
-            statement.setObject(2, LocalDateTime.now());
-            statement.setLong(3, id);
+            statement.setBoolean(2, mustChangePassword);
+            statement.setObject(3, LocalDateTime.now());
+            statement.setLong(4, id);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("更新密码失败：" + e.getMessage(), e);
@@ -565,7 +620,8 @@ public final class H2AdminRepository {
         if (findAccountByUsername("admin").isPresent()) {
             return false;
         }
-        createUser("admin", "系统管理员", passwordHash, Permissions.ROLE_ADMIN, null);
+        // 引导管理员密码由部署方通过环境变量预置，属存量账号语义，不强制首改密。
+        createUser("admin", "系统管理员", passwordHash, Permissions.ROLE_ADMIN, null, false);
         return true;
     }
 

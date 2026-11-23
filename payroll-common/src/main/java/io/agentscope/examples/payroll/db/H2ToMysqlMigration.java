@@ -47,7 +47,7 @@ public final class H2ToMysqlMigration {
         try {
             Flyway.configure()
                     .dataSource(mysqlUrl, mysqlUser, mysqlPassword)
-                    .locations("classpath:db/migration/mysql")
+                    .locations(PayrollDatabase.MIGRATION_LOCATION)
                     .table("flyway_schema_history")
                     .load()
                     .migrate();
@@ -80,7 +80,8 @@ public final class H2ToMysqlMigration {
         try (ResultSet rs = meta.getTables(null, "PUBLIC", "%", new String[] {"TABLE"})) {
             while (rs.next()) {
                 String name = rs.getString("TABLE_NAME");
-                if (name.startsWith("INFORMATION_SCHEMA")) {
+                if (name.startsWith("INFORMATION_SCHEMA")
+                        || "flyway_schema_history".equalsIgnoreCase(name)) {
                     continue;
                 }
                 tables.add(name);

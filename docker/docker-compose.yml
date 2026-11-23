@@ -5,6 +5,8 @@
 #   docker build -f docker/sandbox-init.Dockerfile -t payroll-sandbox-init:local .
 #   docker compose -f docker/docker-compose.yml up -d --build
 #   浏览器访问 http://127.0.0.1:18088
+# 生产形态：叠加 docker/docker-compose.prod.yml（prod profile + 容器内 ES + 必填凭证密钥），
+#   本文件保持默认演示档不启用 TopologyGuard，见 docs/deployment-matrix.md。
 # 说明：
 #   - frontend 镜像托管 Vue3 产物，/api 与 /actuator 反向代理到两个 Web 节点。
 #   - Web 无状态，登录态与轮次状态在 MySQL/Redis，Nginx 轮询且无粘性。

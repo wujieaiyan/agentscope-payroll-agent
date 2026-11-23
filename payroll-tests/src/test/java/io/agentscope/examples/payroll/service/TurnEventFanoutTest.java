@@ -35,7 +35,8 @@ class TurnEventFanoutTest {
                 futures.add(pool.submit(() -> collect(fanout, "turn-1", start)));
             }
             start.countDown();
-            // 订阅者等待期间只应由一个读取循环轮询；若各自轮询，次数约为订阅者的 3 倍。
+            // 空闲期约 900ms，共享读取循环按 150ms 轮询约 6 次；
+            // 若三个订阅者各自轮询，次数约为 3 倍。
             Thread.sleep(900L);
             bus.append("turn-1", "done", Map.of("reply", "ab"));
 
@@ -45,9 +46,12 @@ class TurnEventFanoutTest {
                 assertEquals("done", events.get(2).event());
             }
             assertTrue(
-                    bus.blockingReads.get() <= 10,
-                    "同一轮次应只保留一个读取循环，实际 readBlocking 次数="
-                            + bus.blockingReads.get());
+                    bus.reads.get() <= 12,
+                    "同一轮次应只保留一个读取循环，实际 read 次数=" + bus.reads.get());
+            assertEquals(0, bus.blockingReads.get(), "读取循环不再阻塞占用订阅线程");
+            assertTrue(
+                    bus.maxBatch.get() >= 2, "启动时应批量读取已有事件，实际最大批次="
+                            + bus.maxBatch.get());
         } finally {
             fanout.close();
             pool.shutdownNow();
@@ -77,7 +81,9 @@ class TurnEventFanoutTest {
     private static final class CountingBus implements TurnEventBus {
 
         private final InMemoryTurnEventBus delegate = new InMemoryTurnEventBus();
+        private final AtomicInteger reads = new AtomicInteger();
         private final AtomicInteger blockingReads = new AtomicInteger();
+        private final AtomicInteger maxBatch = new AtomicInteger();
 
         @Override
         public long append(String turnId, String event, Map<String, Object> data) {
@@ -86,7 +92,10 @@ class TurnEventFanoutTest {
 
         @Override
         public List<TurnEvent> read(String turnId, long afterSeq, int max) {
-            return delegate.read(turnId, afterSeq, max);
+            reads.incrementAndGet();
+            List<TurnEvent> batch = delegate.read(turnId, afterSeq, max);
+            maxBatch.accumulateAndGet(batch.size(), Math::max);
+            return batch;
         }
 
         @Override

@@ -186,7 +186,7 @@ class NacosAgentRegistryTest {
         assertEquals(1, nacos.reads.get());
 
         registry.save(newAgent(null, "个税顾问"), "admin");
-        assertEquals(1, nacos.reads.get(), "保存应复用缓存列表");
+        assertEquals(2, nacos.reads.get(), "写入前必须重读一次配置校验 revision");
         assertEquals(1, nacos.writes.get());
     }
 
@@ -243,13 +243,50 @@ class NacosAgentRegistryTest {
         assertEquals(saved.id(), registry.activeAgent().id());
         assertTrue(
                 nacos.configs
-                        .get(NacosAgentRegistry.SETTINGS_DATA_ID)
+                        .get(NacosRuntimeSettings.DATA_ID)
                         .contains(saved.id()),
                 nacos.configs.toString());
 
         NacosAgentRegistry reloaded = registry(true);
         assertEquals(saved.id(), reloaded.activeAgentId());
         assertEquals(saved.id(), reloaded.activeAgent().id());
+    }
+
+    @Test
+    @DisplayName("写操作确认开关与核算智能体共用设置文件，互不覆盖")
+    void actionConfirmAndActiveAgentShareSettingsFile() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition saved = registry.save(newAgent(null, "个税顾问"), "admin");
+
+        registry.setActionConfirm(true);
+        registry.setActiveAgent(saved.id());
+        String settings = nacos.configs.get(NacosRuntimeSettings.DATA_ID);
+        assertTrue(settings.contains("\"actionConfirm\" : true"), settings);
+        assertTrue(settings.contains(saved.id()), settings);
+
+        registry.setActionConfirm(false);
+        settings = nacos.configs.get(NacosRuntimeSettings.DATA_ID);
+        assertTrue(settings.contains("\"actionConfirm\" : false"), settings);
+        assertTrue(settings.contains(saved.id()), settings);
+
+        NacosAgentRegistry reloaded = registry(true);
+        assertEquals(Boolean.FALSE, reloaded.actionConfirmOverride().orElseThrow());
+        assertEquals(saved.id(), reloaded.activeAgentId());
+    }
+
+    @Test
+    @DisplayName("Nacos 未配置或未启用时写操作确认无覆盖值，交由调用方回退环境变量")
+    void actionConfirmOverrideEmptyWhenUnavailable() throws IOException {
+        nacos = new FakeNacos();
+        assertTrue(registry(true).actionConfirmOverride().isEmpty());
+
+        NacosAgentRegistry enabled = registry(true);
+        AgentDefinition saved = enabled.save(newAgent(null, "个税顾问"), "admin");
+        enabled.setActiveAgent(saved.id());
+        assertTrue(registry(true).actionConfirmOverride().isEmpty());
+
+        assertTrue(registry(false).actionConfirmOverride().isEmpty());
     }
 
     @Test

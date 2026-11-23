@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
 import { api } from '../../api/http';
+import { WORKSPACES, workspaceOfAction } from '../../router/workspaces';
 import { toast } from '../../stores/toast';
 
 const page = ref({ items: [], total: 0, page: 1, size: 50 });
@@ -20,6 +21,11 @@ const pages = computed(() => Math.max(1, Math.ceil(page.value.total / page.value
 
 function formatTime(value) {
   return value ? String(value).replace('T', ' ').slice(0, 19) : '—';
+}
+
+function workspaceLabel(row) {
+  const key = workspaceOfAction(row.action, row.resource_type);
+  return key === 'common' ? '通用' : WORKSPACES[key].short;
 }
 
 function query(pageNo = page.value.page) {
@@ -99,6 +105,7 @@ onMounted(() => load(1));
         <thead>
           <tr>
             <th>时间</th>
+            <th>工作台</th>
             <th>操作者</th>
             <th>动作</th>
             <th>资源</th>
@@ -111,6 +118,7 @@ onMounted(() => load(1));
         <tbody>
           <tr v-for="row in page.items" :key="row.id">
             <td>{{ formatTime(row.occurred_at) }}</td>
+            <td><span class="badge">{{ workspaceLabel(row) }}</span></td>
             <td>{{ row.actor_name || row.actor_id || '—' }}</td>
             <td class="mono">{{ row.action }}</td>
             <td class="mono">{{ row.resource_type }}{{ row.resource_id ? `:${row.resource_id}` : '' }}</td>
@@ -124,7 +132,7 @@ onMounted(() => load(1));
             <td><button class="subtle sm" @click="detail = row">详情</button></td>
           </tr>
           <tr v-if="!page.items.length">
-            <td colspan="8" class="empty">{{ loading ? '加载中…' : '没有日志' }}</td>
+            <td colspan="9" class="empty">{{ loading ? '加载中…' : '没有日志' }}</td>
           </tr>
         </tbody>
       </table>
@@ -148,6 +156,8 @@ onMounted(() => load(1));
           <div class="panel-row"><span class="k">动作</span><span class="v mono">{{ detail.action }}</span></div>
           <div class="panel-row"><span class="k">资源</span><span class="v mono">{{ detail.resource_type }}:{{ detail.resource_id }}</span></div>
           <div class="panel-row"><span class="k">结果</span><span class="v">{{ detail.result }} · HTTP {{ detail.status_code }}</span></div>
+          <div v-if="detail.write_result" class="panel-row"><span class="k">写入</span><span class="v">{{ detail.write_result }}</span></div>
+          <div v-if="detail.revision" class="panel-row"><span class="k">Revision</span><span class="v mono">{{ detail.revision }}</span></div>
           <div class="panel-row"><span class="k">来源</span><span class="v">{{ detail.ip }} · {{ detail.user_agent || '—' }}</span></div>
           <div v-if="detail.trace_id" class="panel-row"><span class="k">Trace</span><span class="v mono">{{ detail.trace_id }}</span></div>
           <div v-if="detail.message" class="panel-row"><span class="k">消息</span><span class="v">{{ detail.message }}</span></div>

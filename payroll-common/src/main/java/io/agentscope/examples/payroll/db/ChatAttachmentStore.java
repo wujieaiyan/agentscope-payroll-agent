@@ -2,7 +2,9 @@ package io.agentscope.examples.payroll.db;
 
 import io.agentscope.examples.payroll.domain.ChatAttachment;
 import io.agentscope.examples.payroll.domain.ChatAttachmentRef;
+import io.agentscope.examples.payroll.domain.ExtractionMeta;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.support.JsonSupport;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,7 +24,7 @@ public final class ChatAttachmentStore {
     private static final String SELECT =
             """
             SELECT attachment_id, session_id, user_id, message_id, name, ext, size_bytes,
-                   storage_key, text_chars, status, error, created_at
+                   storage_key, text_chars, status, error, progress, extraction_meta, created_at
             FROM chat_attachments
             """;
 
@@ -69,26 +71,72 @@ public final class ChatAttachmentStore {
         return find(sessionId, id).orElseThrow();
     }
 
-    public void markReady(long sessionId, long attachmentId, int textChars) {
+    public void markReady(
+            long sessionId, long attachmentId, int textChars, ExtractionMeta meta) {
         String sql =
                 """
                 UPDATE chat_attachments
-                SET status = ?, text_chars = ?, error = NULL
+                SET status = ?, text_chars = ?, error = NULL, progress = 100, extraction_meta = ?
                 WHERE session_id = ? AND attachment_id = ?
                 """;
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, ChatAttachment.STATUS_READY);
             statement.setInt(2, textChars);
-            statement.setLong(3, sessionId);
-            statement.setLong(4, attachmentId);
+            statement.setString(3, meta == null ? null : JsonSupport.toJson(meta));
+            statement.setLong(4, sessionId);
+            statement.setLong(5, attachmentId);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("更新附件状态失败：" + e.getMessage(), e);
         }
     }
 
+    /** 重新识别：清空上次结果并回到异步中间态。 */
+    public void markParsing(long sessionId, long attachmentId) {
+        String sql =
+                """
+                UPDATE chat_attachments
+                SET status = ?, text_chars = 0, error = NULL, progress = 0, extraction_meta = NULL
+                WHERE session_id = ? AND attachment_id = ? AND message_id IS NULL
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, ChatAttachment.STATUS_PARSING);
+            statement.setLong(2, sessionId);
+            statement.setLong(3, attachmentId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("重置附件状态失败：" + e.getMessage(), e);
+        }
+    }
+
+    public void updateProgress(long sessionId, long attachmentId, int progress) {
+        int bounded = Math.max(0, Math.min(100, progress));
+        String sql =
+                """
+                UPDATE chat_attachments
+                SET progress = ?
+                WHERE session_id = ? AND attachment_id = ? AND status = ?
+                """;
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, bounded);
+            statement.setLong(2, sessionId);
+            statement.setLong(3, attachmentId);
+            statement.setString(4, ChatAttachment.STATUS_PARSING);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("更新附件进度失败：" + e.getMessage(), e);
+        }
+    }
+
     public void markFailed(long sessionId, long attachmentId, String error) {
+        markFailed(sessionId, attachmentId, error, null);
+    }
+
+    public void markFailed(
+            long sessionId, long attachmentId, String error, ExtractionMeta meta) {
         String message = error == null ? "解析失败" : error;
         if (message.length() > 500) {
             message = message.substring(0, 500);
@@ -96,15 +144,16 @@ public final class ChatAttachmentStore {
         String sql =
                 """
                 UPDATE chat_attachments
-                SET status = ?, error = ?
+                SET status = ?, error = ?, extraction_meta = ?
                 WHERE session_id = ? AND attachment_id = ?
                 """;
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, ChatAttachment.STATUS_FAILED);
             statement.setString(2, message);
-            statement.setLong(3, sessionId);
-            statement.setLong(4, attachmentId);
+            statement.setString(3, meta == null ? null : JsonSupport.toJson(meta));
+            statement.setLong(4, sessionId);
+            statement.setLong(5, attachmentId);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("更新附件状态失败：" + e.getMessage(), e);
@@ -122,6 +171,25 @@ public final class ChatAttachmentStore {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("查询附件失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 启动恢复与运维排查：按状态跨会话取附件。 */
+    public List<ChatAttachment> findByStatus(String status, int limit) {
+        String sql = SELECT + " WHERE status = ? ORDER BY attachment_id LIMIT ?";
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, status);
+            statement.setInt(2, Math.max(1, limit));
+            try (ResultSet rs = statement.executeQuery()) {
+                List<ChatAttachment> attachments = new ArrayList<>();
+                while (rs.next()) {
+                    attachments.add(map(rs));
+                }
+                return List.copyOf(attachments);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("按状态查询附件失败：" + e.getMessage(), e);
         }
     }
 
@@ -226,7 +294,7 @@ public final class ChatAttachmentStore {
     public Map<Long, List<ChatAttachmentRef>> refsByMessage(long sessionId) {
         String sql =
                 """
-                SELECT attachment_id, message_id, name, ext, size_bytes, status, text_chars, error
+                SELECT attachment_id, message_id, name, ext, size_bytes, status, text_chars, error, progress
                 FROM chat_attachments
                 WHERE session_id = ? AND message_id IS NOT NULL
                 ORDER BY attachment_id
@@ -246,7 +314,9 @@ public final class ChatAttachmentStore {
                                             rs.getLong("size_bytes"),
                                             rs.getString("status"),
                                             rs.getInt("text_chars"),
-                                            rs.getString("error")));
+                                            rs.getString("error"),
+                                            rs.getInt("progress"),
+                                            null));
                 }
                 return grouped;
             }
@@ -258,7 +328,7 @@ public final class ChatAttachmentStore {
     public List<ChatAttachmentRef> refs(long sessionId, long messageId) {
         String sql =
                 """
-                SELECT attachment_id, name, ext, size_bytes, status, text_chars, error
+                SELECT attachment_id, name, ext, size_bytes, status, text_chars, error, progress, extraction_meta
                 FROM chat_attachments
                 WHERE session_id = ? AND message_id = ?
                 ORDER BY attachment_id
@@ -278,7 +348,9 @@ public final class ChatAttachmentStore {
                                     rs.getLong("size_bytes"),
                                     rs.getString("status"),
                                     rs.getInt("text_chars"),
-                                    rs.getString("error")));
+                                    rs.getString("error"),
+                                    rs.getInt("progress"),
+                                    readMeta(rs.getString("extraction_meta"))));
                 }
                 return List.copyOf(refs);
             }
@@ -307,6 +379,20 @@ public final class ChatAttachmentStore {
                 rs.getInt("text_chars"),
                 rs.getString("status"),
                 rs.getString("error"),
+                rs.getInt("progress"),
+                readMeta(rs.getString("extraction_meta")),
                 createdAt == null ? null : createdAt.toLocalDateTime());
+    }
+
+    /** 历史数据或人工改库可能留下非法 JSON，展示链路不应因此整体失败。 */
+    private static ExtractionMeta readMeta(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return JsonSupport.fromJson(json, ExtractionMeta.class);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 }

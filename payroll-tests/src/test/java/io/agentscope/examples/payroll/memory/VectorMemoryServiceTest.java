@@ -32,6 +32,28 @@ class VectorMemoryServiceTest {
                     false,
                     false);
 
+    private static VectorMemorySettings tuned(int budgetMs, int failures, long openSeconds) {
+        return new VectorMemorySettings(
+                true,
+                "http://localhost:9200",
+                "",
+                "",
+                "test-memory",
+                "http://localhost:11434",
+                "fake-embed",
+                3,
+                Duration.ofSeconds(1),
+                5,
+                0.5,
+                1200,
+                false,
+                false,
+                budgetMs,
+                failures,
+                60L,
+                openSeconds);
+    }
+
     private static VectorMemorySettings settings(boolean crossSession) {
         return new VectorMemorySettings(
                 true,
@@ -224,6 +246,74 @@ class VectorMemoryServiceTest {
     }
 
     @Test
+    @DisplayName("召回超出预算时返回空串，不阻塞对话")
+    void recallReturnsEmptyWhenBudgetExceeded() {
+        SlowEmbeddings embeddings = new SlowEmbeddings(500);
+        FakeStore store = new FakeStore();
+        VectorMemoryService service =
+                new VectorMemoryService(
+                        tuned(50, 3, 60),
+                        embeddings,
+                        store,
+                        task -> {
+                            Thread thread = new Thread(task, "recall-budget-test");
+                            thread.setDaemon(true);
+                            thread.start();
+                        });
+
+        long startedAt = System.currentTimeMillis();
+        String block = service.recall(7, 11, "再算一下张伟的工资");
+
+        assertEquals("", block);
+        assertTrue(
+                System.currentTimeMillis() - startedAt < 1_500L,
+                "超预算应立即返回，而不是等待嵌入完成");
+    }
+
+    @Test
+    @DisplayName("召回执行器拒绝时返回空串，不影响后续调用")
+    void rejectedRecallDegradesToEmpty() {
+        FakeEmbeddings embeddings = new FakeEmbeddings();
+        FakeStore store = new FakeStore();
+        VectorMemoryService service =
+                new VectorMemoryService(
+                        SETTINGS,
+                        embeddings,
+                        store,
+                        task -> {
+                            throw new java.util.concurrent.RejectedExecutionException("full");
+                        });
+
+        assertEquals("", service.recall(7, 11, "再算一下张伟的工资"));
+        assertEquals("", service.recall(7, 11, "再算一下张伟的工资"));
+        assertTrue(store.searchedUsers.isEmpty());
+        assertEquals(0, embeddings.calls);
+    }
+
+    @Test
+    @DisplayName("连续召回失败触发熔断后直接短路，不再触达嵌入服务")
+    void breakerShortCircuitsRecallAndIndexing() {
+        FakeEmbeddings embeddings = new FakeEmbeddings();
+        embeddings.fail = true;
+        FakeStore store = new FakeStore();
+        VectorMemoryService service =
+                new VectorMemoryService(tuned(600, 3, 60), embeddings, store);
+
+        service.recall(7, 11, "再算一下张伟的工资");
+        service.recall(7, 11, "再算一下张伟的工资");
+        service.recall(7, 11, "再算一下张伟的工资");
+
+        embeddings.fail = false;
+        int callsBefore = embeddings.calls;
+        assertEquals("", service.recall(7, 11, "再算一下张伟的工资"));
+        assertEquals(callsBefore, embeddings.calls, "熔断打开后不应再调用嵌入");
+
+        service.indexQuestion(7, 11, 42, 1, "帮我查一下张伟上个月的工资明细");
+        assertTrue(store.records.isEmpty(), "熔断打开时索引也应短路");
+        assertEquals(callsBefore, embeddings.calls);
+    }
+
+    @Test
     @DisplayName("关闭状态下所有操作都是空操作")
     void disabledServiceIsNoop() {
         VectorMemoryService service = VectorMemoryService.disabled();
@@ -250,6 +340,35 @@ class VectorMemoryServiceTest {
                 throw new IllegalStateException("embed down");
             }
             calls++;
+            return new float[] {1f, 0f, 0f};
+        }
+
+        @Override
+        public List<float[]> embedAll(List<String> texts) {
+            return texts.stream().map(this::embed).toList();
+        }
+
+        @Override
+        public boolean available() {
+            return true;
+        }
+    }
+
+    private static final class SlowEmbeddings implements EmbeddingClient {
+
+        private final long delayMillis;
+
+        private SlowEmbeddings(long delayMillis) {
+            this.delayMillis = delayMillis;
+        }
+
+        @Override
+        public float[] embed(String text) {
+            try {
+                Thread.sleep(delayMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
             return new float[] {1f, 0f, 0f};
         }
 

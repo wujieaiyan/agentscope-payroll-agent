@@ -3,9 +3,14 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { api } from '../../api/http';
 import { toast } from '../../stores/toast';
 
-const data = ref({ writable: false, location: '-', skills: [] });
+const data = ref({ writable: false, location: '-', skills: [], total: 0, page: 1, size: 50, stats: {} });
 const keyword = ref('');
+const page = ref(1);
+const size = ref(50);
+const source = ref('');
+const sort = ref('id');
 const loading = ref(false);
+let searchTimer = null;
 const detail = ref(null);
 const detailLoading = ref(false);
 const showForm = ref(false);
@@ -65,16 +70,12 @@ const dataStatusClass = computed(() => {
 
 const metadataEntries = computed(() => Object.entries(detail.value?.metadata || {}));
 
-const skills = computed(() => {
-  const needle = keyword.value.trim().toLowerCase();
-  const list = data.value.skills || [];
-  if (!needle) return list;
-  return list.filter((skill) =>
-    [skill.id, skill.description, skill.source]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(needle))
-  );
-});
+const skills = computed(() => data.value.skills || []);
+const total = computed(() => Number(data.value.total ?? skills.value.length));
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(total.value / Math.max(1, Number(data.value.size) || 50)))
+);
+const stats = computed(() => data.value.stats || {});
 
 const canEditFiles = computed(
   () => data.value.writable && detail.value && detail.value.source === 'nacos'
@@ -102,20 +103,63 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatMillis(value) {
+  const millis = Number(value);
+  return Number.isFinite(millis) && millis > 0 ? `${millis} ms` : '—';
+}
+
+function formatRatio(value) {
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? `${(ratio * 100).toFixed(0)}%` : '—';
+}
+
 function fileUrl(id, path) {
   const encoded = String(path).split('/').map(encodeURIComponent).join('/');
   return `/api/admin/skills/${encodeURIComponent(id)}/files/${encoded}`;
 }
 
+function listQuery() {
+  const params = new URLSearchParams();
+  if (keyword.value.trim()) params.set('keyword', keyword.value.trim());
+  if (source.value) params.set('source', source.value);
+  if (sort.value) params.set('sort', sort.value);
+  params.set('page', String(page.value));
+  params.set('size', String(size.value));
+  return params.toString();
+}
+
 async function load() {
   loading.value = true;
   try {
-    data.value = (await api('/api/admin/skills')) || data.value;
+    const payload = (await api(`/api/admin/skills?${listQuery()}`)) || data.value;
+    data.value = payload;
+    const pages = Math.max(1, Math.ceil(Number(payload.total || 0) / Math.max(1, Number(payload.size) || 50)));
+    if (page.value > pages) {
+      page.value = pages;
+      await load();
+    }
   } catch (error) {
     toast(error.message, 'error');
   } finally {
     loading.value = false;
   }
+}
+
+function search() {
+  page.value = 1;
+  load();
+}
+
+function onKeyword() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(search, 300);
+}
+
+function changePage(next) {
+  const target = Math.min(Math.max(1, next), pageCount.value);
+  if (target === page.value) return;
+  page.value = target;
+  load();
 }
 
 async function openSkill(skill) {
@@ -303,9 +347,9 @@ async function submitImport(dryRun) {
     if (!dryRun) {
       toast(`技能「${payload?.id}」已导入`, 'success');
       showImport.value = false;
+      page.value = 1;
       await load();
-      const saved = (data.value.skills || []).find((item) => item.id === payload?.id);
-      if (saved) await openSkill(saved);
+      if (payload?.id) await openSkill({ id: payload.id });
     }
   } catch (error) {
     toast(error.message, 'error');
@@ -476,7 +520,10 @@ async function removeFile(file) {
 }
 
 onMounted(load);
-onUnmounted(stopDataPolling);
+onUnmounted(() => {
+  stopDataPolling();
+  clearTimeout(searchTimer);
+});
 </script>
 
 <template>
@@ -490,10 +537,38 @@ onUnmounted(stopDataPolling);
         <span class="badge" :class="data.writable ? 'green' : 'orange'">
           {{ data.writable ? '可写' : '只读（Nacos 未启用）' }}
         </span>
-        <input v-model="keyword" placeholder="搜索技能" style="width: 220px" />
+        <input
+          v-model="keyword"
+          placeholder="搜索技能"
+          style="width: 220px"
+          @input="onKeyword"
+          @keyup.enter="search"
+        />
+        <select v-model="source" @change="search">
+          <option value="">全部来源</option>
+          <option value="nacos">Nacos</option>
+          <option value="builtin">内置</option>
+        </select>
+        <select v-model="sort" @change="search">
+          <option value="id">按 ID</option>
+          <option value="updated">最近更新</option>
+          <option value="size">正文大小</option>
+        </select>
         <button class="ghost" :disabled="!data.writable" @click="startImport">导入技能</button>
         <button class="primary" :disabled="!data.writable" @click="createSkill">新增技能</button>
       </div>
+    </div>
+
+    <div class="scale-strip">
+      <span class="scale-item"><strong>{{ stats.totalSkills ?? total }}</strong> 技能</span>
+      <span class="scale-item"><strong>{{ stats.boundAgents ?? 0 }}</strong> 已绑定智能体</span>
+      <span class="scale-item"><strong>{{ stats.boundSkills ?? 0 }}</strong> 被绑定技能</span>
+      <span class="scale-item"><strong>{{ formatSize(stats.contentBytes || 0) }}</strong> 正文总量</span>
+      <span class="scale-item"><strong>{{ formatMillis(stats.catalogBuildMillis) }}</strong> 目录构建</span>
+      <span class="scale-item"><strong>{{ formatRatio(stats.cacheHitRatio) }}</strong> 缓存命中</span>
+      <span v-if="total > skills.length" class="muted">
+        第 {{ data.page || page }} / {{ pageCount }} 页
+      </span>
     </div>
 
     <div class="table-wrap">
@@ -538,6 +613,22 @@ onUnmounted(stopDataPolling);
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div v-if="total > 0" class="pager">
+      <span class="muted">共 {{ total }} 条，第 {{ data.page || page }} / {{ pageCount }} 页</span>
+      <div class="cell-actions">
+        <button class="subtle sm" :disabled="page <= 1 || loading" @click="changePage(page - 1)">
+          上一页
+        </button>
+        <button
+          class="subtle sm"
+          :disabled="page >= pageCount || loading"
+          @click="changePage(page + 1)"
+        >
+          下一页
+        </button>
+      </div>
     </div>
 
     <div v-if="detail" class="drawer-mask" @click.self="closeDetail">
@@ -881,6 +972,33 @@ onUnmounted(stopDataPolling);
 </template>
 
 <style scoped>
+.scale-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface, #fafbfc);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.scale-item strong {
+  font-size: 16px;
+  color: var(--text, #1f2328);
+  margin-right: 2px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 2px;
+}
+
 .tabs {
   display: flex;
   gap: 4px;

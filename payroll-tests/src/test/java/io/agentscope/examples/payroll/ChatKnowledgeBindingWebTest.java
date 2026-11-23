@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -27,6 +28,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @SpringBootTest(
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Tag("integration")
 class ChatKnowledgeBindingWebTest {
 
     private static final String ADMIN_PASSWORD = "kb-bind-admin-pass";
@@ -41,6 +43,8 @@ class ChatKnowledgeBindingWebTest {
         registry.add("payroll.db.password", () -> "");
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
         registry.add("payroll.auth.enabled", () -> "true");
+        // 新建用户默认强制首改密，本类聚焦其他能力，关闭该开关；专项覆盖见 ForcedPasswordChangeWebTest。
+        registry.add("payroll.auth.force-password-change", () -> "false");
         registry.add("payroll.auth.admin-password", () -> ADMIN_PASSWORD);
         registry.add("payroll.kb.storage-dir", () -> OUTPUT_DIR.resolve("kb").toString());
         registry.add("payroll.kb.es-enabled", () -> "false");

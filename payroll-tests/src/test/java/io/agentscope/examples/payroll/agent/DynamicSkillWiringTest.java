@@ -73,6 +73,7 @@ class DynamicSkillWiringTest {
     void filterOnlyAllowsRole() {
         assertTrue(SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-calculator_builtin"));
         assertTrue(SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-calculator_nacos"));
+        assertTrue(SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-calculator_db"));
         assertTrue(!SkillRepositories.filterFor(RoleSkills.CALCULATOR).isAllowed("payroll-validator_builtin"));
     }
 
@@ -98,6 +99,20 @@ class DynamicSkillWiringTest {
         assertEquals(List.of(RoleSkills.CALCULATOR), repository.getAllSkillNames());
         assertEquals(
                 List.of(RoleSkills.CALCULATOR),
+                repository.getAllSkills().stream().map(AgentSkill::getName).toList());
+    }
+
+    @Test
+    @DisplayName("绑定顺序即视图顺序：视图集合是 LinkedHashSet，重启不换序")
+    void scopedRepositoryKeepsBindingOrder() {
+        // Set.copyOf 的迭代顺序按元素哈希来，同一份定义重启后可能换序，提示词因此逐字符不可比。
+        AgentSkillRepository repository =
+                SkillRepositories.scoped(
+                        new BuiltInSkillRepository(),
+                        List.of(RoleSkills.VALIDATOR, RoleSkills.CALCULATOR));
+
+        assertEquals(
+                List.of(RoleSkills.VALIDATOR, RoleSkills.CALCULATOR),
                 repository.getAllSkills().stream().map(AgentSkill::getName).toList());
     }
 

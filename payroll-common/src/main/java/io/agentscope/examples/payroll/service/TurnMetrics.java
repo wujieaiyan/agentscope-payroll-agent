@@ -6,10 +6,14 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 轮次续流核心指标。默认写入全局 {@link Metrics#globalRegistry}：Spring Boot 会把
  * Prometheus 注册表挂到全局，测试可用 {@link #useRegistry} 切换为独立注册表。
+ *
+ * <p>所有指标带 {@code deployment.mode} 标签，便于区分单机降级与集群快速失败。
  */
 public final class TurnMetrics {
 
@@ -19,14 +23,29 @@ public final class TurnMetrics {
     public static final String EVENT_BYTES = "payroll.chat.turn.event.bytes";
     public static final String REPLAY_EVENTS = "payroll.chat.turn.replay.events";
     public static final String RESUME = "payroll.chat.turn.resume";
+    public static final String STREAM_REJECTED = "payroll.chat.stream.rejected";
+    public static final String QUOTA_REJECTED = "payroll.chat.quota.rejected";
+    public static final String LEASE_RENEW_FAILED = "payroll.chat.lease.renew.failed";
+    public static final String TURN_EXPIRED = "payroll.chat.turn.expired";
+    public static final String SUBMIT_BUDGET_EXHAUSTED = "payroll.runtime.submit.budget.exhausted";
+    public static final String EVENT_BUS_UNAVAILABLE = "payroll.chat.event.bus.unavailable";
+    public static final String MODEL_FAILOVER = "payroll.model.failover";
 
     private static volatile MeterRegistry registry = Metrics.globalRegistry;
+    private static volatile String deploymentMode = "single";
     private static volatile Counter gap;
     private static volatile Counter degrade;
     private static volatile Counter leaseLost;
     private static volatile DistributionSummary eventBytes;
     private static volatile DistributionSummary replayEvents;
     private static volatile Timer resume;
+    private static volatile Counter quotaRejected;
+    private static volatile Counter leaseRenewFailed;
+    private static volatile Counter submitBudgetExhausted;
+    private static volatile Counter eventBusUnavailable;
+    private static final Map<String, Counter> streamRejected = new ConcurrentHashMap<>();
+    private static final Map<String, Counter> turnExpired = new ConcurrentHashMap<>();
+    private static final Map<String, Counter> modelFailover = new ConcurrentHashMap<>();
 
     private TurnMetrics() {}
 
@@ -38,16 +57,29 @@ public final class TurnMetrics {
         eventBytes = null;
         replayEvents = null;
         resume = null;
+        streamRejected.clear();
+        quotaRejected = null;
+        leaseRenewFailed = null;
+        submitBudgetExhausted = null;
+        eventBusUnavailable = null;
+        turnExpired.clear();
+        modelFailover.clear();
+    }
+
+    /** 启动时由装配层写入；必须在首个请求前调用。 */
+    public static void configureDeploymentMode(String mode) {
+        deploymentMode = mode == null || mode.isBlank() ? "single" : mode.trim();
+    }
+
+    public static String deploymentMode() {
+        return deploymentMode;
     }
 
     /** 续流断点缺口：客户端游标早于仍保留的事件。 */
     public static void gap() {
         Counter counter = gap;
         if (counter == null) {
-            counter =
-                    Counter.builder(GAP)
-                            .description("续流断点缺口次数")
-                            .register(registry);
+            counter = counter(GAP, "续流断点缺口次数").register(registry);
             gap = counter;
         }
         counter.increment();
@@ -57,10 +89,7 @@ public final class TurnMetrics {
     public static void degraded() {
         Counter counter = degrade;
         if (counter == null) {
-            counter =
-                    Counter.builder(DEGRADE)
-                            .description("事件总线降级操作次数")
-                            .register(registry);
+            counter = counter(DEGRADE, "事件总线降级操作次数").register(registry);
             degrade = counter;
         }
         counter.increment();
@@ -70,10 +99,7 @@ public final class TurnMetrics {
     public static void leaseLost() {
         Counter counter = leaseLost;
         if (counter == null) {
-            counter =
-                    Counter.builder(LEASE_LOST)
-                            .description("租约丢失终止轮次次数")
-                            .register(registry);
+            counter = counter(LEASE_LOST, "租约丢失终止轮次次数").register(registry);
             leaseLost = counter;
         }
         counter.increment();
@@ -90,6 +116,7 @@ public final class TurnMetrics {
                     DistributionSummary.builder(EVENT_BYTES)
                             .description("单条轮次事件负载字节数")
                             .publishPercentileHistogram()
+                            .tag("deployment.mode", deploymentMode)
                             .register(registry);
             eventBytes = summary;
         }
@@ -107,10 +134,29 @@ public final class TurnMetrics {
                     DistributionSummary.builder(REPLAY_EVENTS)
                             .description("单次续流重放事件条数")
                             .publishPercentileHistogram()
+                            .tag("deployment.mode", deploymentMode)
                             .register(registry);
             replayEvents = summary;
         }
         summary.record(count);
+    }
+
+    /** 对话执行队列已满被拒绝的请求数，按执行器区分。 */
+    public static void streamRejected() {
+        streamRejected("executor");
+    }
+
+    /** reason 区分 executor / tail / runtime，便于判断是启动、续流还是运行期容量不足。 */
+    public static void streamRejected(String reason) {
+        String tag = reason == null || reason.isBlank() ? "executor" : reason.trim();
+        Counter counter =
+                streamRejected.computeIfAbsent(
+                        tag,
+                        key ->
+                                counter(STREAM_REJECTED, "对话执行队列满被拒绝的请求数")
+                                        .tag("reason", key)
+                                        .register(registry));
+        counter.increment();
     }
 
     /** 续流追平耗时：从建立连接（或首次重放）到事件日志耗尽。 */
@@ -121,9 +167,86 @@ public final class TurnMetrics {
                     Timer.builder(RESUME)
                             .description("续流追平耗时")
                             .publishPercentileHistogram()
+                            .tag("deployment.mode", deploymentMode)
                             .register(registry);
             resume = timer;
         }
         timer.record(Duration.ofMillis(Math.max(0L, System.currentTimeMillis() - startedAtMillis)));
+    }
+
+    /** 配额已满被拒绝的请求数。 */
+    public static void quotaRejected() {
+        Counter counter = quotaRejected;
+        if (counter == null) {
+            counter = counter(QUOTA_REJECTED, "配额已满被拒绝的请求数").register(registry);
+            quotaRejected = counter;
+        }
+        counter.increment();
+    }
+
+    /** 租约续约失败次数；持续增长说明 Redis 或网络异常。 */
+    public static void leaseRenewFailed() {
+        Counter counter = leaseRenewFailed;
+        if (counter == null) {
+            counter = counter(LEASE_RENEW_FAILED, "轮次租约续约失败次数").register(registry);
+            leaseRenewFailed = counter;
+        }
+        counter.increment();
+    }
+
+    /** 轮次被判定失效：reason 区分 no-events / deadline / lease。 */
+    public static void turnExpired(String reason) {
+        String tag = reason == null || reason.isBlank() ? "unknown" : reason.trim();
+        Counter counter =
+                turnExpired.computeIfAbsent(
+                        tag,
+                        key ->
+                                Counter.builder(TURN_EXPIRED)
+                                        .description("轮次被判失效次数")
+                                        .tag("deployment.mode", deploymentMode)
+                                        .tag("reason", key)
+                                        .register(registry));
+        counter.increment();
+    }
+
+    /** 提交 runtime 的总预算耗尽次数。 */
+    public static void submitBudgetExhausted() {
+        Counter counter = submitBudgetExhausted;
+        if (counter == null) {
+            counter =
+                    counter(SUBMIT_BUDGET_EXHAUSTED, "runtime 提交预算耗尽次数")
+                            .register(registry);
+            submitBudgetExhausted = counter;
+        }
+        counter.increment();
+    }
+
+    /** cluster 模式下事件总线不可用（直接失败而非降级）的次数。 */
+    public static void eventBusUnavailable() {
+        Counter counter = eventBusUnavailable;
+        if (counter == null) {
+            counter = counter(EVENT_BUS_UNAVAILABLE, "事件总线不可用次数").register(registry);
+            eventBusUnavailable = counter;
+        }
+        counter.increment();
+    }
+
+    /** 首包连接失败后切换到同平面备用模型的次数；plane 区分控制面/轻量面/编码面。 */
+    public static void modelFailover(String plane) {
+        String tag = plane == null || plane.isBlank() ? "unknown" : plane.trim();
+        Counter counter =
+                modelFailover.computeIfAbsent(
+                        tag,
+                        key ->
+                                counter(MODEL_FAILOVER, "模型连接级切换次数")
+                                        .tag("plane", key)
+                                        .register(registry));
+        counter.increment();
+    }
+
+    private static Counter.Builder counter(String name, String description) {
+        return Counter.builder(name)
+                .description(description)
+                .tag("deployment.mode", deploymentMode);
     }
 }

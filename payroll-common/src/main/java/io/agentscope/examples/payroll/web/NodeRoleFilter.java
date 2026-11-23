@@ -26,7 +26,7 @@ public final class NodeRoleFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         boolean internal = path.startsWith("/internal/");
         if ("runtime".equals(role)) {
-            if (!internal && !path.equals("/actuator/health")) {
+            if (!internal && !isHealthPath(path)) {
                 reject(response);
                 return;
             }
@@ -35,6 +35,14 @@ public final class NodeRoleFilter extends OncePerRequestFilter {
             return;
         }
         chain.doFilter(request, response);
+    }
+
+    /** 编排探针与 Actuator 健康分组的路径；runtime 也需要被编排检查。 */
+    private static boolean isHealthPath(String path) {
+        return path.equals("/livez")
+                || path.equals("/readyz")
+                || path.equals("/actuator/health")
+                || path.startsWith("/actuator/health/");
     }
 
     private static void reject(HttpServletResponse response) throws IOException {

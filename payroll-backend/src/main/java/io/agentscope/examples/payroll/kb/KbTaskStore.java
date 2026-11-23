@@ -143,6 +143,27 @@ public class KbTaskStore {
         return tasks.isEmpty() ? Optional.empty() : Optional.of(tasks.get(0));
     }
 
+    /** 启动恢复用：列出全部未完成任务，同一文档按任务号升序。 */
+    public List<IngestTask> findActiveTasks(int limit) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                SELECT
+                                        + " WHERE task_status IN ('QUEUED','RUNNING','CANCELING')"
+                                        + " ORDER BY document_id, task_id LIMIT ?")) {
+            statement.setInt(1, Math.max(1, Math.min(limit, 2000)));
+            try (ResultSet rs = statement.executeQuery()) {
+                List<IngestTask> result = new ArrayList<>();
+                while (rs.next()) {
+                    result.add(map(rs));
+                }
+                return result;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询未完成入库任务失败：" + e.getMessage(), e);
+        }
+    }
+
     public boolean hasActiveTask(long documentId) {
         try (Connection connection = database.connection();
                 PreparedStatement statement =

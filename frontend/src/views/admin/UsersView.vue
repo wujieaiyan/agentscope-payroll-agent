@@ -1,6 +1,7 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { api } from '../../api/http';
+import { PERMISSION_GROUPS } from '../../router/workspaces';
 import { toast } from '../../stores/toast';
 
 const tab = ref('users');
@@ -9,6 +10,17 @@ const roles = ref([]);
 const departments = ref([]);
 const permissions = ref([]);
 const loading = ref(false);
+
+const permissionGroups = computed(() => {
+  const grouped = PERMISSION_GROUPS.map((group) => ({
+    key: group.key,
+    title: group.title,
+    items: permissions.value.filter((permission) => group.codes.includes(permission.code)),
+  })).filter((group) => group.items.length);
+  const known = new Set(PERMISSION_GROUPS.flatMap((group) => group.codes));
+  const rest = permissions.value.filter((permission) => !known.has(permission.code));
+  return rest.length ? [...grouped, { key: 'other', title: '其他', items: rest }] : grouped;
+});
 
 const userModal = ref(false);
 const editingUser = ref(false);
@@ -455,17 +467,20 @@ onMounted(load);
             </label>
           </div>
           <div>
-            <div class="muted" style="margin-bottom: 6px">权限</div>
-            <div class="toolbar">
-              <button
-                v-for="permission in permissions"
-                :key="permission.code"
-                class="chip"
-                :class="{ 'badge blue': roleForm.permissions.includes(permission.code) }"
-                @click="togglePermission(permission.code)"
-              >
-                {{ permission.label || permission.code }}
-              </button>
+            <div class="muted" style="margin-bottom: 6px">权限（按工作台分组，判定不变）</div>
+            <div v-for="group in permissionGroups" :key="group.key" style="margin-bottom: 8px">
+              <div class="muted" style="margin-bottom: 4px">{{ group.title }}</div>
+              <div class="toolbar">
+                <button
+                  v-for="permission in group.items"
+                  :key="permission.code"
+                  class="chip"
+                  :class="{ 'badge blue': roleForm.permissions.includes(permission.code) }"
+                  @click="togglePermission(permission.code)"
+                >
+                  {{ permission.label || permission.code }}
+                </button>
+              </div>
             </div>
           </div>
         </div>

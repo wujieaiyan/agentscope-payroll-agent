@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,12 +46,27 @@ final class AgentCache {
                         : Math.min(idleMillis, Duration.ofMinutes(15).toMillis());
     }
 
-    @SuppressWarnings("unchecked")
     <T> T get(String key, Supplier<T> factory) {
+        return get(key, factory, null);
+    }
+
+    /** @param afterRebuild 仅在真正创建新条目后回调，用于区分首次构建与定义/模型变化重建 */
+    @SuppressWarnings("unchecked")
+    <T> T get(String key, Supplier<T> factory, Runnable afterRebuild) {
         long now = System.currentTimeMillis();
-        Entry entry = entries.computeIfAbsent(key, ignored -> new Entry(factory.get(), now));
+        AtomicBoolean created = new AtomicBoolean(false);
+        Entry entry =
+                entries.computeIfAbsent(
+                        key,
+                        ignored -> {
+                            created.set(true);
+                            return new Entry(factory.get(), now);
+                        });
         entry.lastUsed = now;
         evictIdle(now);
+        if (created.get() && afterRebuild != null) {
+            afterRebuild.run();
+        }
         return (T) entry.value;
     }
 

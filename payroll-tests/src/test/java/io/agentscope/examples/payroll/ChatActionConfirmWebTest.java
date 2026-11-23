@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -51,6 +52,7 @@ import org.springframework.test.context.DynamicPropertySource;
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(ChatActionConfirmWebTest.StubConfig.class)
+@Tag("integration")
 class ChatActionConfirmWebTest {
 
     private static final String ADMIN_PASSWORD = "action-admin-pass";
@@ -66,6 +68,8 @@ class ChatActionConfirmWebTest {
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
         registry.add("payroll.auth.enabled", () -> "true");
         registry.add("payroll.auth.admin-password", () -> ADMIN_PASSWORD);
+        // 本类验证写确认链路，新建用户的强制首改密由 ForcedPasswordChangeWebTest 专项覆盖。
+        registry.add("payroll.auth.force-password-change", () -> "false");
         registry.add("payroll.chat.action-confirm.enabled", () -> "true");
     }
 

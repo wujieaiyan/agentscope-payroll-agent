@@ -20,6 +20,10 @@ public final class AuthInterceptor implements HandlerInterceptor {
     private static final Set<String> PUBLIC_PATHS =
             Set.of("/api/auth/login", "/api/health");
 
+    /** 首改密期间仍可访问的接口：改密、退出、读取当前用户与健康检查。 */
+    private static final Set<String> PASSWORD_CHANGE_PATHS =
+            Set.of("/api/auth/password", "/api/auth/logout", "/api/auth/me", "/api/health");
+
     private final AuthService authService;
 
     public AuthInterceptor(AuthService authService) {
@@ -36,6 +40,11 @@ public final class AuthInterceptor implements HandlerInterceptor {
         AuthUser user = authService.resolve(request).orElse(null);
         if (user == null) {
             write(response, HttpStatus.UNAUTHORIZED, "未登录或会话已过期");
+            return false;
+        }
+        if (!PASSWORD_CHANGE_PATHS.contains(request.getRequestURI())
+                && authService.passwordChangeRequired(request)) {
+            write(response, HttpStatus.FORBIDDEN, "请先修改初始密码");
             return false;
         }
         RequirePermission required = requiredPermission(handler);

@@ -1,14 +1,18 @@
 package io.agentscope.examples.payroll.web;
 
+import io.agentscope.examples.payroll.domain.AuditEntry;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.AuditContext;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -52,7 +56,22 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(PayrollConflictException.class)
     public ResponseEntity<ApiResponse> handleConflict(PayrollConflictException e) {
-        return error(HttpStatus.CONFLICT, e.getMessage());
+        AuditContext.markWriteResult(AuditEntry.WRITE_CONFLICT);
+        if (e.currentRevision() == null) {
+            return error(HttpStatus.CONFLICT, e.getMessage());
+        }
+        return error(
+                HttpStatus.CONFLICT,
+                e.getMessage(),
+                Map.of("currentRevision", e.currentRevision()));
+    }
+
+    @ExceptionHandler(PayrollUnavailableException.class)
+    public ResponseEntity<ApiResponse> handleUnavailable(PayrollUnavailableException e) {
+        AuditContext.markWriteResult(AuditEntry.WRITE_UNAVAILABLE);
+        // 503 不回传内部地址，详细原因只进日志。
+        log.warn("配置中心不可用，拒绝写入：{}", e.getMessage());
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "配置中心暂时不可用，请稍后重试");
     }
 
     @ExceptionHandler(UnauthorizedException.class)
@@ -66,8 +85,16 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(TooManyRequestsException.class)
-    public ResponseEntity<ApiResponse> handleRateLimited(TooManyRequestsException e) {
-        return error(HttpStatus.TOO_MANY_REQUESTS, e.getMessage());
+    public ResponseEntity<Map<String, Object>> handleRateLimited(TooManyRequestsException e) {
+        AuditContext.markFailure(e.getMessage(), HttpStatus.TOO_MANY_REQUESTS.value());
+        // 容量拒绝统一契约：{code, retryAfterSeconds, message}，并保留 Retry-After 头。
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(e.retryAfterSeconds()))
+                .body(
+                        Map.of(
+                                "code", e.code(),
+                                "retryAfterSeconds", e.retryAfterSeconds(),
+                                "message", e.getMessage()));
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
@@ -117,5 +144,11 @@ public class ApiExceptionHandler {
     private static ResponseEntity<ApiResponse> error(HttpStatus status, String message) {
         AuditContext.markFailure(message, status.value());
         return ResponseEntity.status(status).body(ApiResponse.error(message));
+    }
+
+    private static ResponseEntity<ApiResponse> error(
+            HttpStatus status, String message, Object data) {
+        AuditContext.markFailure(message, status.value());
+        return ResponseEntity.status(status).body(new ApiResponse("ERROR", data, message));
     }
 }

@@ -13,10 +13,12 @@ import io.agentscope.examples.payroll.domain.PayrollRun;
 import io.agentscope.examples.payroll.domain.PayrollRunDetail;
 import io.agentscope.examples.payroll.domain.PerformanceReview;
 import io.agentscope.examples.payroll.domain.ReviewView;
+import io.agentscope.examples.payroll.health.RuntimeHealthService;
 import io.agentscope.examples.payroll.service.ApprovalService;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatQuotaService;
+import io.agentscope.examples.payroll.service.TokenBudgetService;
 import io.agentscope.examples.payroll.service.ExcelImportService;
 import io.agentscope.examples.payroll.service.ExcelImportService.ImportType;
 import io.agentscope.examples.payroll.service.PayrollChat;
@@ -36,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -44,6 +47,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -79,9 +83,11 @@ public class PayrollWebController {
     private final AuditService auditService;
     private final AuthService authService;
     private final ChatQuotaService chatQuotaService;
+    private final TokenBudgetService tokenBudgetService;
     private final ApprovalService approvalService;
     private final NacosAgentRegistry agentRegistry;
     private final NacosFlowRegistry flowRegistry;
+    private final RuntimeHealthService runtimeHealthService;
 
     public PayrollWebController(
             PayrollServices services,
@@ -89,25 +95,31 @@ public class PayrollWebController {
             AuditService auditService,
             AuthService authService,
             ChatQuotaService chatQuotaService,
+            TokenBudgetService tokenBudgetService,
             ApprovalService approvalService,
             NacosAgentRegistry agentRegistry,
-            NacosFlowRegistry flowRegistry) {
+            NacosFlowRegistry flowRegistry,
+            RuntimeHealthService runtimeHealthService) {
         this.services = services;
         this.chatStreamExecutor = chatStreamExecutor;
         this.auditService = auditService;
         this.authService = authService;
         this.chatQuotaService = chatQuotaService;
+        this.tokenBudgetService = tokenBudgetService;
         this.approvalService = approvalService;
         this.agentRegistry = agentRegistry;
         this.flowRegistry = flowRegistry;
+        this.runtimeHealthService = runtimeHealthService;
     }
 
+    /** 组件健康：db/redis/skills/es 只回状态；核心依赖不可用整体 503，不再暴露地址。 */
     @GetMapping("/health")
-    public ApiResponse health() {
+    public ResponseEntity<ApiResponse> health() {
+        RuntimeHealthService.Report report = runtimeHealthService.snapshot();
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("status", "UP");
+        payload.put("status", report.status());
+        payload.put("components", report.components());
         payload.put("data_through_period", services.engine().dataThroughPeriod());
-        payload.put("database", services.database().url());
         payload.put("email_mode", "DRY_RUN");
         payload.put("chat_model", services.chat().modelId());
         String flowId = flowRegistry.activeFlowId();
@@ -123,7 +135,11 @@ public class PayrollWebController {
                         : configuredAgent.isBlank()
                                 ? "默认三段流水线"
                                 : agentRegistry.activeAgent().name());
-        return ApiResponse.ok(payload);
+        if (!report.down()) {
+            return ResponseEntity.ok(ApiResponse.ok(payload));
+        }
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new ApiResponse("ERROR", payload, "服务未就绪"));
     }
 
     @GetMapping("/employees")
@@ -274,6 +290,7 @@ public class PayrollWebController {
             @RequestBody(required = false) ChatRequest request, HttpServletRequest http) {
         String message = requireChatMessage(request);
         long userId = authService.currentUser(http).id();
+        tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
@@ -306,11 +323,16 @@ public class PayrollWebController {
             return emitter;
         }
         long userId = authService.currentUser(http).id();
+        tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
         try {
             chatStreamExecutor.execute(() -> streamChat(message, userId, channel));
+        } catch (RejectedExecutionException e) {
+            chatQuotaService.release(userId);
+            ChatStreamRejection.record(chatStreamExecutor, "executor");
+            throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
             throw e;

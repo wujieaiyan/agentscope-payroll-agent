@@ -17,6 +17,15 @@
 - 首次写入会把当前完整列表（含内置默认）持久化，之后内置默认不再参与回退
 - 配置内容为 `AgentDefinition` 的 camelCase JSON（该类用 `@JsonNaming` 覆盖了全局 SNAKE_CASE）
 
+### 存储来源开关（M5.1）
+
+- `payroll.definitions.source=nacos`（默认）：上述 Nacos 整文档行为不变。
+- `payroll.definitions.source=db`：定义落 `agent_definition` 表（Flyway V21 + H2 内联 DDL；
+  `id` 主键、`payload_json` 存单条定义、行级 `revision` 递增）。读取走数据库，失败返回 503、
+  不回退 Nacos；写入先提交数据库，再 best-effort 发布 `payroll-agents.json`（失败只 WARN，不回滚）。
+  管理接口与前端契约不变，仍按 revision 写前重读，不一致返回 409。
+- `payroll.definitions.import-from-nacos=true`：仅 db 模式且表为空时启动导入一次，重复执行不产生重复行。
+
 ```json
 [
   {
@@ -52,7 +61,7 @@
 | 未配置 / 已下架 / 已删除 | `NacosAgentRegistry.activeAgent()` 回退内置薪酬计算专家 |
 
 - `PayrollChatService` 每轮通过 `Supplier<AgentDefinition>` 读取配置；`Team.matches()` 比较 id/名称/描述/技能，变化时关闭旧实例并重建
-- 单智能体模式仍会注入 `COMMON_RULES`（金额必须来自工具）与 `SKILL_BOOT_RULE`（先加载技能）
+- 单智能体模式仍会注入 `COMMON_RULES`（金额必须来自工具）与 `SKILL_BOOT_RULE`（先加载技能）；提示词正文维护在 `payroll-agent/src/main/resources/prompts/*.md`，由 `PromptLibrary` 加载，文件缺失时启动失败
 - 聊天页 `/api/health` 返回 `chat_agent`，工具栏徽标展示当前核算智能体
 
 ## 后端结构

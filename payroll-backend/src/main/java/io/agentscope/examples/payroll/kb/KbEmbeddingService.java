@@ -10,6 +10,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,23 +31,40 @@ public class KbEmbeddingService {
 
     private static final Logger log = LoggerFactory.getLogger(KbEmbeddingService.class);
     private static final long AVAILABILITY_TTL_MS = 30_000;
+    /** 查询嵌入的独立熔断：连续失败 3 次后暂停 30s，与记忆召回的熔断互不影响。 */
+    private static final int QUERY_BREAKER_FAILURES = 3;
+    private static final long QUERY_BREAKER_OPEN_MS = 30_000L;
 
     private final ObjectMapper objectMapper;
     private final OllamaEmbeddingClient client;
     private final int dim;
+    private final long queryBudgetMs;
+    private final ExecutorService queryExecutor;
     private final AtomicLong lastCheck = new AtomicLong(0);
+    private final AtomicLong queryOpenUntil = new AtomicLong(0);
     private volatile boolean available;
+    private volatile int queryFailures;
 
     public KbEmbeddingService(
             ObjectMapper objectMapper,
             @Value("${payroll.kb.embedding-base-url:http://localhost:11434}") String baseUrl,
             @Value("${payroll.kb.embedding-model:nomic-embed-text}") String model,
-            @Value("${payroll.kb.embedding-dim:768}") int dim) {
+            @Value("${payroll.kb.embedding-dim:768}") int dim,
+            @Value("${payroll.kb.query-embedding-budget-ms:800}") long queryBudgetMs) {
         this.objectMapper = objectMapper;
         this.dim = Math.max(64, dim);
+        this.queryBudgetMs = Math.max(1L, queryBudgetMs);
         this.client =
                 new OllamaEmbeddingClient(
                         baseUrl, model, this.dim, Duration.ofSeconds(15));
+        this.queryExecutor =
+                Executors.newFixedThreadPool(
+                        2,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "kb-query-embedding");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
     }
 
     public record Embedding(List<float[]> vectors, String source, boolean ollama) {
@@ -64,6 +87,83 @@ public class KbEmbeddingService {
             vectors.add(hashVector(text));
         }
         return new Embedding(vectors, "HASH", false);
+    }
+
+    /**
+     * 入库嵌入：不做哈希降级。语义向量与 HASH 向量混存会污染检索，失败直接抛出由任务重试。
+     */
+    public Embedding embedStrict(List<String> texts) {
+        if (texts == null || texts.isEmpty()) {
+            return new Embedding(List.of(), "OLLAMA", true);
+        }
+        try {
+            return new Embedding(client.embedAll(texts), "OLLAMA", true);
+        } catch (RuntimeException e) {
+            markUnavailable();
+            log.warn("[知识库] 入库嵌入失败，任务将标记失败：{}", e.getMessage());
+            throw new IllegalStateException("嵌入服务不可用：" + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 查询嵌入：单次预算（默认 800ms）+ 独立熔断；超时取消底层请求并退化为哈希向量，
+     * 保证停 Ollama 时检索仍能在预算内返回。
+     */
+    public Embedding embedQuery(String text) {
+        if (text == null || text.isBlank()) {
+            return new Embedding(List.of(), "HASH", false);
+        }
+        if (System.currentTimeMillis() < queryOpenUntil.get()) {
+            return hashEmbedding(text);
+        }
+        if (!available()) {
+            return hashEmbedding(text);
+        }
+        Future<List<float[]>> future =
+                queryExecutor.submit(
+                        () -> client.embedAll(List.of(text), Duration.ofMillis(queryBudgetMs)));
+        try {
+            return new Embedding(future.get(queryBudgetMs, TimeUnit.MILLISECONDS), "OLLAMA", true);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            recordQueryFailure("超时", text);
+            return hashEmbedding(text);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            return hashEmbedding(text);
+        } catch (ExecutionException e) {
+            recordQueryFailure(rootMessage(e.getCause()), text);
+            return hashEmbedding(text);
+        }
+    }
+
+    private Embedding hashEmbedding(String text) {
+        return new Embedding(List.of(hashVector(text)), "HASH", false);
+    }
+
+    private void recordQueryFailure(String reason, String text) {
+        int failures = queryFailures + 1;
+        queryFailures = failures;
+        if (failures >= QUERY_BREAKER_FAILURES) {
+            queryOpenUntil.set(System.currentTimeMillis() + QUERY_BREAKER_OPEN_MS);
+            queryFailures = 0;
+            markUnavailable();
+        }
+        log.warn(
+                "[知识库] 查询嵌入失败，退化为哈希向量：原因={}，query=[{}]",
+                reason,
+                text.length() <= 80 ? text : text.substring(0, 80) + "…");
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current != null && current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current == null || current.getMessage() == null
+                ? "unknown"
+                : current.getMessage();
     }
 
     public boolean available() {

@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.FlowDefinition;
+import io.agentscope.examples.payroll.profile.UserProfileRecorder;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.KbRoutePlanner;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
@@ -19,17 +20,23 @@ import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.web.ChatSse;
+import io.agentscope.examples.payroll.web.ChatStreamRejection;
+import io.agentscope.examples.payroll.web.TooManyRequestsException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -51,6 +58,9 @@ import org.springframework.web.bind.annotation.RestController;
 public class InternalTurnController {
 
     private static final Logger log = LoggerFactory.getLogger(InternalTurnController.class);
+    private static final int RETRY_AFTER_SECONDS = 5;
+    /** 没有历史样本时按 CPU 推理一轮的保守值估算 ETA。 */
+    private static final long DEFAULT_TURN_MILLIS = 60_000L;
 
     private final ChatSessionManager manager;
     private final Executor chatStreamExecutor;
@@ -64,6 +74,8 @@ public class InternalTurnController {
     private final String token;
     private final String role;
     private final long maxSkewSeconds;
+    private final AtomicLong turnMillisTotal = new AtomicLong();
+    private final AtomicLong turnCount = new AtomicLong();
 
     public InternalTurnController(
             ChatSessionManager manager,
@@ -147,13 +159,28 @@ public class InternalTurnController {
                 request.turnId(),
                 request.sessionId(),
                 request.ownerNode());
-        chatStreamExecutor.execute(
-                () ->
-                        execute(
-                                turn.get(),
-                                request.message(),
-                                request.attachmentText(),
-                                request.cacheScope()));
+        emitQueued(turn.get());
+        try {
+            chatStreamExecutor.execute(
+                    () ->
+                            execute(
+                                    turn.get(),
+                                    request.message(),
+                                    request.attachmentText(),
+                                    request.cacheScope()));
+        } catch (RejectedExecutionException e) {
+            ChatStreamRejection.record(chatStreamExecutor, "runtime");
+            manager.failTurn(turn.get(), "执行队列已满");
+            manager.finishRemoteTurn(request.turnId());
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .header(HttpHeaders.RETRY_AFTER, String.valueOf(RETRY_AFTER_SECONDS))
+                    .body(
+                            Map.of(
+                                    "accepted", false,
+                                    "code", TooManyRequestsException.CODE_BUSY,
+                                    "retryAfterSeconds", RETRY_AFTER_SECONDS,
+                                    "message", "当前排队已满，请稍后重试"));
+        }
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(Map.of("accepted", true, "turn_id", request.turnId()));
     }
@@ -343,7 +370,56 @@ public class InternalTurnController {
                 Map.of(
                         "status", "UP",
                         "role", role,
-                        "model", io.agentscope.examples.payroll.agent.PayrollAgentFactory.modelId()));
+                        "model", io.agentscope.examples.payroll.agent.PayrollAgentFactory.modelId(),
+                        "epoch_millis", System.currentTimeMillis()));
+    }
+
+    /**
+     * 执行器已饱和时先写一条 {@code queued} 事件，让前端看到排队位置。
+     *
+     * <p>位置按当前队列长度 + 1 估算，ETA 按历史轮次平均时长推算，仅用于展示；
+     * 写事件失败不影响提交，丢一条提示比拒绝整轮更安全。
+     */
+    private void emitQueued(ChatSessionManager.TurnContext turn) {
+        int position = queuePosition();
+        if (position <= 0) {
+            return;
+        }
+        try {
+            manager.emit(
+                    turn,
+                    "queued",
+                    ChatSse.payload(
+                            "position", position,
+                            "etaSeconds", estimateEtaSeconds(position)));
+        } catch (RuntimeException e) {
+            log.debug("[轮次] 排队事件写入失败：turn={}，原因={}", turn.turnId(), e.getMessage());
+        }
+    }
+
+    /** 有空闲线程时返回 0（无需排队），否则返回预计的队列位次。 */
+    private int queuePosition() {
+        if (chatStreamExecutor instanceof ThreadPoolExecutor pool
+                && pool.getActiveCount() >= pool.getMaximumPoolSize()) {
+            return pool.getQueue().size() + 1;
+        }
+        return 0;
+    }
+
+    private int estimateEtaSeconds(int position) {
+        long count = turnCount.get();
+        long average =
+                count <= 0 ? DEFAULT_TURN_MILLIS : Math.max(1L, turnMillisTotal.get() / count);
+        long millis = average * Math.max(1, position);
+        return (int) Math.max(5L, Math.min(3_600L, (millis + 999L) / 1000L));
+    }
+
+    private void recordTurnDuration(long millis) {
+        if (millis <= 0) {
+            return;
+        }
+        turnMillisTotal.addAndGet(millis);
+        turnCount.incrementAndGet();
     }
 
     private void execute(
@@ -351,6 +427,7 @@ public class InternalTurnController {
             String message,
             String attachmentText,
             String cacheScope) {
+        long startedAt = System.nanoTime();
         AtomicBoolean finished = new AtomicBoolean(false);
         try {
             SemanticCacheContext.set(cacheScope);
@@ -363,7 +440,11 @@ public class InternalTurnController {
                                     turn,
                                     reply -> {
                                         try {
-                                            return manager.completeTurn(turn, reply);
+                                            Long saved = manager.completeTurn(turn, reply);
+                                            if (saved != null) {
+                                                UserProfileRecorder.schedule(turn.userId());
+                                            }
+                                            return saved;
                                         } finally {
                                             finished.set(true);
                                         }
@@ -379,6 +460,8 @@ public class InternalTurnController {
                 manager.releaseTurn(turn, "runtime 提前结束");
             }
             manager.finishRemoteTurn(turn.turnId());
+            // 只统计真正执行的时间，排队等待不计入平均轮次时长。
+            recordTurnDuration((System.nanoTime() - startedAt) / 1_000_000L);
         }
     }
 

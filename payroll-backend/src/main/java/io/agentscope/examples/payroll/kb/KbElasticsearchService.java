@@ -29,6 +29,7 @@ public class KbElasticsearchService {
     private static final Logger log = LoggerFactory.getLogger(KbElasticsearchService.class);
     private static final long AVAILABILITY_TTL_MS = 30_000;
     private static final Duration SEARCH_TIMEOUT = Duration.ofSeconds(5);
+    private static final int BULK_SHARD_BYTES = 5 * 1024 * 1024;
 
     private final ObjectMapper objectMapper;
     private final KbEmbeddingService embeddingService;
@@ -135,6 +136,7 @@ public class KbElasticsearchService {
         }
         ensureIndex();
         StringBuilder body = new StringBuilder();
+        int pendingBytes = 0;
         int count = 0;
         for (Chunk chunk : chunks) {
             if (chunk.level() == ChunkLevel.PARENT) {
@@ -158,13 +160,24 @@ public class KbElasticsearchService {
             source.put("documentExt", documentExt);
             source.put("vector", vector);
             try {
-                body.append("{\"index\":{\"_index\":\"")
-                        .append(index)
-                        .append("\",\"_id\":\"")
-                        .append(chunk.id())
-                        .append("\"}}\n")
-                        .append(objectMapper.writeValueAsString(source))
-                        .append('\n');
+                String action =
+                        "{\"index\":{\"_index\":\""
+                                + index
+                                + "\",\"_id\":\""
+                                + chunk.id()
+                                + "\"}}\n";
+                String document = objectMapper.writeValueAsString(source);
+                int bytes =
+                        action.getBytes(StandardCharsets.UTF_8).length
+                                + document.getBytes(StandardCharsets.UTF_8).length
+                                + 1;
+                if (pendingBytes > 0 && pendingBytes + bytes > BULK_SHARD_BYTES) {
+                    submitBulk(body);
+                    body.setLength(0);
+                    pendingBytes = 0;
+                }
+                body.append(action).append(document).append('\n');
+                pendingBytes += bytes;
                 count++;
             } catch (IOException e) {
                 throw new IllegalStateException("序列化索引文档失败：" + e.getMessage(), e);
@@ -173,8 +186,24 @@ public class KbElasticsearchService {
         if (count == 0) {
             return;
         }
+        submitBulk(body);
+        try {
+            Response refresh =
+                    request("POST", "/" + index + "/_refresh", null, Duration.ofSeconds(15));
+            if (refresh.status() / 100 != 2) {
+                log.warn(
+                        "[知识库] 刷新索引失败：status={}，body={}",
+                        refresh.status(),
+                        preview(refresh.body()));
+            }
+        } catch (RuntimeException e) {
+            log.warn("[知识库] 刷新索引失败：{}", e.getMessage());
+        }
+    }
+
+    private void submitBulk(CharSequence body) {
         Response response =
-                request("POST", "/_bulk?refresh=true", body.toString(), Duration.ofSeconds(15));
+                request("POST", "/_bulk?refresh=false", body.toString(), Duration.ofSeconds(15));
         if (response.status() / 100 != 2 || containsBulkErrors(response.body())) {
             throw new IllegalStateException(
                     "写入知识库索引失败：HTTP " + response.status() + " " + preview(response.body()));

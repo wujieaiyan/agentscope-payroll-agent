@@ -168,7 +168,7 @@ public class AuditController {
     private static String csv(List<AuditEntry> entries) {
         StringBuilder builder = new StringBuilder("\uFEFF");
         builder.append(
-                "时间,操作人,动作,资源类型,资源ID,结果,状态码,来源IP,说明,变更前,变更后,请求体,TraceId\r\n");
+                "时间,操作人,动作,资源类型,资源ID,结果,写入结果,状态码,来源IP,说明,配置revision,变更前,变更后,请求体,TraceId\r\n");
         for (AuditEntry entry : entries) {
             appendRow(
                     builder,
@@ -178,9 +178,11 @@ public class AuditController {
                     entry.resourceType(),
                     entry.resourceId(),
                     entry.result(),
+                    entry.writeResult(),
                     entry.statusCode(),
                     entry.ip(),
                     entry.message(),
+                    entry.revision(),
                     entry.beforeJson(),
                     entry.afterJson(),
                     entry.payloadJson(),

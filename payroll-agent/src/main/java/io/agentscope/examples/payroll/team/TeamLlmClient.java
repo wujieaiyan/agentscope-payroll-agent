@@ -4,9 +4,11 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.PromptLibrary;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,36 +16,52 @@ import org.slf4j.LoggerFactory;
  * 影子模式的轻量模型调用：无工具、单轮、10 秒超时，只接受 JSON。
  *
  * <p>意图与计划各占一次调用，失败不重试；调用方必须提供规则/确定性兜底。
+ *
+ * <p>页面切换轻量面连接后，这里按连接版本重建计划器，无需重启运行期。
  */
 public final class TeamLlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(TeamLlmClient.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final int PREVIEW_LIMIT = 600;
-    private static final String SYSTEM_PROMPT =
-            """
-            你是薪酬管理台团队编排的结构化决策器。
-            只输出一个合法 JSON 对象，不要 Markdown 代码围栏，不要解释，不要调用工具。
-            字段值必须来自用户消息中给出的枚举与候选列表，禁止编造 ID。
-            """;
+    private static final String SYSTEM_PROMPT = PromptLibrary.get("team-planner-system");
 
-    private final HarnessAgent agent;
+    private static final String AGENT_NAME = "PayrollTeamPlanner";
+
+    private volatile HarnessAgent agent;
+    private volatile String agentVersion;
+    private final Supplier<String> versionSupplier;
+    private final Supplier<HarnessAgent> agentSupplier;
     private final Object lock = new Object();
 
     public TeamLlmClient() {
-        this(PayrollAgentFactory.createUtilityAgent("PayrollTeamPlanner", SYSTEM_PROMPT, 1));
+        this(
+                PayrollAgentFactory::utilityVersionKey,
+                () -> PayrollAgentFactory.createUtilityAgent(AGENT_NAME, SYSTEM_PROMPT, 1));
+    }
+
+    /**
+     * 版本与构建器为空表示固定模型（测试或禁用场景），不参与热切换。
+     *
+     * <p>不在此处构建：Spring 的模型注册表与凭证服务由启动后的 {@code ApplicationRunner}
+     * 注入静态工厂，Bean 构造期解析会拿不到页面密钥。
+     */
+    TeamLlmClient(Supplier<String> versionSupplier, Supplier<HarnessAgent> agentSupplier) {
+        this.versionSupplier = versionSupplier;
+        this.agentSupplier = agentSupplier;
     }
 
     TeamLlmClient(HarnessAgent agent) {
+        this(null, null);
         this.agent = agent;
     }
 
     public static TeamLlmClient disabled() {
-        return new TeamLlmClient(null);
+        return new TeamLlmClient((HarnessAgent) null);
     }
 
     public boolean enabled() {
-        return agent != null;
+        return (versionSupplier != null && agentSupplier != null) || agent != null;
     }
 
     /**
@@ -71,15 +89,19 @@ public final class TeamLlmClient {
                         + (question == null ? "" : question)
                         + "\n\n只输出 JSON。";
         synchronized (lock) {
+            HarnessAgent active = activeAgent();
+            if (active == null) {
+                return null;
+            }
             RuntimeContext context =
                     RuntimeContext.builder()
                             .userId("team-shadow")
                             .sessionId("team-shadow:" + safeKey(sessionKey))
                             .build();
             try {
-                agent.clearContext(context);
+                active.clearContext(context);
                 Msg reply =
-                        agent.call(List.of(new UserMessage(prompt)), context).block(wait);
+                        active.call(List.of(new UserMessage(prompt)), context).block(wait);
                 if (reply == null) {
                     log.warn("[动态团队] 轻量模型返回空结果：session={}", sessionKey);
                     return null;
@@ -104,11 +126,43 @@ public final class TeamLlmClient {
                 return null;
             } finally {
                 try {
-                    agent.clearContext(context);
+                    active.clearContext(context);
                 } catch (RuntimeException e) {
                     log.debug("[动态团队] 清理轻量模型上下文失败", e);
                 }
             }
+        }
+    }
+
+    /** 轻量面连接版本变化时重建计划器；重建失败沿用旧实例，不中断本轮兜底。 */
+    private HarnessAgent activeAgent() {
+        if (versionSupplier == null || agentSupplier == null) {
+            return agent;
+        }
+        String version;
+        try {
+            version = versionSupplier.get();
+        } catch (RuntimeException e) {
+            log.warn("[动态团队] 读取轻量模型版本失败，沿用当前模型：{}", rootMessage(e));
+            return agent;
+        }
+        if (version == null || (agent != null && version.equals(agentVersion))) {
+            return agent;
+        }
+        try {
+            HarnessAgent rebuilt = agentSupplier.get();
+            boolean first = agentVersion == null;
+            agent = rebuilt;
+            agentVersion = version;
+            if (first) {
+                log.info("[动态团队] 轻量面模型已建立：版本={}", version);
+            } else {
+                log.info("[动态团队] 轻量面模型已随配置切换：版本={}", version);
+            }
+            return rebuilt;
+        } catch (RuntimeException e) {
+            log.warn("[动态团队] 轻量面模型重建失败，沿用当前模型：{}", rootMessage(e));
+            return agent;
         }
     }
 

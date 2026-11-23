@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -25,6 +26,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @SpringBootTest(
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Tag("integration")
 class AgentAdminWebTest {
 
     private static final Path OUTPUT_DIR = tempDir();
@@ -40,6 +42,8 @@ class AgentAdminWebTest {
         registry.add("payroll.db.password", () -> "");
         registry.add("payroll.output-dir", () -> OUTPUT_DIR.toString());
         registry.add("payroll.auth.enabled", () -> "true");
+        // 新建用户默认强制首改密，本类聚焦其他能力，关闭该开关；专项覆盖见 ForcedPasswordChangeWebTest。
+        registry.add("payroll.auth.force-password-change", () -> "false");
         registry.add("payroll.auth.admin-password", () -> ADMIN_PASSWORD);
     }
 
@@ -53,6 +57,9 @@ class AgentAdminWebTest {
         login(admin, "admin", ADMIN_PASSWORD);
 
         String agents = get(admin, "/api/admin/agents");
+        assertTrue(agents.contains("\"agents\":["), agents);
+        assertTrue(agents.contains("\"revision\":"), agents);
+        assertTrue(agents.contains("\"settingsRevision\":"), agents);
         assertTrue(agents.contains("\"payroll-calculator\""), agents);
         assertTrue(agents.contains("\"skillIds\""), agents);
         assertFalse(agents.contains("\"skill_ids\""), agents);
@@ -62,6 +69,8 @@ class AgentAdminWebTest {
         assertTrue(meta.contains("\"location\""), meta);
         assertTrue(meta.contains("\"tags\""), meta);
         assertTrue(meta.contains("\"activeAgentId\""), meta);
+        assertTrue(meta.contains("\"revision\":"), meta);
+        assertTrue(meta.contains("\"settingsRevision\":"), meta);
 
         String active = get(admin, "/api/admin/agents/active");
         assertTrue(active.contains("\"agentId\":\""), active);

@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.service.LoginRateLimiter;
 import io.agentscope.examples.payroll.support.AuditContext;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,12 +22,17 @@ public class AuthController {
     private final AuthService authService;
     private final AuditService auditService;
     private final LoginRateLimiter loginRateLimiter;
+    private final boolean profileEnabled;
 
     public AuthController(
-            AuthService authService, AuditService auditService, LoginRateLimiter loginRateLimiter) {
+            AuthService authService,
+            AuditService auditService,
+            LoginRateLimiter loginRateLimiter,
+            @Value("${payroll.memory.profile.enabled:false}") boolean profileEnabled) {
         this.authService = authService;
         this.auditService = auditService;
         this.loginRateLimiter = loginRateLimiter;
+        this.profileEnabled = profileEnabled;
     }
 
     @PostMapping("/login")
@@ -37,7 +43,7 @@ public class AuthController {
             AuditContext.setActor(system);
             auditService.record(
                     "auth.login", "user", "system", null, Map.of("auth_enabled", false));
-            return ApiResponse.ok(new AuthState(system, false));
+            return ApiResponse.ok(new AuthState(system, false, profileEnabled, false));
         }
         if (request == null || request.username() == null || request.password() == null) {
             AuditContext.setActorName("anonymous");
@@ -72,7 +78,9 @@ public class AuthController {
                 String.valueOf(user.id()),
                 null,
                 Map.of("username", user.username(), "role_code", user.roleCode()));
-        return ApiResponse.ok(new AuthState(user, true));
+        return ApiResponse.ok(
+                new AuthState(
+                        user, true, profileEnabled, authService.mustChangePassword(user.id())));
     }
 
     @PostMapping("/logout")
@@ -91,7 +99,12 @@ public class AuthController {
     @GetMapping("/me")
     public ApiResponse me(HttpServletRequest request) {
         AuthUser user = authService.currentUser(request);
-        return ApiResponse.ok(new AuthState(user, authService.enabled()));
+        return ApiResponse.ok(
+                new AuthState(
+                        user,
+                        authService.enabled(),
+                        profileEnabled,
+                        authService.passwordChangeRequired(request)));
     }
 
     @PostMapping("/password")
@@ -103,6 +116,7 @@ public class AuthController {
             throw new IllegalArgumentException("请提供原密码与新密码");
         }
         authService.changePassword(user.id(), request.oldPassword(), request.newPassword());
+        authService.markPasswordChanged(http);
         auditService.record(
                 "auth.password",
                 "user",
@@ -118,6 +132,10 @@ public class AuthController {
     public record PasswordChangeRequest(String oldPassword, String newPassword) {
     }
 
-    public record AuthState(AuthUser user, boolean authEnabled) {
+    public record AuthState(
+            AuthUser user,
+            boolean authEnabled,
+            boolean profileEnabled,
+            boolean mustChangePassword) {
     }
 }

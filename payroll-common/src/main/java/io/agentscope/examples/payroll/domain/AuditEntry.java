@@ -19,10 +19,17 @@ public record AuditEntry(
         String result,
         Integer statusCode,
         String message,
-        String traceId) {
+        String traceId,
+        String revision,
+        String writeResult) {
 
     public static final String SUCCESS = "SUCCESS";
     public static final String FAILURE = "FAILURE";
+
+    /** 条件写入结果，与请求成败的 result 分开：冲突和配置中心不可用都属于请求失败。 */
+    public static final String WRITE_OK = "OK";
+    public static final String WRITE_CONFLICT = "CONFLICT";
+    public static final String WRITE_UNAVAILABLE = "UNAVAILABLE";
 
     /** 新建待落库的日志，id 由数据库生成。 */
     public static AuditEntry pending(
@@ -39,7 +46,9 @@ public record AuditEntry(
             String result,
             Integer statusCode,
             String message,
-            String traceId) {
+            String traceId,
+            String revision,
+            String writeResult) {
         return new AuditEntry(
                 0L,
                 LocalDateTime.now(),
@@ -56,6 +65,8 @@ public record AuditEntry(
                 result,
                 statusCode,
                 message,
-                traceId);
+                traceId,
+                revision,
+                writeResult);
     }
 }

@@ -63,10 +63,21 @@ public final class DefaultActionExecutor implements ActionExecutor {
 
     @Override
     public Object execute(ActionProposal proposal, long userId) {
+        return execute(proposal, userId, Map.of());
+    }
+
+    @Override
+    public Object execute(
+            ActionProposal proposal, long userId, Map<String, Object> confirmData) {
         Map<String, Object> params = params(proposal.paramsJson());
         LocalAction local = localActions.get(proposal.toolName());
         if (local != null) {
-            return local.execute(params, userId);
+            if (confirmData == null || confirmData.isEmpty()) {
+                return local.execute(params, userId);
+            }
+            Map<String, Object> merged = new LinkedHashMap<>(params);
+            merged.put("answers", confirmData);
+            return local.execute(merged, userId);
         }
         return callMcp(proposal.toolName(), params);
     }

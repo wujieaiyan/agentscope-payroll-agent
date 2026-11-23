@@ -179,6 +179,8 @@ class AuditServiceTest {
                 AuditEntry.SUCCESS,
                 200,
                 null,
-                UUID.randomUUID().toString());
+                UUID.randomUUID().toString(),
+                null,
+                null);
     }
 }

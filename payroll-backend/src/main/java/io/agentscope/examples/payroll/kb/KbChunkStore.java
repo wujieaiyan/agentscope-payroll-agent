@@ -25,6 +25,12 @@ public class KbChunkStore {
                     + " content_hash, token_count, char_start, char_end, page_no, bbox, title_path,"
                     + " metadata, vector, vector_source, status, created_at FROM kb_chunk";
 
+    /** 不含 vector 的检索候选列：先按上限取元数据，再按需批量回取向量。 */
+    private static final String SELECT_META =
+            "SELECT chunk_id, series_id, document_id, parent_chunk_id, chunk_level, seq, content,"
+                    + " content_hash, token_count, char_start, char_end, page_no, bbox, title_path,"
+                    + " metadata, vector_source, status, created_at FROM kb_chunk";
+
     private final PayrollDatabase database;
 
     public KbChunkStore(PayrollDatabase database) {
@@ -64,6 +70,56 @@ public class KbChunkStore {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("查询分块失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 检索候选：不读 vector 列，按上限截断；向量在需要评分时再批量回取。 */
+    public List<Chunk> findActiveMetaBySeries(long seriesId, int limit) {
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                SELECT_META
+                                        + " WHERE series_id = ? AND status = 'ACTIVE' AND chunk_level <> 'PARENT'"
+                                        + " ORDER BY document_id, seq LIMIT ?")) {
+            statement.setLong(1, seriesId);
+            statement.setInt(2, Math.max(1, limit));
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Chunk> result = new ArrayList<>();
+                while (rs.next()) {
+                    result.add(mapMeta(rs));
+                }
+                return result;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询分块失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 批量回取向量文本，键为 chunk_id；缺失的键表示该分块没有向量。 */
+    public java.util.Map<Long, String> findVectorsByIds(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return java.util.Map.of();
+        }
+        String placeholders = String.join(",", ids.stream().map(id -> "?").toList());
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "SELECT chunk_id, vector FROM kb_chunk WHERE chunk_id IN ("
+                                        + placeholders
+                                        + ") AND vector IS NOT NULL")) {
+            int index = 1;
+            for (Long id : ids) {
+                statement.setLong(index++, id);
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                java.util.Map<Long, String> result = new java.util.HashMap<>();
+                while (rs.next()) {
+                    result.put(rs.getLong("chunk_id"), rs.getString("vector"));
+                }
+                return result;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询分块向量失败：" + e.getMessage(), e);
         }
     }
 
@@ -173,17 +229,28 @@ public class KbChunkStore {
         }
     }
 
-    public void updateVector(long chunkId, String vector, String vectorSource) {
+    /** 批量回写向量，一次往返完成一批更新。 */
+    public void updateVectorsBatch(
+            List<Long> chunkIds, List<String> vectors, String vectorSource) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return;
+        }
+        if (chunkIds.size() != vectors.size()) {
+            throw new IllegalArgumentException("向量回写参数数量不一致");
+        }
         try (Connection connection = database.connection();
                 PreparedStatement statement =
                         connection.prepareStatement(
                                 "UPDATE kb_chunk SET vector = ?, vector_source = ? WHERE chunk_id = ?")) {
-            statement.setString(1, vector);
-            statement.setString(2, vectorSource);
-            statement.setLong(3, chunkId);
-            statement.executeUpdate();
+            for (int i = 0; i < chunkIds.size(); i++) {
+                statement.setString(1, vectors.get(i));
+                statement.setString(2, vectorSource);
+                statement.setLong(3, chunkIds.get(i));
+                statement.addBatch();
+            }
+            statement.executeBatch();
         } catch (SQLException e) {
-            throw new IllegalStateException("更新分块向量失败：" + e.getMessage(), e);
+            throw new IllegalStateException("批量更新分块向量失败：" + e.getMessage(), e);
         }
     }
 
@@ -200,9 +267,10 @@ public class KbChunkStore {
         }
     }
 
-    public void insertBatch(List<Chunk> chunks) {
+    /** 批量插入并返回自增主键，顺序与入参一致，供父子分块在同一事务外补齐引用。 */
+    public List<Long> insertBatchReturningIds(List<Chunk> chunks) {
         if (chunks == null || chunks.isEmpty()) {
-            return;
+            return List.of();
         }
         String sql =
                 """
@@ -213,8 +281,10 @@ public class KbChunkStore {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         Timestamp now = Timestamp.from(Instant.now());
+        List<Long> ids = new ArrayList<>(chunks.size());
         try (Connection connection = database.connection();
-                PreparedStatement statement = connection.prepareStatement(sql)) {
+                PreparedStatement statement =
+                        connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             for (Chunk chunk : chunks) {
                 statement.setLong(1, chunk.seriesId());
                 statement.setLong(2, chunk.documentId());
@@ -237,13 +307,26 @@ public class KbChunkStore {
                 setString(statement, 15, chunk.vector());
                 statement.setString(16, chunk.vectorSource() == null ? "HASH" : chunk.vectorSource());
                 statement.setString(17, chunk.status() == null ? "ACTIVE" : chunk.status());
-                statement.setTimestamp(18, Timestamp.from(chunk.createdAt() == null ? now.toInstant() : chunk.createdAt()));
+                statement.setTimestamp(
+                        18,
+                        Timestamp.from(
+                                chunk.createdAt() == null ? now.toInstant() : chunk.createdAt()));
                 statement.addBatch();
             }
             statement.executeBatch();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                while (keys.next()) {
+                    ids.add(keys.getLong(1));
+                }
+            }
         } catch (SQLException e) {
-            throw new IllegalStateException("保存分块失败：" + e.getMessage(), e);
+            throw new IllegalStateException("批量保存分块失败：" + e.getMessage(), e);
         }
+        if (ids.size() != chunks.size()) {
+            throw new IllegalStateException(
+                    "批量保存分块返回的主键数量不一致：" + ids.size() + "/" + chunks.size());
+        }
+        return ids;
     }
 
     public long insert(Chunk chunk) {
@@ -309,6 +392,29 @@ public class KbChunkStore {
         } else {
             statement.setString(index, value);
         }
+    }
+
+    private Chunk mapMeta(ResultSet rs) throws SQLException {
+        return new Chunk(
+                rs.getLong("chunk_id"),
+                rs.getLong("series_id"),
+                rs.getLong("document_id"),
+                KbSeriesStore.longOrNull(rs, "parent_chunk_id"),
+                ChunkLevel.parse(rs.getString("chunk_level"), ChunkLevel.SINGLE),
+                rs.getInt("seq"),
+                rs.getString("content"),
+                rs.getString("content_hash"),
+                rs.getInt("token_count"),
+                KbSeriesStore.intOrNull(rs, "char_start"),
+                KbSeriesStore.intOrNull(rs, "char_end"),
+                KbSeriesStore.intOrNull(rs, "page_no"),
+                rs.getString("bbox"),
+                rs.getString("title_path"),
+                rs.getString("metadata"),
+                null,
+                rs.getString("vector_source"),
+                rs.getString("status"),
+                KbSeriesStore.instant(rs, "created_at"));
     }
 
     private Chunk map(ResultSet rs) throws SQLException {

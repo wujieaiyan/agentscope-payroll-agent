@@ -21,6 +21,7 @@ import io.agentscope.examples.payroll.kb.KbModels.Document;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -204,7 +205,8 @@ class KbRetrievalFusionTest {
                                 0.1,
                                 0.1,
                                 3,
-                                3),
+                                3,
+                                2000),
                         5);
 
         assertFalse(result.hits().isEmpty());
@@ -213,7 +215,17 @@ class KbRetrievalFusionTest {
 
     private static KbRetrievalSettings settings(int maxPerDocument) {
         return new KbRetrievalSettings(
-                true, "VECTOR,BM25,TITLE_PATH", 60, 1.0, 0.8, 0.5, 0.1, 0.1, maxPerDocument, 3);
+                true,
+                "VECTOR,BM25,TITLE_PATH",
+                60,
+                1.0,
+                0.8,
+                0.5,
+                0.1,
+                0.1,
+                maxPerDocument,
+                3,
+                2000);
     }
 
     private static RetrievalResult search(
@@ -233,9 +245,14 @@ class KbRetrievalFusionTest {
             int topK,
             float[] queryVector) {
         KbEmbeddingService embeddings =
-                new KbEmbeddingService(MAPPER, "http://127.0.0.1:1", "test", 64) {
+                new KbEmbeddingService(MAPPER, "http://127.0.0.1:1", "test", 64, 800) {
                     @Override
                     public Embedding embed(List<String> texts) {
+                        return new Embedding(List.of(queryVector), "HASH", false);
+                    }
+
+                    @Override
+                    public Embedding embedQuery(String text) {
                         return new Embedding(List.of(queryVector), "HASH", false);
                     }
 
@@ -294,6 +311,22 @@ class KbRetrievalFusionTest {
                     @Override
                     public List<Chunk> findActiveBySeries(long seriesId) {
                         return chunks;
+                    }
+
+                    @Override
+                    public List<Chunk> findActiveMetaBySeries(long seriesId, int limit) {
+                        return chunks.stream().limit(limit).toList();
+                    }
+
+                    @Override
+                    public Map<Long, String> findVectorsByIds(Collection<Long> ids) {
+                        Map<Long, String> vectors = new HashMap<>();
+                        for (Chunk chunk : chunks) {
+                            if (ids.contains(chunk.id()) && chunk.vector() != null) {
+                                vectors.put(chunk.id(), chunk.vector());
+                            }
+                        }
+                        return vectors;
                     }
 
                     @Override

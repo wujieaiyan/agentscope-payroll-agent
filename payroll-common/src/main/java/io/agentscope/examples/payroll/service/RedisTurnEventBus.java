@@ -1,5 +1,7 @@
 package io.agentscope.examples.payroll.service;
 
+import io.agentscope.examples.payroll.config.DeploymentMode;
+import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -24,8 +26,8 @@ import org.springframework.data.redis.core.script.RedisScript;
 /**
  * Redis Stream 事件总线：节点崩溃后任意 Web 节点可按 turnId 续流。
  *
- * <p>事件序号由 INCR 生成并用显式 ID 写入 Stream；Redis 故障时退化为进程内事件，
- * 仅影响续流能力，不影响最终消息落库。
+ * <p>事件序号由 INCR 生成并用显式 ID 写入 Stream。single 模式 Redis 故障时退化为进程内事件；
+ * cluster 模式事件读写直接失败（503），避免同一轮次的事件散落在不同节点的内存里。
  */
 public final class RedisTurnEventBus implements TurnEventBus {
 
@@ -97,6 +99,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
     private final Duration ttl;
     private final Duration cancelTtl;
     private final long maxLen;
+    private final DeploymentMode mode;
     private final InMemoryTurnEventBus fallback = new InMemoryTurnEventBus();
     private final Map<String, TurnSnapshotState> snapshots = new ConcurrentHashMap<>();
     private final CircuitBreaker breaker =
@@ -106,13 +109,26 @@ public final class RedisTurnEventBus implements TurnEventBus {
         this(redis, ttlHours, maxEvents, 30);
     }
 
-    /** cancelTtlMinutes 与轮次绝对上限对齐：取消标记只需覆盖本轮最长执行时间。 */
     public RedisTurnEventBus(
             StringRedisTemplate redis, int ttlHours, int maxEvents, int cancelTtlMinutes) {
+        this(redis, ttlHours, maxEvents, cancelTtlMinutes, DeploymentMode.SINGLE);
+    }
+
+    /** cancelTtlMinutes 与轮次绝对上限对齐：取消标记只需覆盖本轮最长执行时间。 */
+    public RedisTurnEventBus(
+            StringRedisTemplate redis,
+            int ttlHours,
+            int maxEvents,
+            int cancelTtlMinutes,
+            DeploymentMode mode) {
         this.redis = redis;
         this.ttl = Duration.ofHours(Math.max(1, ttlHours));
         this.cancelTtl = Duration.ofMinutes(Math.max(1, cancelTtlMinutes));
         this.maxLen = Math.max(100, maxEvents);
+        this.mode = mode == null ? DeploymentMode.SINGLE : mode;
+        if (this.mode.cluster() && redis == null) {
+            throw new IllegalStateException("cluster 模式必须配置 Redis：轮次事件总线不再回退进程内实现");
+        }
         warnOnEvictionPolicy();
     }
 
@@ -124,6 +140,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
     public long append(String turnId, String event, Map<String, Object> data) {
         int mode = acquire();
         if (mode < 0) {
+            requireFallback("写入轮次事件");
             return fallback.append(turnId, event, data);
         }
         try {
@@ -146,6 +163,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
             return seq;
         } catch (RuntimeException e) {
             degrade("写入轮次事件失败", e, mode);
+            requireFallback("写入轮次事件", e);
             return fallback.append(turnId, event, data);
         }
     }
@@ -154,6 +172,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
     public List<TurnEvent> read(String turnId, long afterSeq, int max) {
         int mode = acquire();
         if (mode < 0) {
+            requireFallback("读取轮次事件");
             return fallback.read(turnId, afterSeq, max);
         }
         try {
@@ -178,6 +197,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
             return events;
         } catch (RuntimeException e) {
             degrade("读取轮次事件失败", e, mode);
+            requireFallback("读取轮次事件", e);
             return fallback.read(turnId, afterSeq, max);
         }
     }
@@ -187,6 +207,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
             String turnId, long afterSeq, Duration block, int max) {
         int mode = acquire();
         if (mode < 0) {
+            requireFallback("阻塞读取轮次事件");
             return fallback.readBlocking(turnId, afterSeq, block, max);
         }
         Duration effective = block;
@@ -221,6 +242,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
                 return List.of();
             }
             degrade("阻塞读取轮次事件失败", e, mode);
+            requireFallback("阻塞读取轮次事件", e);
             return fallback.readBlocking(turnId, afterSeq, block, max);
         }
     }
@@ -229,6 +251,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
     public long earliestSeq(String turnId) {
         int mode = acquire();
         if (mode < 0) {
+            requireFallback("读取最早轮次事件");
             return fallback.earliestSeq(turnId);
         }
         try {
@@ -247,6 +270,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
             return seq;
         } catch (RuntimeException e) {
             degrade("读取最早轮次事件失败", e, mode);
+            requireFallback("读取最早轮次事件", e);
             return fallback.earliestSeq(turnId);
         }
     }
@@ -255,6 +279,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
     public TurnSnapshot snapshot(String turnId) {
         int mode = acquire();
         if (mode < 0) {
+            requireFallback("读取轮次快照");
             return fallback.snapshot(turnId);
         }
         String json;
@@ -263,6 +288,7 @@ public final class RedisTurnEventBus implements TurnEventBus {
             onSuccess(mode);
         } catch (RuntimeException e) {
             degrade("读取轮次快照失败", e, mode);
+            requireFallback("读取轮次快照", e);
             return fallback.snapshot(turnId);
         }
         if (json == null || json.isBlank()) {
@@ -292,7 +318,11 @@ public final class RedisTurnEventBus implements TurnEventBus {
                             JsonSupport.toJson(state.toSnapshot()),
                             ttl);
         } catch (RuntimeException e) {
-            degrade("写入轮次快照失败", e, mode);
+            // 快照只是续流加速：写入失败不回滚已成功的事件，也不触发熔断。
+            TurnMetrics.eventBusUnavailable();
+            LOG.log(
+                    System.Logger.Level.WARNING,
+                    "[轮次] 写入轮次快照失败（不影响事件流）：" + e.getMessage());
         }
         if (terminal) {
             snapshots.remove(turnId, state);
@@ -490,6 +520,24 @@ public final class RedisTurnEventBus implements TurnEventBus {
             TurnMetrics.degraded();
         }
         return mode;
+    }
+
+    /**
+     * single 模式允许回退进程内事件；cluster 模式抛出 503，由 readiness 摘流而不是各节点各写一份。
+     */
+    private void requireFallback(String action) {
+        requireFallback(action, null);
+    }
+
+    private void requireFallback(String action, RuntimeException cause) {
+        if (!mode.cluster()) {
+            return;
+        }
+        TurnMetrics.eventBusUnavailable();
+        String message = "轮次事件总线不可用（" + action + "），请稍后重试";
+        throw cause == null
+                ? new PayrollUnavailableException(message)
+                : new PayrollUnavailableException(message, cause);
     }
 
     private void onSuccess(int mode) {

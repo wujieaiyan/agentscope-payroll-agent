@@ -4,9 +4,16 @@ import { api } from '../../api/http';
 import { toast } from '../../stores/toast';
 
 const rows = ref([]);
+const revision = ref('');
+const settingsRevision = ref('');
 const meta = ref({ writable: false, location: '-' });
 const skillOptions = ref([]);
+const skillKeyword = ref('');
+const SKILL_CHIP_LIMIT = 60;
+const modelOptions = ref([]);
+const modelMeta = ref({ secretKeyAvailable: false, envCodingLocked: false });
 const active = ref({ agentId: '', name: '', configured: '', available: true });
+const actionConfirm = ref({ enabled: false, source: 'ENV' });
 const stats = ref({ window_days: 0, record_count: 0, feedback_count: 0, agents: [] });
 const keyword = ref('');
 const statusFilter = ref('');
@@ -39,24 +46,67 @@ function blank() {
     skillIds: [],
     visibility: 'PUBLIC',
     status: 'ONLINE',
+    inheritModel: true,
+    modelConnectionId: '',
+    modelName: '',
+    modelNumCtx: '',
+    modelNumPredict: '',
+    modelTemperature: '',
+    modelTimeoutSeconds: '',
   };
 }
+
+// 技能规模化后不再一次渲染全部条目：已选技能置顶，其余按关键字过滤后限量展示。
+const visibleSkillOptions = computed(() => {
+  const needle = skillKeyword.value.trim().toLowerCase();
+  const selected = new Set(form.skillIds || []);
+  const matched = skillOptions.value.filter((skill) => {
+    if (!needle) return true;
+    return [skill.id, skill.description]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(needle));
+  });
+  const pinned = matched.filter((skill) => selected.has(skill.id));
+  const rest = matched.filter((skill) => !selected.has(skill.id));
+  return [...pinned, ...rest].slice(0, SKILL_CHIP_LIMIT);
+});
+
+const hiddenSkillCount = computed(() => {
+  const shown = new Set(visibleSkillOptions.value.map((skill) => skill.id));
+  return skillOptions.value.filter((skill) => !shown.has(skill.id)).length;
+});
 
 async function load() {
   loading.value = true;
   try {
-    const [agents, metaValue, skills, activeValue, statsValue] = await Promise.all([
-      api('/api/admin/agents'),
-      api('/api/admin/agents/meta'),
-      api('/api/admin/agents/skills'),
-      api('/api/admin/agents/active'),
-      api('/api/admin/agent-stats'),
-    ]);
-    rows.value = agents || [];
+    const [agents, metaValue, skills, activeValue, statsValue, confirmValue, models] =
+      await Promise.all([
+        api('/api/admin/agents'),
+        api('/api/admin/agents/meta'),
+        api('/api/admin/agents/skills'),
+        api('/api/admin/agents/active'),
+        api('/api/admin/agent-stats'),
+        api('/api/admin/agents/action-confirm').catch(() => null),
+        api('/api/admin/model-connections').catch(() => null),
+      ]);
+    rows.value = (agents && agents.agents) || [];
+    revision.value = (agents && agents.revision) || (metaValue && metaValue.revision) || '';
+    settingsRevision.value =
+      (agents && agents.settingsRevision) ||
+      (metaValue && metaValue.settingsRevision) ||
+      '';
     meta.value = metaValue || meta.value;
     skillOptions.value = skills || [];
     active.value = activeValue || active.value;
     stats.value = statsValue || stats.value;
+    if (confirmValue) actionConfirm.value = confirmValue;
+    if (models) {
+      modelOptions.value = (models.connections || []).filter((item) => item.enabled);
+      modelMeta.value = {
+        secretKeyAvailable: Boolean(models.secretKeyAvailable),
+        envCodingLocked: Boolean(models.envCodingLocked),
+      };
+    }
   } catch (error) {
     toast(error.message, 'error');
   } finally {
@@ -66,25 +116,58 @@ async function load() {
 
 function createAgent() {
   editing.value = false;
+  skillKeyword.value = '';
   Object.assign(form, blank());
   showForm.value = true;
 }
 
 function editAgent(row) {
+  const model = row.model || {};
   editing.value = true;
+  skillKeyword.value = '';
   Object.assign(form, {
     ...blank(),
     ...row,
     tagsText: (row.tags || []).join(', '),
     skillIds: [...(row.skill_ids || row.skillIds || [])],
+    inheritModel: !model.connectionId,
+    modelConnectionId: model.connectionId || '',
+    modelName: model.model || '',
+    modelNumCtx: model.numCtx ?? '',
+    modelNumPredict: model.numPredict ?? '',
+    modelTemperature: model.temperature ?? '',
+    modelTimeoutSeconds: model.timeoutSeconds ?? '',
   });
   showForm.value = true;
+}
+
+function modelSummary(row) {
+  const model = row.model || {};
+  if (!model.connectionId) return '继承控制面默认';
+  const hit = modelOptions.value.find((item) => item.id === model.connectionId);
+  const name = hit ? hit.name : model.connectionId;
+  return model.model ? `${name} · ${model.model}` : name;
 }
 
 function toggleSkill(id) {
   const index = form.skillIds.indexOf(id);
   if (index >= 0) form.skillIds.splice(index, 1);
   else form.skillIds.push(id);
+}
+
+function withRevision(path, value) {
+  if (!value) return path;
+  const joiner = path.includes('?') ? '&' : '?';
+  return `${path}${joiner}revision=${encodeURIComponent(value)}`;
+}
+
+async function handleWriteError(error) {
+  if (error.status === 409) {
+    toast('配置已被他人修改，已同步最新数据，请确认后重新提交', 'error');
+    await load();
+    return;
+  }
+  toast(error.message, 'error');
 }
 
 async function save() {
@@ -103,51 +186,97 @@ async function save() {
       skillIds: form.skillIds,
       visibility: form.visibility,
       status: form.status,
+      model: form.inheritModel
+        ? null
+        : {
+            connectionId: form.modelConnectionId,
+            model: form.modelName.trim(),
+            numCtx: numberOrNull(form.modelNumCtx),
+            numPredict: numberOrNull(form.modelNumPredict),
+            temperature: numberOrNull(form.modelTemperature),
+            timeoutSeconds: numberOrNull(form.modelTimeoutSeconds),
+          },
     };
     if (editing.value) {
-      await api(`/api/admin/agents/${encodeURIComponent(body.id)}`, { method: 'PUT', body });
+      await api(
+        withRevision(
+          `/api/admin/agents/${encodeURIComponent(body.id)}?clearModel=${form.inheritModel}`,
+          revision.value
+        ),
+        { method: 'PUT', body }
+      );
     } else {
-      await api('/api/admin/agents', { method: 'POST', body });
+      await api(withRevision('/api/admin/agents', revision.value), { method: 'POST', body });
     }
     toast('智能体已保存', 'success');
     showForm.value = false;
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   } finally {
     saving.value = false;
   }
 }
 
+function numberOrNull(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 async function remove(row) {
   if (!window.confirm(`删除智能体「${row.name}」？正在被流程引用时请先解除引用。`)) return;
   try {
-    await api(`/api/admin/agents/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+    await api(withRevision(`/api/admin/agents/${encodeURIComponent(row.id)}`, revision.value), {
+      method: 'DELETE',
+    });
     toast('智能体已删除', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   }
 }
 
 async function activate(row) {
   if (!window.confirm(`将「${row.name}」设为全局核算智能体？会同时取消全局默认流程。`)) return;
   try {
-    await api(`/api/admin/agents/${encodeURIComponent(row.id)}/active`, { method: 'PUT' });
+    await api(
+      withRevision(`/api/admin/agents/${encodeURIComponent(row.id)}/active`, settingsRevision.value),
+      { method: 'PUT' }
+    );
     toast('已设为全局智能体', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
   }
 }
 
 async function clearActive() {
   try {
-    await api('/api/admin/agents/active', { method: 'DELETE' });
+    await api(withRevision('/api/admin/agents/active', settingsRevision.value), {
+      method: 'DELETE',
+    });
     toast('已取消全局智能体，对话回到内置流水线', 'success');
     await load();
   } catch (error) {
-    toast(error.message, 'error');
+    await handleWriteError(error);
+  }
+}
+
+async function toggleActionConfirm() {
+  if (!meta.value.writable) return;
+  const next = !actionConfirm.value.enabled;
+  try {
+    const updated = await api(
+      withRevision('/api/admin/agents/action-confirm', settingsRevision.value),
+      { method: 'PUT', body: { enabled: next } }
+    );
+    actionConfirm.value = { ...actionConfirm.value, ...(updated || {}), enabled: next };
+    await load();
+    toast(next ? '写操作确认已开启' : '写操作确认已关闭', 'success');
+  } catch (error) {
+    await handleWriteError(error);
   }
 }
 
@@ -220,6 +349,29 @@ onMounted(load);
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-title">
+        <h3>写操作确认</h3>
+        <small>开启后所有写工具在对话中先生成确认卡片，点击确认才执行</small>
+      </div>
+      <div class="toolbar">
+        <span class="badge" :class="actionConfirm.enabled ? 'green' : 'orange'">
+          {{ actionConfirm.enabled ? '已开启' : '已关闭' }}
+        </span>
+        <span class="hint">
+          生效来源：{{ actionConfirm.source === 'NACOS' ? '管理台（Nacos）' : '环境变量' }}
+        </span>
+        <span class="spacer"></span>
+        <button
+          class="ghost sm"
+          :disabled="!meta.writable"
+          @click="toggleActionConfirm"
+        >
+          {{ actionConfirm.enabled ? '关闭确认' : '开启确认' }}
+        </button>
+      </div>
+    </div>
+
     <p v-if="loading && !rows.length" class="hint">加载中…</p>
     <p v-else-if="!filtered.length" class="empty">没有符合条件的智能体</p>
     <div v-else class="agent-grid">
@@ -235,6 +387,7 @@ onMounted(load);
         <div class="agent-tags">
           <span v-for="tag in row.tags || []" :key="tag" class="tag">{{ tag }}</span>
           <span class="tag">技能 {{ skillCount(row) }}</span>
+          <span class="tag">模型 {{ modelSummary(row) }}</span>
         </div>
         <p class="agent-desc">{{ row.description || '（无描述）' }}</p>
         <div class="agent-card-foot">
@@ -346,10 +499,15 @@ onMounted(load);
             </label>
           </div>
           <div>
-            <div class="muted" style="margin-bottom: 6px">绑定技能</div>
+            <div class="muted" style="margin-bottom: 6px">绑定技能（已选 {{ form.skillIds.length }}）</div>
+            <input
+              v-model="skillKeyword"
+              placeholder="搜索技能 ID / 说明"
+              style="width: 260px; margin-bottom: 6px"
+            />
             <div class="toolbar">
               <button
-                v-for="skill in skillOptions"
+                v-for="skill in visibleSkillOptions"
                 :key="skill.id"
                 class="chip"
                 :class="{ 'badge blue': form.skillIds.includes(skill.id) }"
@@ -358,7 +516,76 @@ onMounted(load);
                 {{ skill.id }}
               </button>
               <span v-if="!skillOptions.length" class="muted">暂无可绑定技能</span>
+              <span v-else-if="hiddenSkillCount" class="muted">
+                还有 {{ hiddenSkillCount }} 个未展示，请输入关键字继续过滤
+              </span>
             </div>
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom: 6px">模型</div>
+            <div class="form-grid">
+              <label class="field span-2">
+                绑定方式
+                <select v-model="form.inheritModel">
+                  <option :value="true">继承控制面默认（全局默认 / 流程设置）</option>
+                  <option :value="false">指定模型连接</option>
+                </select>
+              </label>
+              <label v-if="!form.inheritModel" class="field span-2">
+                模型连接
+                <select v-model="form.modelConnectionId">
+                  <option value="">（沿用默认连接）</option>
+                  <option v-for="item in modelOptions" :key="item.id" :value="item.id">
+                    {{ item.name }}（{{ item.provider }} · {{ item.model }}）
+                  </option>
+                </select>
+              </label>
+              <template v-if="!form.inheritModel">
+                <label class="field">
+                  模型名覆盖
+                  <input v-model="form.modelName" placeholder="留空则沿用连接" />
+                </label>
+                <label class="field">
+                  上下文 numCtx
+                  <input v-model="form.modelNumCtx" type="number" min="1" placeholder="沿用连接" />
+                </label>
+                <label class="field">
+                  最大输出 numPredict
+                  <input
+                    v-model="form.modelNumPredict"
+                    type="number"
+                    min="1"
+                    placeholder="沿用连接"
+                  />
+                </label>
+                <label class="field">
+                  温度
+                  <input
+                    v-model="form.modelTemperature"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="2"
+                    placeholder="沿用连接"
+                  />
+                </label>
+                <label class="field">
+                  超时（秒）
+                  <input
+                    v-model="form.modelTimeoutSeconds"
+                    type="number"
+                    min="1"
+                    placeholder="沿用连接"
+                  />
+                </label>
+              </template>
+            </div>
+            <p class="hint" style="margin-top: 6px">
+              仅作用于对话 / 团队 / 流程（控制面）；编码面由环境变量锁定，不在此配置。留空的覆盖项继承连接默认值。
+            </p>
+            <p v-if="!modelOptions.length" class="hint">
+              还没有可用的模型连接，请先在「模型配置」中新增。
+            </p>
           </div>
         </div>
         <div class="modal-foot">

@@ -3,8 +3,10 @@ package io.agentscope.examples.payroll.chat;
 import io.agentscope.examples.payroll.db.ChatAttachmentStore;
 import io.agentscope.examples.payroll.domain.ChatAttachment;
 import io.agentscope.examples.payroll.domain.ChatAttachmentRef;
+import io.agentscope.examples.payroll.domain.ExtractionMeta;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.kb.KbParserService;
+import io.agentscope.examples.payroll.kb.ocr.OcrFailure;
 import io.agentscope.examples.payroll.service.AttachmentContext;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
@@ -25,6 +27,8 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -40,6 +44,7 @@ public class ChatAttachmentService {
     private final ChatAttachmentStore store;
     private final ChatSessionManager sessions;
     private final KbParserService parser;
+    private final AttachmentParseQueue parseQueue;
     private final AuditService audit;
     private final Path root;
     private final int maxFiles;
@@ -49,6 +54,7 @@ public class ChatAttachmentService {
             ChatAttachmentStore store,
             ChatSessionManager sessions,
             KbParserService parser,
+            AttachmentParseQueue parseQueue,
             AuditService audit,
             @Value("${payroll.chat.attachment.dir:./data/chat-uploads}") String dir,
             @Value("${payroll.chat.attachment.max-files:5}") int maxFiles,
@@ -56,6 +62,7 @@ public class ChatAttachmentService {
         this.store = store;
         this.sessions = sessions;
         this.parser = parser;
+        this.parseQueue = parseQueue;
         this.audit = audit;
         this.root = Path.of(dir).toAbsolutePath().normalize();
         this.maxFiles = Math.max(1, maxFiles);
@@ -90,6 +97,9 @@ public class ChatAttachmentService {
     public AttachmentPreview preview(long userId, long sessionId, long attachmentId) {
         sessions.session(userId, sessionId);
         ChatAttachment attachment = store.require(sessionId, attachmentId);
+        if (ChatAttachment.STATUS_PARSING.equals(attachment.status())) {
+            throw new PayrollException("附件正在解析，请稍候再预览");
+        }
         if (ChatAttachment.STATUS_FAILED.equals(attachment.status())) {
             throw new PayrollException(
                     attachment.error() == null ? "附件解析失败" : attachment.error());
@@ -122,11 +132,12 @@ public class ChatAttachmentService {
                 throw new PayrollException("附件「" + attachment.name() + "」已发送，请勿重复提交");
             }
             if (!ChatAttachment.STATUS_READY.equals(attachment.status())) {
+                String reason =
+                        ChatAttachment.STATUS_PARSING.equals(attachment.status())
+                                ? "解析中，请稍候再发送"
+                                : (attachment.error() == null ? "解析失败" : attachment.error());
                 throw new PayrollException(
-                        "附件「"
-                                + attachment.name()
-                                + "」尚未就绪："
-                                + (attachment.error() == null ? "解析失败" : attachment.error()));
+                        "附件「" + attachment.name() + "」尚未就绪：" + reason);
             }
             ids.add(attachment.id());
             sections.add(
@@ -239,25 +250,156 @@ public class ChatAttachmentService {
                 Files.copy(input, original, StandardCopyOption.REPLACE_EXISTING);
             }
             verifySignature(ext, original);
-            String text = normalizeText(parser.parseChatAttachment(original, ext));
-            Files.writeString(directory.resolve("text.txt"), text, StandardCharsets.UTF_8);
-            store.markReady(sessionId, saved.id(), text.length());
-            recordAudit(
-                    "chat.attachment.uploaded",
-                    saved.id(),
-                    Map.of("name", name, "ext", ext, "size", file.getSize(), "chars", text.length()));
-            log.info(
-                    "[附件] 已解析：sessionId={}，name={}，chars={}",
-                    sessionId,
-                    name,
-                    text.length());
         } catch (PayrollException e) {
             fail(sessionId, saved.id(), storageKey, e.getMessage());
+            return store.require(sessionId, saved.id()).toRef();
         } catch (IOException | RuntimeException e) {
             log.warn("[附件] 保存失败：sessionId={}，name={}，原因={}", sessionId, name, e.getMessage());
             fail(sessionId, saved.id(), storageKey, "附件保存失败，请重试");
+            return store.require(sessionId, saved.id()).toRef();
         }
+        recordAudit(
+                "chat.attachment.uploaded",
+                saved.id(),
+                Map.of("name", name, "ext", ext, "size", file.getSize()));
+        parseQueue.submit(
+                sessionId, saved.id(), () -> parsePending(sessionId, saved.id(), storageKey));
         return store.require(sessionId, saved.id()).toRef();
+    }
+
+    /** 重新识别：仅限未发送附件，原文件保留；解析失败也可重试。 */
+    public ChatAttachmentRef reparse(long userId, long sessionId, long attachmentId) {
+        sessions.session(userId, sessionId);
+        ChatAttachment attachment = store.require(sessionId, attachmentId);
+        if (attachment.messageId() > 0) {
+            throw new PayrollException("附件已随消息发送，不能重新识别");
+        }
+        if (attachment.userId() != userId) {
+            throw new PayrollException("附件不存在或无权访问");
+        }
+        Path original =
+                resolveStorage(attachment.storageKey()).resolve("original." + attachment.ext());
+        if (!Files.isRegularFile(original)) {
+            throw new PayrollException("附件原文件已不存在，请重新上传");
+        }
+        store.markParsing(sessionId, attachmentId);
+        parseQueue.submit(
+                sessionId,
+                attachmentId,
+                () -> parsePending(sessionId, attachmentId, attachment.storageKey()));
+        audit.record(
+                "chat.attachment.reparsed",
+                "chat_attachment",
+                Long.toString(attachmentId),
+                Map.of("name", attachment.name()),
+                null);
+        return store.require(sessionId, attachmentId).toRef();
+    }
+
+    /** 异步解析主体：失败保留原文件与溯源，状态由存储层统一落库。 */
+    private void parsePending(long sessionId, long attachmentId, String storageKey) {
+        ChatAttachment attachment = store.find(sessionId, attachmentId).orElse(null);
+        if (attachment == null) {
+            return;
+        }
+        Path directory = resolveStorage(storageKey);
+        Path original = directory.resolve("original." + attachment.ext());
+        try {
+            store.updateProgress(sessionId, attachmentId, 10);
+            KbParserService.ChatExtraction extraction =
+                    parser.parseChatAttachment(original, attachment.ext());
+            String text = normalizeText(extraction.text());
+            Files.writeString(directory.resolve("text.txt"), text, StandardCharsets.UTF_8);
+            store.markReady(
+                    sessionId,
+                    attachmentId,
+                    text.length(),
+                    withChars(extraction.meta(), text.length()));
+            recordAudit(
+                    "chat.attachment.parsed",
+                    attachmentId,
+                    Map.of(
+                            "name",
+                            attachment.name(),
+                            "ext",
+                            attachment.ext(),
+                            "chars",
+                            text.length(),
+                            "engine",
+                            extraction.meta() == null
+                                    ? "unknown"
+                                    : String.valueOf(extraction.meta().engine())));
+            log.info(
+                    "[附件] 已解析：sessionId={}，name={}，chars={}，engine={}",
+                    sessionId,
+                    attachment.name(),
+                    text.length(),
+                    extraction.meta() == null ? "unknown" : extraction.meta().engine());
+        } catch (OcrFailure e) {
+            log.warn("[附件] OCR 失败：attachmentId={}，原因={}", attachmentId, e.getMessage());
+            store.markFailed(
+                    sessionId, attachmentId, e.getMessage(), ExtractionMeta.failure(
+                            e.getMessage(), e.attempts()));
+        } catch (PayrollException e) {
+            store.markFailed(sessionId, attachmentId, e.getMessage());
+        } catch (IOException | RuntimeException e) {
+            log.warn(
+                    "[附件] 解析失败：attachmentId={}，原因={}", attachmentId, e.getMessage());
+            store.markFailed(sessionId, attachmentId, "附件解析失败：" + e.getMessage());
+        }
+    }
+
+    /** 启动恢复：进程重启或崩溃后把遗留的 PARSING 附件重新入队。 */
+    @EventListener(ApplicationReadyEvent.class)
+    public void recoverParsingAttachments() {
+        List<ChatAttachment> parsing =
+                store.findByStatus(ChatAttachment.STATUS_PARSING, 500);
+        int recovered = 0;
+        for (ChatAttachment attachment : parsing) {
+            if (attachment.messageId() > 0) {
+                continue;
+            }
+            Path original =
+                    resolveStorage(attachment.storageKey())
+                            .resolve("original." + attachment.ext());
+            if (!Files.isRegularFile(original)) {
+                store.markFailed(attachment.sessionId(), attachment.id(), "附件原文件已不存在，请重新上传");
+                continue;
+            }
+            parseQueue.submit(
+                    attachment.sessionId(),
+                    attachment.id(),
+                    () ->
+                            parsePending(
+                                    attachment.sessionId(),
+                                    attachment.id(),
+                                    attachment.storageKey()));
+            recovered++;
+        }
+        if (recovered > 0) {
+            log.info("[附件] 启动恢复 {} 个解析中的附件", recovered);
+        }
+    }
+
+    private static ExtractionMeta withChars(ExtractionMeta meta, int chars) {
+        if (meta == null) {
+            return null;
+        }
+        return new ExtractionMeta(
+                meta.engine(),
+                meta.model(),
+                meta.version(),
+                meta.languages(),
+                meta.psm(),
+                meta.confidence(),
+                meta.latencyMs(),
+                meta.sourceSha256(),
+                chars,
+                meta.words(),
+                meta.lowConfidenceWords(),
+                meta.gatePassed(),
+                meta.gateDetail(),
+                meta.attempts());
     }
 
     private void fail(long sessionId, long attachmentId, String storageKey, String message) {

@@ -1,0 +1,2 @@
+Constructor <io.agentscope.examples.payroll.team.TeamLlmClient.<init>()> calls method <io.agentscope.examples.payroll.agent.PayrollAgentFactory.createUtilityAgent(java.lang.String, java.lang.String, int)> in (TeamLlmClient.java:44)
+Constructor <io.agentscope.examples.payroll.team.TeamLlmClient.<init>()> references method <io.agentscope.examples.payroll.agent.PayrollAgentFactory.utilityVersionKey()> in (TeamLlmClient.java:42)

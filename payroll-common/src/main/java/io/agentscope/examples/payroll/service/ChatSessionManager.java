@@ -50,6 +50,7 @@ public final class ChatSessionManager implements AutoCloseable {
     private static final int DEFAULT_IDLE_MINUTES = 60;
     private static final int DEFAULT_TURN_DEADLINE_MINUTES = 30;
     private static final int DEFAULT_PROGRESS_TIMEOUT_SECONDS = 300;
+    private static final int DEFAULT_EVENT_POLLER_THREADS = 4;
     /** 单事件负载上限：超限事件会截断文本增量，避免撑爆 Stream 与 SSE 连接。 */
     private static final int MAX_EVENT_BYTES = 64 * 1024;
 
@@ -74,7 +75,10 @@ public final class ChatSessionManager implements AutoCloseable {
     private final Set<Long> busy = ConcurrentHashMap.newKeySet();
     private final Set<String> remoteExecuting = ConcurrentHashMap.newKeySet();
     private final Map<String, Heartbeat> executing = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService maintenance;
+    private final ScheduledExecutorService heartbeatScheduler;
+    private final ScheduledExecutorService scanScheduler;
+    private final ScheduledExecutorService cleanupScheduler;
+    private final int turnRetentionDays;
     private final long staleMillis;
     private final Duration turnDeadline;
     private final long progressTimeoutMillis;
@@ -232,7 +236,10 @@ public final class ChatSessionManager implements AutoCloseable {
                 nodeId,
                 heartbeatSeconds,
                 DEFAULT_TURN_DEADLINE_MINUTES,
-                DEFAULT_PROGRESS_TIMEOUT_SECONDS);
+                DEFAULT_PROGRESS_TIMEOUT_SECONDS,
+                // 保留时长由部署配置显式给出，简化构造器默认不清理。
+                0,
+                0);
     }
 
     public ChatSessionManager(
@@ -251,7 +258,51 @@ public final class ChatSessionManager implements AutoCloseable {
             String nodeId,
             int heartbeatSeconds,
             int turnDeadlineMinutes,
-            int progressTimeoutSeconds) {
+            int progressTimeoutSeconds,
+            int turnRetentionDays,
+            int turnCleanupIntervalMinutes) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                maxCachedChats,
+                cacheIdleMinutes,
+                audit,
+                turnStore,
+                leases,
+                events,
+                nodeId,
+                heartbeatSeconds,
+                turnDeadlineMinutes,
+                progressTimeoutSeconds,
+                turnRetentionDays,
+                turnCleanupIntervalMinutes,
+                DEFAULT_EVENT_POLLER_THREADS);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowEvaluator shadow,
+            ActiveTeamCoordinator activeTeams,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit,
+            H2ChatTurnStore turnStore,
+            TurnLeaseService leases,
+            TurnEventBus events,
+            String nodeId,
+            int heartbeatSeconds,
+            int turnDeadlineMinutes,
+            int progressTimeoutSeconds,
+            int turnRetentionDays,
+            int turnCleanupIntervalMinutes,
+            int eventPollerThreads) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
@@ -267,27 +318,44 @@ public final class ChatSessionManager implements AutoCloseable {
         this.turnStore = turnStore;
         this.leases = leases == null ? TurnLeaseService.disabled() : leases;
         this.events = events == null ? new InMemoryTurnEventBus() : events;
-        this.fanout = new TurnEventFanout(this.events);
+        this.fanout = new TurnEventFanout(this.events, 60_000L, eventPollerThreads);
         this.nodeId = nodeId == null || nodeId.isBlank() ? "node" : nodeId;
         long heartbeatMillis = Math.max(1L, heartbeatSeconds) * 1000L;
         this.staleMillis = Math.max(30_000L, heartbeatMillis * 3L);
         this.turnDeadline = Duration.ofMinutes(Math.max(1, turnDeadlineMinutes));
         this.progressTimeoutMillis =
                 Math.max(30_000L, Math.max(1, progressTimeoutSeconds) * 1000L);
-        this.maintenance =
-                Executors.newSingleThreadScheduledExecutor(
-                        runnable -> {
-                            Thread thread = new Thread(runnable, "turn-maintenance");
-                            thread.setDaemon(true);
-                            return thread;
-                        });
-        this.maintenance.scheduleWithFixedDelay(
+        this.turnRetentionDays = Math.max(0, turnRetentionDays);
+        this.heartbeatScheduler = scheduler("turn-heartbeat");
+        this.scanScheduler = scheduler("turn-stale-scan");
+        this.heartbeatScheduler.scheduleWithFixedDelay(
                 this::heartbeatExecuting,
                 heartbeatMillis,
                 heartbeatMillis,
                 TimeUnit.MILLISECONDS);
-        this.maintenance.scheduleWithFixedDelay(
+        this.scanScheduler.scheduleWithFixedDelay(
                 this::scanStaleTurns, 60_000L, 60_000L, TimeUnit.MILLISECONDS);
+        long cleanupMillis = Math.max(0L, turnCleanupIntervalMinutes) * 60_000L;
+        if (this.turnRetentionDays > 0 && cleanupMillis > 0) {
+            this.cleanupScheduler = scheduler("turn-cleanup");
+            this.cleanupScheduler.scheduleWithFixedDelay(
+                    this::cleanupExpiredTurns,
+                    Math.min(cleanupMillis, 5 * 60_000L),
+                    cleanupMillis,
+                    TimeUnit.MILLISECONDS);
+        } else {
+            this.cleanupScheduler = null;
+        }
+    }
+
+    /** 心跳、失联扫描、过期清理互不阻塞：任一任务卡住都不得拖慢其余调度。 */
+    private static ScheduledExecutorService scheduler(String name) {
+        return Executors.newSingleThreadScheduledExecutor(
+                runnable -> {
+                    Thread thread = new Thread(runnable, name);
+                    thread.setDaemon(true);
+                    return thread;
+                });
     }
 
     public List<ChatSession> sessions(long userId) {
@@ -849,6 +917,21 @@ public final class ChatSessionManager implements AutoCloseable {
         return leases.alive(sessionId);
     }
 
+    /**
+     * 判活契约：DB 心跳在 staleMillis 内说明执行端仍存活。
+     *
+     * <p>Redis 事件缺失或租约查询失败时，不能据此判定轮次死亡；以 runtime 每 10s 写入的
+     * {@code chat_turns.heartbeat_at} 为准，只有心跳也过期才允许 expire。
+     */
+    public boolean heartbeatFresh(ChatTurn turn) {
+        LocalDateTime beat = turn == null ? null : turn.heartbeatAt();
+        if (beat == null) {
+            return false;
+        }
+        long at = beat.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        return System.currentTimeMillis() - at <= staleMillis;
+    }
+
     /** 读取轮次：用于续流前确认归属与状态。 */
     public ChatTurn turn(long userId, long sessionId, String turnId) {
         store.requireOwned(sessionId, userId);
@@ -1092,6 +1175,23 @@ public final class ChatSessionManager implements AutoCloseable {
         log.warn("[轮次] 看门狗终止轮次：turnId={}，原因={}", turnId, reason);
     }
 
+    /** 按保留天数清理历史轮次；DELETE 幂等，重启补跑不会产生额外副作用。 */
+    public int cleanupExpiredTurns() {
+        if (turnStore == null || turnRetentionDays <= 0) {
+            return 0;
+        }
+        try {
+            int deleted = turnStore.cleanup(turnRetentionDays);
+            if (deleted > 0) {
+                log.info("[轮次] 清理历史轮次 {} 条（保留 {} 天）", deleted, turnRetentionDays);
+            }
+            return deleted;
+        } catch (RuntimeException e) {
+            log.warn("[轮次] 清理历史轮次失败：{}", e.getMessage());
+            return 0;
+        }
+    }
+
     private void scanStaleTurns() {
         try {
             expireStaleTurns(Duration.ofMillis(staleMillis), "心跳超时且租约缺失");
@@ -1328,7 +1428,11 @@ public final class ChatSessionManager implements AutoCloseable {
 
     @Override
     public void close() {
-        maintenance.shutdownNow();
+        heartbeatScheduler.shutdownNow();
+        scanScheduler.shutdownNow();
+        if (cleanupScheduler != null) {
+            cleanupScheduler.shutdownNow();
+        }
         fanout.close();
         chats.keySet().forEach(this::closeChat);
         busy.clear();

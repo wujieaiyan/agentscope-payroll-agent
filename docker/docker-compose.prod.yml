@@ -1,0 +1,64 @@
+# prod 覆盖示例：在演示 compose 之上切换到唯一生产形态（prod profile）。
+# 不改变默认演示档，必须显式叠加本文件：
+#   export PAYROLL_SECRET_KEY=$(openssl rand -base64 32)
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d --build
+# 覆盖内容：
+#   - SPRING_PROFILES_ACTIVE=prod（profile group 自动带 mysql,redis），deployment.mode=cluster 由 application-prod.yml 固定。
+#   - 新增单节点 Elasticsearch，长记忆与知识库索引改为容器内 ES，不再走 HASH 降级。
+#   - PAYROLL_SECRET_KEY 必填（凭证加密主密钥）；缺失时 compose 直接报错，不启动半配置实例。
+#   - Nacos 沿用基础 compose 的 PAYROLL_NACOS_SERVER（默认宿主机 8848），TopologyGuard 要求其非空。
+# 只做本地/单机生产验证；CI 不运行 prod 容器，见 docs/deployment-matrix.md。
+
+name: payroll-multinode
+
+x-prod-env: &prod-env
+  SPRING_PROFILES_ACTIVE: prod
+  PAYROLL_DEPLOYMENT_MODE: cluster
+  PAYROLL_KB_ES_ENABLED: "true"
+  PAYROLL_KB_ES_URL: http://elasticsearch:9200
+  PAYROLL_MEMORY_ENABLED: "true"
+  PAYROLL_MEMORY_ES_URL: http://elasticsearch:9200
+  MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED: "true"
+  PAYROLL_SECRET_KEY: "${PAYROLL_SECRET_KEY:?prod 必须设置 PAYROLL_SECRET_KEY（Base64 的 32 字节 AES 主密钥）}"
+
+x-prod-app: &prod-app
+  environment:
+    <<: *prod-env
+  depends_on:
+    elasticsearch:
+      condition: service_healthy
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.28
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      TZ: Asia/Shanghai
+    expose:
+      - "9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  runtime-1:
+    <<: *prod-app
+
+  runtime-2:
+    <<: *prod-app
+
+  web-1:
+    <<: *prod-app
+
+  web-2:
+    <<: *prod-app
+
+volumes:
+  es-data:

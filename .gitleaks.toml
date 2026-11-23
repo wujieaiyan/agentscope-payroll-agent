@@ -1,0 +1,15 @@
+# 沿用默认规则，只放行单测里刻意构造的合成密钥（AES 测试向量、secret 扫描器样例）。
+# 其余位置仍按默认规则扫描。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "单测夹具中的占位密钥，不是真实凭据"
+regexes = [
+  '''0123456789abcdef0123456789abcdef''',
+  '''AKIAABCDEFGHIJKLMNOP''',
+]
+# 该用例的 diff 夹具整份都是假密钥（AWS/GitHub/Slack/OpenAI/私钥），逐条放行会随夹具演进漏项。
+paths = [
+  '''payroll-tests/src/test/java/io/agentscope/examples/payroll/devteam/DevSecretScannerTest\.java''',
+]

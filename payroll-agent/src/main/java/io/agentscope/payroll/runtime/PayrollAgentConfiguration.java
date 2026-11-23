@@ -1,5 +1,6 @@
 package io.agentscope.payroll.runtime;
 
+import io.agentscope.examples.payroll.agent.DevLlmTaskRunner;
 import io.agentscope.examples.payroll.agent.KbRoutingPolicy;
 import io.agentscope.examples.payroll.agent.McpServerConfig;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
@@ -9,30 +10,59 @@ import io.agentscope.examples.payroll.agent.PayrollRouteMode;
 import io.agentscope.examples.payroll.agent.SemanticRouteClassifier;
 import io.agentscope.examples.payroll.agent.SemanticRouteSettings;
 import io.agentscope.examples.payroll.agent.ToolSafety;
+import io.agentscope.examples.payroll.db.DevArtifactStore;
+import io.agentscope.examples.payroll.db.DevTaskStore;
 import io.agentscope.examples.payroll.db.H2AgentTeamStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
+import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.devteam.DevBuildRunner;
+import io.agentscope.examples.payroll.devteam.DevDockerBuildRunner;
+import io.agentscope.examples.payroll.devteam.DevPathPolicy;
+import io.agentscope.examples.payroll.devteam.DevRunnerSettings;
+import io.agentscope.examples.payroll.devteam.DevTaskBoard;
+import io.agentscope.examples.payroll.devteam.DevTaskExecutor;
+import io.agentscope.examples.payroll.devteam.DevTaskRunner;
+import io.agentscope.examples.payroll.devteam.DevTeamSettings;
+import io.agentscope.examples.payroll.devteam.ProcessCommandLauncher;
 import io.agentscope.examples.payroll.memory.AnswerCache;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.model.ModelOutboundPolicy;
+import io.agentscope.examples.payroll.profile.UserProfileExtractor;
+import io.agentscope.examples.payroll.profile.UserProfileModelClient;
+import io.agentscope.examples.payroll.profile.UserProfileRecorder;
+import io.agentscope.examples.payroll.profile.UserProfileService;
+import io.agentscope.examples.payroll.profile.UserProfileStore;
 import io.agentscope.examples.payroll.router.AgentRouter;
 import io.agentscope.examples.payroll.router.PayrollRouteAdvisor;
 import io.agentscope.examples.payroll.service.AgentStatsService;
 import io.agentscope.examples.payroll.service.AuditService;
+import io.agentscope.examples.payroll.service.KbChatSettings;
+import io.agentscope.examples.payroll.service.KbContextPrefetcher;
+import io.agentscope.examples.payroll.service.KbSkillClient;
+import io.agentscope.examples.payroll.service.KbSkillGateway;
 import io.agentscope.examples.payroll.service.PayrollChatFactory;
+import io.agentscope.examples.payroll.service.ModelCredentialService;
 import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
+import io.agentscope.examples.payroll.skill.ModelConnectionRegistry;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.team.ActiveTeamService;
 import io.agentscope.examples.payroll.team.ShadowTeamService;
 import io.agentscope.examples.payroll.team.TeamLlmClient;
 import io.agentscope.examples.payroll.team.TeamSettings;
+import io.agentscope.examples.payroll.usage.LlmUsageRecorder;
+import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import io.agentscope.examples.payroll.web.NodeRoleFilter;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -67,6 +97,33 @@ public class PayrollAgentConfiguration {
             config.readOnlyTools().forEach(tool -> mcpReadOnly.put(tool, true));
         }
         return new ToolSafety(properties.safetyOverrides(), trustReadOnlyHints, mcpReadOnly);
+    }
+
+    /** 模型连接注册表与凭证服务注入静态工厂；本节点所有会话共用同一解析结果。 */
+    @Bean
+    public ApplicationRunner modelFactoryConfigurer(
+            ModelConnectionRegistry registry,
+            ModelCredentialService credentials,
+            ModelOutboundPolicy policy) {
+        return args -> {
+            PayrollAgentFactory.configureModels(registry, credentials, policy);
+            log.info(
+                    "[Model] 模型注册表已就绪：{}，页面密钥={}",
+                    registry.location(),
+                    credentials.secretKeyAvailable() ? "可用" : "不可用");
+        };
+    }
+
+    /**
+     * 用量记录器接线：本节点所有模型调用经 {@code onModelCall} 中间件落 {@code llm_usage}，
+     * 异步写入避免 JDBC 阻塞模型流；Web 端读取同一张表出看板。
+     */
+    @Bean
+    public ApplicationRunner llmUsageRecorderConfigurer(LlmUsageStore usageStore) {
+        return args -> {
+            LlmUsageRecorder.configure(usageStore);
+            log.info("[用量看板] 模型调用用量记录已启用：异步写入");
+        };
     }
 
     /** 强制改判会影响确认行为，启动时逐条写审计，便于事后核对是谁放行的。 */
@@ -118,9 +175,255 @@ public class PayrollAgentConfiguration {
         }
     }
 
+    /**
+     * 开发域两维权限（A1）：启动即校验组合，非法配置直接启动失败；
+     * 编码模型不可用时 workspace-write 降级为 read-only，并在审计里留下原因。
+     */
+    @Bean
+    public DevTeamSettings devTeamSettings(
+            @Value("${payroll.dev-team.mode:read-only}") String mode,
+            @Value("${payroll.dev-team.approval:}") String approval) {
+        DevTeamSettings settings = DevTeamSettings.fromEnvironment(mode, approval);
+        log.info(
+                "[开发域] 模式={}（配置={}），审批={}，写权限={}，编码模型={}，上下文={}",
+                settings.mode().wireName(),
+                settings.requestedMode().wireName(),
+                settings.approval().wireName(),
+                settings.writeEnabled() ? "已启用" : "关闭",
+                settings.model().configured() ? settings.model().modelId() : "未配置",
+                settings.model().numCtx());
+        if (settings.degraded()) {
+            log.warn("[开发域] {}；写模式已关闭", settings.disabledReason());
+        }
+        return settings;
+    }
+
+    @Bean
+    public ApplicationRunner devTeamAuditRunner(
+            AuditService auditService, DevTeamSettings settings) {
+        return args -> {
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("mode", settings.mode().wireName());
+            snapshot.put("requested_mode", settings.requestedMode().wireName());
+            snapshot.put("approval", settings.approval().wireName());
+            snapshot.put("write_enabled", settings.writeEnabled());
+            snapshot.put("model", settings.model().modelId());
+            snapshot.put("num_ctx", settings.model().numCtx());
+            snapshot.put("degraded_reason", settings.disabledReason());
+            try {
+                auditService.record("devteam.config", "dev_team", "startup", null, snapshot);
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录启动配置审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    @Bean
+    public DevTaskStore devTaskStore(PayrollDatabase database) {
+        return new DevTaskStore(database);
+    }
+
+    @Bean
+    public DevArtifactStore devArtifactStore(PayrollDatabase database) {
+        return new DevArtifactStore(database);
+    }
+
+    /** 任务面板：状态机与依赖调度都落库，后端与执行节点按同一份数据工作。 */
+    @Bean
+    public DevTaskBoard devTaskBoard(DevTaskStore devTaskStore) {
+        return new DevTaskBoard(devTaskStore);
+    }
+
+    /**
+     * 受限 runner 配置（P1-3）：默认关闭；启用后构建校验只在 {@code docker run --network none}
+     * 中执行，并限制内存/CPU/进程数，缓存目录为空则不挂载。
+     */
+    @Bean
+    public DevRunnerSettings devRunnerSettings(
+            @Value("${payroll.dev-team.runner.enabled:false}") boolean enabled,
+            @Value("${payroll.dev-team.runner.docker:docker}") String dockerBinary,
+            @Value("${payroll.dev-team.runner.image:}") String defaultImage,
+            @Value("${payroll.dev-team.runner.memory-mb:2048}") long memoryMb,
+            @Value("${payroll.dev-team.runner.cpus:2}") double cpus,
+            @Value("${payroll.dev-team.runner.pids-limit:512}") long pidsLimit,
+            @Value("${payroll.dev-team.runner.maven-cache:}") String mavenCacheDir,
+            @Value("${payroll.dev-team.runner.npm-cache:}") String npmCacheDir,
+            @Value("${payroll.dev-team.runner.max-output-chars:8000}") int maxOutputChars) {
+        DevRunnerSettings settings =
+                new DevRunnerSettings(
+                        enabled,
+                        dockerBinary,
+                        defaultImage,
+                        memoryMb,
+                        cpus,
+                        pidsLimit,
+                        mavenCacheDir,
+                        npmCacheDir,
+                        maxOutputChars);
+        log.info(
+                "[开发域] 受限 runner：{}，镜像默认={}，内存={}MB，CPU={}，pids={}，m2 缓存={}，npm 缓存={}",
+                settings.enabled() ? "启用" : "关闭",
+                settings.defaultImage().isBlank() ? "未配置" : settings.defaultImage(),
+                settings.memoryMb(),
+                settings.cpus(),
+                settings.pidsLimit(),
+                settings.hasMavenCache() ? settings.mavenCacheDir() : "不挂载",
+                settings.hasNpmCache() ? settings.npmCacheDir() : "不挂载");
+        return settings;
+    }
+
+    @Bean
+    public DevBuildRunner devBuildRunner(DevRunnerSettings runnerSettings) {
+        return new DevDockerBuildRunner(
+                runnerSettings, new ProcessCommandLauncher(runnerSettings.maxOutputChars()));
+    }
+
+    @Bean
+    public ApplicationRunner devRunnerAuditRunner(
+            AuditService auditService, DevRunnerSettings runnerSettings) {
+        return args -> {
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("enabled", runnerSettings.enabled());
+            snapshot.put("docker", runnerSettings.dockerBinary());
+            snapshot.put("image", runnerSettings.defaultImage());
+            snapshot.put("memory_mb", runnerSettings.memoryMb());
+            snapshot.put("cpus", runnerSettings.cpus());
+            snapshot.put("pids_limit", runnerSettings.pidsLimit());
+            snapshot.put("maven_cache", runnerSettings.mavenCacheDir());
+            snapshot.put("npm_cache", runnerSettings.npmCacheDir());
+            try {
+                auditService.record("devteam.runner", "dev_team", "startup", null, snapshot);
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录受限 runner 配置审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    /** 编码面串行执行（P1-2/P1-6）：单线程 + 无界队列，每实例并发 1，避免多任务争抢本机模型与工作区。 */
+    @Bean(name = "devTaskExecutorPool", destroyMethod = "shutdown")
+    public ExecutorService devTaskExecutorPool() {
+        log.info("[开发域] 编码面并发=1（单线程执行器），与控制面 10s/150s 预算隔离");
+        return Executors.newSingleThreadExecutor(
+                runnable -> {
+                    Thread thread = new Thread(runnable, "dev-task-executor");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+    }
+
+    @Bean
+    public DevTaskExecutor devTaskExecutor(
+            DevTeamSettings settings,
+            DevTaskBoard board,
+            DevArtifactStore artifacts,
+            DevBuildRunner buildRunner,
+            AuditService auditService,
+            @Qualifier("devTaskExecutorPool") ExecutorService pool,
+            @Value("${payroll.dev-team.project-root:}") String projectRoot,
+            @Value("${payroll.dev-team.workspace-root:}") String workspaceRoot) {
+        Path root =
+                projectRoot == null || projectRoot.isBlank()
+                        ? DevLlmTaskRunner.defaultProjectRoot()
+                        : Path.of(projectRoot).toAbsolutePath().normalize();
+        if (root == null || !java.nio.file.Files.isDirectory(root)) {
+            log.warn(
+                    "[开发域] 研发仓库根目录不可用，任务执行会失败；请配置 payroll.dev-team.project-root");
+            root =
+                    root == null
+                            ? Path.of(System.getProperty("user.dir"))
+                                    .toAbsolutePath()
+                                    .normalize()
+                            : root;
+        }
+        Path workRoot =
+                workspaceRoot == null || workspaceRoot.isBlank()
+                        ? DevLlmTaskRunner.defaultWorkRoot()
+                        : Path.of(workspaceRoot).toAbsolutePath().normalize();
+        DevTaskRunner runner =
+                new DevLlmTaskRunner(
+                        settings, artifacts, root, workRoot, auditService, buildRunner);
+        log.info(
+                "[开发域] 任务中心已装配：仓库根={}，工作区根={}，写权限={}",
+                root,
+                workRoot,
+                settings.writeEnabled() ? "已启用" : "关闭");
+        return new DevTaskExecutor(board, runner, pool, auditService);
+    }
+
+    /**
+     * 仓库路径 profile（P0-6）：未配置时使用内置 payroll 范围；配置缺失或非法直接启动失败，
+     * 避免带着错误的写白名单执行任务。
+     */
+    @Bean
+    public ApplicationRunner devTeamPathProfileRunner(
+            @Value("${payroll.dev-team.paths-file:}") String profileFile,
+            AuditService auditService) {
+        return args -> {
+            String configured = profileFile;
+            if (configured == null || configured.isBlank()) {
+                configured = System.getenv(DevPathPolicy.ENV_PROFILE);
+            }
+            if (configured == null || configured.isBlank()) {
+                log.info("[开发域] 路径 profile：内置 payroll 范围");
+                return;
+            }
+            Path file = Path.of(configured).toAbsolutePath().normalize();
+            DevPathPolicy.loadProfile(file);
+            log.info("[开发域] 路径 profile 已加载：{}", file);
+            try {
+                auditService.record(
+                        "devteam.path-profile",
+                        "dev_team",
+                        "startup",
+                        null,
+                        Map.of(
+                                "file", file.toString(),
+                                "implementer", DevPathPolicy.describeScope(DevPathPolicy.ROLE_IMPLEMENTER),
+                                "frontend", DevPathPolicy.describeScope(DevPathPolicy.ROLE_FRONTEND)));
+            } catch (RuntimeException e) {
+                log.warn("[开发域] 记录路径 profile 审计失败：{}", e.getMessage());
+            }
+        };
+    }
+
+    /** 上一实例遗留的 RUNNING 任务统一置为失败，等待人工重试，绝不自动续跑。 */
+    @Bean
+    public ApplicationRunner devTaskRecoveryRunner(DevTaskExecutor devTaskExecutor) {
+        return args -> devTaskExecutor.recoverInterrupted();
+    }
+
     @Bean
     public TeamLlmClient teamLlmClient() {
         return new TeamLlmClient();
+    }
+
+    @Bean
+    public UserProfileModelClient userProfileModelClient(TeamLlmClient teamLlmClient) {
+        return new TeamProfileModelClient(teamLlmClient);
+    }
+
+    @Bean
+    public UserProfileExtractor userProfileExtractor(
+            UserProfileModelClient userProfileModelClient,
+            @Value("${payroll.memory.profile.max-items-per-extraction:3}") int maxItems) {
+        return new UserProfileExtractor(userProfileModelClient, maxItems);
+    }
+
+    /** 抽取只在有对话执行的 runtime/all 节点启用，与轮次清理的 web/all 门禁相反。 */
+    @Bean
+    public UserProfileService userProfileService(
+            UserProfileStore userProfileStore,
+            UserProfileExtractor userProfileExtractor,
+            @Value("${payroll.memory.profile.enabled:false}") boolean enabled,
+            @Value("${payroll.node-role:runtime}") String nodeRole) {
+        boolean active = enabled && ("runtime".equals(nodeRole) || "all".equals(nodeRole));
+        log.info("[工作偏好] 抽取服务：{}", active ? "已启用（runtime/all）" : "未启用");
+        return new UserProfileService(userProfileStore, userProfileExtractor, active);
+    }
+
+    @Bean
+    public ApplicationRunner userProfileRecorderConfigurer(UserProfileService userProfileService) {
+        return args -> UserProfileRecorder.configure(userProfileService);
     }
 
     @Bean
@@ -174,19 +477,84 @@ public class PayrollAgentConfiguration {
             TeamLlmClient teamLlmClient,
             @Value("${payroll.router.enabled:true}") boolean enabled,
             @Value("${payroll.router.timeout-ms:10000}") long timeoutMs,
-            @Value("${payroll.router.min-confidence:0.55}") double minConfidence) {
+            @Value("${payroll.router.min-confidence:0.55}") double minConfidence,
+            @Value("${payroll.chat.kb-context.creative-no-kb:false}") boolean creativeNoKb,
+            @Value("${payroll.router.cache.enabled:true}") boolean cacheEnabled,
+            @Value("${payroll.router.cache.ttl-seconds:300}") long cacheTtlSeconds,
+            @Value("${payroll.router.cache.max-entries:512}") int cacheMaxEntries) {
         AgentRouter router =
                 new AgentRouter(
                         teamLlmClient,
                         enabled,
                         minConfidence,
-                        java.time.Duration.ofMillis(Math.max(500L, timeoutMs)));
+                        java.time.Duration.ofMillis(Math.max(500L, timeoutMs)),
+                        creativeNoKb,
+                        cacheEnabled,
+                        cacheTtlSeconds,
+                        cacheMaxEntries);
         log.info(
-                "[智能体路由] {}，超时={}ms，置信度阈值={}",
+                "[智能体路由] {}，超时={}ms，置信度阈值={}，创作类不检索={}，路由缓存={}（ttl={}s，max={}）",
                 router.enabled() ? "已启用" : "未启用",
                 Math.max(500L, timeoutMs),
-                minConfidence);
+                minConfidence,
+                creativeNoKb,
+                cacheEnabled ? "已启用" : "未启用",
+                cacheTtlSeconds,
+                cacheMaxEntries);
         return router;
+    }
+
+    /** 方案 B 的分阶段开关与材料预算；全部默认关闭。 */
+    @Bean
+    public KbChatSettings kbChatSettings(
+            @Value("${payroll.chat.kb-executor.enabled:false}") boolean executorEnabled,
+            @Value("${payroll.chat.kb-context.enabled:false}") boolean contextEnabled,
+            @Value("${payroll.chat.kb-context.max-results:3}") int maxResults,
+            @Value("${payroll.chat.kb-context.snippet-chars:200}") int snippetChars,
+            @Value("${payroll.chat.kb-context.max-chars:900}") int maxChars,
+            @Value("${payroll.chat.kb-context.min-score:0.0}") double minScore,
+            @Value("${payroll.chat.kb-context.min-overlap-terms:1}") int minOverlapTerms,
+            @Value("${payroll.chat.kb-context.timeout-ms:2000}") long timeoutMs,
+            @Value("${payroll.chat.kb-context.citation-filter.enabled:false}")
+                    boolean citationFilterEnabled,
+            @Value("${payroll.chat.kb-context.creative-no-kb:false}") boolean creativeNoKb) {
+        KbChatSettings settings =
+                new KbChatSettings(
+                        executorEnabled,
+                        contextEnabled,
+                        maxResults,
+                        snippetChars,
+                        maxChars,
+                        minScore,
+                        minOverlapTerms,
+                        timeoutMs,
+                        citationFilterEnabled,
+                        creativeNoKb);
+        log.info(
+                "[知识库][方案B] B0 执行者修复={}，B1 预取注入={}（上限 {} 条/{} 字，截止 {}ms），"
+                        + "B2 引用过滤={}，创作类不检索={}",
+                settings.executorEnabled(),
+                settings.contextEnabled(),
+                settings.maxResults(),
+                settings.maxChars(),
+                settings.timeoutMs(),
+                settings.citationFilterEnabled(),
+                settings.creativeNoKb());
+        return settings;
+    }
+
+    /** 预取复用与工具相同的内部通道；通道未配置或 B1 关闭时只返回空实现，不注册必然失败的能力。 */
+    @Bean
+    public KbContextPrefetcher kbContextPrefetcher(KbChatSettings kbChatSettings) {
+        KbSkillGateway gateway = KbSkillClient.fromEnvironment();
+        if (!kbChatSettings.contextEnabled()) {
+            return KbContextPrefetcher.disabled(kbChatSettings);
+        }
+        if (!gateway.enabled()) {
+            log.warn("[知识库][材料] 预取已开启，但 Web 地址或内部令牌未配置，本轮不预取");
+            return KbContextPrefetcher.disabled(kbChatSettings);
+        }
+        return new KbContextPrefetcher(gateway, kbChatSettings);
     }
 
     /** 语义路由设置：KB 语义与薪酬语义共用嵌入/ES 配置，仅索引与种子不同。 */
@@ -308,6 +676,8 @@ public class PayrollAgentConfiguration {
             AgentRouter router,
             @Qualifier("routeSemanticClassifier") SemanticRouteClassifier semantic,
             @Qualifier("payrollRouteAdvisor") PayrollRouteAdvisor payrollRouteAdvisor,
+            KbChatSettings kbChatSettings,
+            KbContextPrefetcher kbContextPrefetcher,
             @Value("${payroll.orchestrator:legacy}") String orchestrator,
             @Value("${payroll.routing.enabled:true}") boolean routingEnabled,
             @Value("${payroll.chat.action-confirm.enabled:false}") boolean actionConfirmEnabled,
@@ -364,7 +734,7 @@ public class PayrollAgentConfiguration {
                         agentRegistry::list,
                         activeTeamService,
                         routingEnabled,
-                        actionConfirmEnabled,
+                        () -> agentRegistry.actionConfirmOverride().orElse(actionConfirmEnabled),
                         actionProposalTtlMinutes,
                         toolSafety,
                         answerCache,
@@ -372,7 +742,9 @@ public class PayrollAgentConfiguration {
                         alwaysConfirmTools,
                         kbPolicy,
                         semantic,
-                        payrollRouteAdvisor);
+                        payrollRouteAdvisor,
+                        kbChatSettings,
+                        kbContextPrefetcher);
     }
 
     /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */

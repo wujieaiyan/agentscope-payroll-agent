@@ -5,11 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.kb.ocr.OcrEngineProperties;
+import io.agentscope.examples.payroll.kb.ocr.OcrExtractionService;
+import io.agentscope.examples.payroll.kb.ocr.TesseractImageExtractor;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -27,13 +31,23 @@ class KbParserOcrTest {
 
     @TempDir Path tempDir;
 
+    private static KbParserService parser(KbOcrService ocr) {
+        OcrEngineProperties properties = new OcrEngineProperties();
+        properties.setEngine("tesseract");
+        properties.setChainOrder("tesseract");
+        OcrExtractionService extraction =
+                new OcrExtractionService(
+                        List.of(new TesseractImageExtractor(ocr)), properties, ocr.enabled());
+        return new KbParserService(ocr, extraction);
+    }
+
     @Test
     @DisplayName("有文字层的 PDF 不触发 OCR")
     void textPdfSkipsOcr() throws IOException {
         Path file = tempDir.resolve("text.pdf");
         writeTextPdf(file);
         OcrStub ocr = new OcrStub(true, true, 0);
-        KbParserService parser = new KbParserService(ocr);
+        KbParserService parser = parser(ocr);
 
         KbParsedDocument parsed = parser.parse(file, "pdf", KbConfigModels.defaultParse(), null);
 
@@ -48,7 +62,7 @@ class KbParserOcrTest {
         Path file = tempDir.resolve("scan.pdf");
         writeScannedPdf(file, 1);
         OcrStub ocr = new OcrStub(true, true, 0);
-        KbParserService parser = new KbParserService(ocr);
+        KbParserService parser = parser(ocr);
 
         KbParsedDocument parsed = parser.parse(file, "pdf", KbConfigModels.defaultParse(), null);
 
@@ -64,7 +78,7 @@ class KbParserOcrTest {
     void scannedPdfWithoutEngineFails() throws IOException {
         Path file = tempDir.resolve("scan.pdf");
         writeScannedPdf(file, 1);
-        KbParserService parser = new KbParserService(new OcrStub(true, false, 0));
+        KbParserService parser = parser(new OcrStub(true, false, 0));
 
         PayrollException error =
                 assertThrows(
@@ -80,7 +94,7 @@ class KbParserOcrTest {
     void disabledOcrFailsForScannedPdf() throws IOException {
         Path file = tempDir.resolve("scan.pdf");
         writeScannedPdf(file, 1);
-        KbParserService parser = new KbParserService(new OcrStub(false, true, 0));
+        KbParserService parser = parser(new OcrStub(false, true, 0));
 
         PayrollException error =
                 assertThrows(
@@ -95,7 +109,7 @@ class KbParserOcrTest {
     void ocrPageBudgetLimitsScan() throws IOException {
         Path file = tempDir.resolve("scan.pdf");
         writeScannedPdf(file, 2);
-        KbParserService parser = new KbParserService(new OcrStub(true, true, 1));
+        KbParserService parser = parser(new OcrStub(true, true, 1));
 
         PayrollException error =
                 assertThrows(
@@ -111,7 +125,7 @@ class KbParserOcrTest {
         Path file = tempDir.resolve("scan.pdf");
         writeScannedPdf(file, 2);
         OcrStub ocr = new OcrStub(true, true, 0);
-        KbParserService parser = new KbParserService(ocr);
+        KbParserService parser = parser(ocr);
         AtomicInteger lastPage = new AtomicInteger();
         AtomicInteger lastOcrPages = new AtomicInteger();
 
@@ -171,7 +185,7 @@ class KbParserOcrTest {
         private final boolean engineAvailable;
 
         private OcrStub(boolean enabled, boolean engineAvailable, int maxPages) {
-            super(enabled, "tesseract", "", "chi_sim+eng", 300, 60, maxPages);
+            super(enabled, "tesseract", "", "chi_sim+eng", 200, 60, maxPages, 2, 600);
             this.engineAvailable = engineAvailable;
         }
 
@@ -181,9 +195,9 @@ class KbParserOcrTest {
         }
 
         @Override
-        public String recognize(BufferedImage image, String languages, double minConfidence) {
+        public KbOcrService.OcrText recognizeFile(Path image, String languages) {
             calls.incrementAndGet();
-            return OCR_TEXT;
+            return new KbOcrService.OcrText(OCR_TEXT, 8, 0, 0.92);
         }
     }
 }

@@ -1,20 +1,37 @@
 package io.agentscope.examples.payroll.kb;
 
+import io.agentscope.examples.payroll.domain.ExtractionMeta;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.kb.KbConfigModels.OcrConfig;
 import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.Heading;
 import io.agentscope.examples.payroll.kb.KbParsedDocument.PageRange;
+import io.agentscope.examples.payroll.kb.ocr.ImageTextResult;
+import io.agentscope.examples.payroll.kb.ocr.OcrCanceled;
+import io.agentscope.examples.payroll.kb.ocr.OcrExtractionService;
+import io.agentscope.examples.payroll.kb.ocr.OcrFailure;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
@@ -64,9 +81,11 @@ public class KbParserService {
     }
 
     private final KbOcrService ocrService;
+    private final OcrExtractionService extractionService;
 
-    public KbParserService(KbOcrService ocrService) {
+    public KbParserService(KbOcrService ocrService, OcrExtractionService extractionService) {
         this.ocrService = ocrService;
+        this.extractionService = extractionService;
     }
 
     public KbParsedDocument parse(Path file, String ext) {
@@ -75,11 +94,21 @@ public class KbParserService {
 
     public KbParsedDocument parse(
             Path file, String ext, ParseConfig parseConfig, PageListener listener) {
+        return parse(file, ext, parseConfig, listener, null);
+    }
+
+    /** canceled 为入库取消信号：命中后停止提交新页，并中断在跑 OCR 进程。 */
+    public KbParsedDocument parse(
+            Path file,
+            String ext,
+            ParseConfig parseConfig,
+            PageListener listener,
+            BooleanSupplier canceled) {
         ParseConfig config = parseConfig == null ? KbConfigModels.defaultParse() : parseConfig;
         String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         try {
             return switch (normalized) {
-                case "pdf" -> parsePdf(file, config, listener);
+                case "pdf" -> parsePdf(file, config, listener, canceled);
                 case "docx" -> parseDocx(file);
                 case "xlsx", "xls" -> parseExcel(file);
                 case "md", "markdown" -> parseMarkdown(file);
@@ -98,21 +127,17 @@ public class KbParserService {
         }
     }
 
-    /** 对话附件解析：只接受 Word/Excel/图片，返回纯文本；失败原因直接面向用户。 */
-    public String parseChatAttachment(Path file, String ext) {
+    /** 对话附件解析：返回纯文本与提取溯源；失败原因直接面向用户。 */
+    public ChatExtraction parseChatAttachment(Path file, String ext) {
         String normalized = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         try {
             return switch (normalized) {
-                case "docx" -> parseDocx(file).text();
-                case "xlsx", "xls" -> parseExcel(file).text();
-                case "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff" -> parseImage(file);
+                case "docx", "xlsx", "xls" -> parseNativeAttachment(file, normalized);
+                case "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff" -> parseImageAttachment(file);
                 default -> throw new PayrollException("暂不支持该附件格式，请上传 docx/xlsx 或图片");
             };
-        } catch (PayrollException e) {
-            throw e;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PayrollException("附件解析被中断，请重试");
+        } catch (PayrollException | OcrFailure e) {
+            throw e instanceof PayrollException error ? error : new PayrollException(e.getMessage());
         } catch (IOException e) {
             throw new PayrollException("解析附件失败：" + e.getMessage());
         } catch (RuntimeException e) {
@@ -121,26 +146,59 @@ public class KbParserService {
         }
     }
 
-    private String parseImage(Path file) throws IOException, InterruptedException {
-        if (!ocrService.enabled() || !ocrService.available()) {
-            throw new PayrollException("图片识别不可用：未找到 OCR 引擎 tesseract");
-        }
+    /** 图片附件走档位链 OCR，返回实际生效的引擎与质量门结论。 */
+    private ChatExtraction parseImageAttachment(Path file) throws IOException {
         BufferedImage image = ImageIO.read(file.toFile());
         if (image == null) {
             throw new PayrollException("无法解码图片，请上传 PNG/JPG 等常见格式");
         }
-        ParseConfig config = KbConfigModels.defaultParse();
-        OcrConfig ocr = config.ocr == null ? new OcrConfig() : config.ocr;
-        String text =
-                ocrService.recognize(
-                        image, ocrService.resolveLanguages(ocr.languages), ocr.minConfidence);
+        OcrConfig ocr = KbConfigModels.defaultParse().ocr;
+        String languages = ocrService.resolveLanguages(ocr == null ? null : ocr.languages);
+        ImageTextResult result = extractionService.extract(image, languages);
+        String text = result.text();
         if (text == null || text.isBlank()) {
             throw new PayrollException("图片未识别出文字，请上传更清晰的截图");
         }
-        return text;
+        return new ChatExtraction(text, result.toMeta(text.strip().length()));
     }
 
-    private KbParsedDocument parsePdf(Path file, ParseConfig config, PageListener listener)
+    /** Word/Excel 原生解析不经过 OCR 引擎链，只记录类型、耗时与原文哈希。 */
+    private ChatExtraction parseNativeAttachment(Path file, String ext) throws IOException {
+        long started = System.currentTimeMillis();
+        KbParsedDocument document =
+                switch (ext) {
+                    case "docx" -> parseDocx(file);
+                    case "xlsx", "xls" -> parseExcel(file);
+                    default -> throw new PayrollException("暂不支持的文档类型：" + ext);
+                };
+        String text = document.text();
+        return new ChatExtraction(
+                text,
+                ExtractionMeta.nativeParse(
+                        ext, sha256(file), System.currentTimeMillis() - started, text.length()));
+    }
+
+    /** 流式摘要：上传上限 600MB，避免把整份文件读进内存后再算哈希。 */
+    private static String sha256(Path file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[64 * 1024];
+            try (InputStream input = Files.newInputStream(file)) {
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (read > 0) {
+                        digest.update(buffer, 0, read);
+                    }
+                }
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
+    private KbParsedDocument parsePdf(
+            Path file, ParseConfig config, PageListener listener, BooleanSupplier canceled)
             throws IOException {
         OcrConfig ocrConfig = config.ocr == null ? new OcrConfig() : config.ocr;
         boolean filterHeaderFooter =
@@ -155,7 +213,7 @@ public class KbParserService {
                 stripper.setEndPage(page);
                 pageTexts.add(stripper.getText(document));
             }
-            OcrStats ocrStats = ocrBlankPages(document, pageTexts, ocrConfig, listener);
+            OcrStats ocrStats = ocrBlankPages(document, pageTexts, ocrConfig, listener, canceled);
             if (filterHeaderFooter) {
                 filterHeaderFooter(pageTexts);
             }
@@ -194,7 +252,8 @@ public class KbParserService {
             PDDocument document,
             List<String> pageTexts,
             OcrConfig ocrConfig,
-            PageListener listener)
+            PageListener listener,
+            BooleanSupplier canceled)
             throws IOException {
         List<Integer> blankPages = new ArrayList<>();
         long layerChars = 0;
@@ -208,13 +267,14 @@ public class KbParserService {
         if (blankPages.isEmpty()) {
             return new OcrStats(0, 0, 0);
         }
-        if (!ocrService.enabled() || !ocrService.available()) {
+        boolean ocrEnabled = extractionService.enabled();
+        if (!ocrEnabled || !extractionService.available()) {
             if (layerChars < MIN_PAGE_TEXT_CHARS) {
                 throw new PayrollException(
-                        ocrService.enabled()
-                                ? "该 PDF 为扫描件（无文字层），但未找到 OCR 引擎 tesseract。"
-                                        + "请安装 Tesseract（含 chi_sim 语言包），或用 payroll.kb.ocr.command 指定可执行文件，"
-                                        + "也可改用带文字层的 PDF"
+                        ocrEnabled
+                                ? "该 PDF 为扫描件（无文字层），但未找到可用的 OCR 引擎"
+                                        + "（Tesseract/RapidOCR）。请安装 Tesseract（含 chi_sim 语言包），"
+                                        + "或用 payroll.kb.ocr.command 指定可执行文件，也可改用带文字层的 PDF"
                                 : "该 PDF 为扫描件（无文字层），OCR 已被关闭"
                                         + "（payroll.kb.ocr.enabled=false），请启用 OCR 或改用带文字层的 PDF");
             }
@@ -238,37 +298,96 @@ public class KbParserService {
             budget = maxPages;
         }
         String languages = ocrService.resolveLanguages(ocrConfig.languages);
-        PDFRenderer renderer = new PDFRenderer(document);
+        BooleanSupplier abort = canceled == null ? () -> false : canceled;
+        int dpi = ocrService.dpi();
         long started = System.currentTimeMillis();
-        int ocrPages = 0;
-        int skipped = blankPages.size() - budget;
-        for (int index = 0; index < budget; index++) {
-            int pageIndex = blankPages.get(index);
-            try {
-                BufferedImage image =
-                        renderer.renderImageWithDPI(pageIndex, ocrService.dpi(), ImageType.RGB);
-                String text = ocrService.recognize(image, languages, ocrConfig.minConfidence);
-                pageTexts.set(pageIndex, text == null ? "" : text);
-                ocrPages++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new PayrollException("解析被中断，请重试入库");
-            } catch (IOException | RuntimeException e) {
-                skipped++;
-                log.warn("[知识库] 第 {} 页 OCR 失败：{}", pageIndex + 1, e.getMessage());
+        long deadline = started + ocrService.docBudgetSeconds() * 1000L;
+        int poolSize = Math.max(1, Math.min(ocrService.concurrency(), budget));
+        PDFRenderer renderer = new PDFRenderer(document);
+        Map<Integer, String> recognized = new ConcurrentHashMap<>();
+        AtomicInteger ocrPages = new AtomicInteger();
+        ExecutorService pool =
+                Executors.newFixedThreadPool(
+                        poolSize,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "kb-ocr-page");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        List<Future<?>> futures = new ArrayList<>(budget);
+        RuntimeException[] abortSignal = new RuntimeException[1];
+        try {
+            for (int index = 0; index < budget; index++) {
+                if (System.currentTimeMillis() > deadline) {
+                    log.warn(
+                            "[知识库] PDF OCR 达到单文档时间上限（{}s），剩余 {} 页不再识别",
+                            ocrService.docBudgetSeconds(),
+                            budget - index);
+                    break;
+                }
+                int pageIndex = blankPages.get(index);
+                futures.add(
+                        pool.submit(
+                                (Callable<Void>)
+                                        () -> {
+                                            if (abort.getAsBoolean()) {
+                                                throw new OcrCanceled();
+                                            }
+                                            BufferedImage image;
+                                            synchronized (renderer) {
+                                                image =
+                                                        renderer.renderImageWithDPI(
+                                                                pageIndex, dpi, ImageType.RGB);
+                                            }
+                                            ImageTextResult result =
+                                                    extractionService.extract(
+                                                            image, languages, abort);
+                                            recognized.put(
+                                                    pageIndex,
+                                                    result.text() == null ? "" : result.text());
+                                            int done = ocrPages.incrementAndGet();
+                                            if (listener != null) {
+                                                // 并行识别下页码不再单调，进度按已完成页数上报。
+                                                synchronized (listener) {
+                                                    listener.onPageProgress(
+                                                            done, pageTexts.size(), done);
+                                                }
+                                            }
+                                            return null;
+                                        }));
             }
-            if (listener != null) {
-                listener.onPageProgress(pageIndex + 1, pageTexts.size(), ocrPages);
+            for (Future<?> future : futures) {
+                try {
+                    future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("OCR 被中断", e);
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause() == null ? e : e.getCause();
+                    // 取消信号向上传递；单页识别失败与旧串行实现一致，跳过该页继续。
+                    if (cause instanceof KbParserService.AbortSignal) {
+                        abortSignal[0] = (RuntimeException) cause;
+                        break;
+                    }
+                    log.warn("[知识库] OCR 页失败：{}", cause.getMessage());
+                }
             }
+        } finally {
+            pool.shutdownNow();
         }
+        if (abortSignal[0] != null) {
+            throw abortSignal[0];
+        }
+        recognized.forEach(pageTexts::set);
+        int skipped = blankPages.size() - recognized.size();
         log.info(
                 "[知识库] PDF OCR：pages={}，扫描页={}，OCR 完成={}，跳过={}，耗时={}ms",
                 pageTexts.size(),
                 blankPages.size(),
-                ocrPages,
+                recognized.size(),
                 skipped,
                 System.currentTimeMillis() - started);
-        return new OcrStats(blankPages.size(), ocrPages, skipped);
+        return new OcrStats(blankPages.size(), recognized.size(), skipped);
     }
 
     private record OcrStats(int blankPages, int ocrPages, int skippedPages) {
@@ -495,5 +614,9 @@ public class KbParserService {
         List<PageRange> pages =
                 content.isEmpty() ? List.of() : List.of(new PageRange(1, 0, content.length()));
         return new KbParsedDocument(content, content.isEmpty() ? 0 : 1, pages, headings);
+    }
+
+    /** 对话附件解析结果：文本 + 提取溯源，供落库与前端展示引擎信息。 */
+    public record ChatExtraction(String text, ExtractionMeta meta) {
     }
 }

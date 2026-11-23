@@ -9,8 +9,10 @@ server:
 spring:
   profiles:
     # 部门级部署：--spring.profiles.active=dept 同时启用 MySQL 与 Redis。
+    # 生产：--spring.profiles.active=prod 同样拉起 MySQL 与 Redis，再由 TopologyGuard 校验。
     group:
       dept: mysql,redis
+      prod: mysql,redis
   # 向量库客户端由 PayrollConfiguration 手动创建，禁用 Boot 的 ES 自动装配。
   # Redis 相关自动装配默认关闭，仅在 redis profile 中放开，避免本地/测试强依赖 Redis。
   autoconfigure:
@@ -42,21 +44,70 @@ payroll:
   # all=单进程（默认）；web=只做鉴权/转发/SSE；runtime=只执行内部轮次。
   node-role: "${PAYROLL_NODE_ROLE:all}"
   node-id: "${PAYROLL_NODE_ID:local}"
+  deployment:
+    # single=单机，Redis 故障时允许本地降级；cluster=多实例，租约/事件/配额遇 Redis 故障直接 503。
+    mode: "${PAYROLL_DEPLOYMENT_MODE:single}"
   runtime:
     # Web 调用的 runtime 地址，逗号分隔；为空时 Web 节点无法执行模型，对话接口返回明确错误。
     urls: "${PAYROLL_AGENT_RUNTIME_URLS:}"
+    # 单个 runtime 地址的连接/响应超时，以及一次提交的总预算（含逐个重试）。
+    per-url-timeout-ms: "${PAYROLL_RUNTIME_PER_URL_TIMEOUT_MS:5000}"
+    submit-budget-ms: "${PAYROLL_RUNTIME_SUBMIT_BUDGET_MS:10000}"
+  health:
+    # readiness 只探测 DB + Redis；ES 与技能来源只进各自 Actuator 详情，不参与摘流。
+    readiness-deps: "${PAYROLL_HEALTH_READINESS_DEPS:db,redis}"
+    # /health 中 skills 组件的新鲜度窗口：超过该时长未成功列出技能即报 DOWN（整体降级）。
+    # 组件来源随 payroll.skills.source 变（Nacos 或 skill 表），键名不变。
+    skills-stale-seconds: "${PAYROLL_HEALTH_SKILLS_STALE_SECONDS:300}"
   internal:
     # runtime 内部接口 HMAC 密钥；null/空时内部提交不可用。
     token: "${PAYROLL_AGENT_RUNTIME_TOKEN:}"
+    # 内部签名的允许时间窗（秒），两端需一致；超出即 401。
     max-skew-seconds: "${PAYROLL_INTERNAL_MAX_SKEW_SECONDS:120}"
+    # 启动时向 runtime /internal/health 取时间做偏移自检，超过该秒数只告警不阻断。
+    clock-skew-warning-seconds: "${PAYROLL_INTERNAL_CLOCK_SKEW_WARNING_SECONDS:60}"
   db:
-    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
+    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL}"
     user: "${PAYROLL_DB_USER:sa}"
     password: "${PAYROLL_DB_PASSWORD:}"
   output-dir: "${PAYROLL_OUTPUT_DIR:output}"
   auth:
     enabled: "${PAYROLL_AUTH_ENABLED:true}"
     admin-password: "${PAYROLL_ADMIN_PASSWORD:admin123}"
+    # 新建/重置密码后强制先改密；存量用户迁移时保持 FALSE。
+    force-password-change: "${PAYROLL_AUTH_FORCE_PASSWORD_CHANGE:true}"
+  usage:
+    # 每用户每日 token 预算，0 表示不限；超限新轮次返回 429。
+    daily-token-budget: "${PAYROLL_USAGE_DAILY_TOKEN_BUDGET:0}"
+  definitions:
+    # nacos=智能体定义整份 JSON 存 Nacos（默认，兼容存量）；db=落 agent_definition 表，
+    # 数据库为权威，Nacos 仅作变更通知通道（写入失败只告警，不回滚）。
+    source: "${PAYROLL_DEFINITIONS_SOURCE:nacos}"
+    # 仅 source=db 且表为空时生效：启动从 Nacos 导入一次，重复执行不产生重复行。
+    import-from-nacos: "${PAYROLL_DEFINITIONS_IMPORT_FROM_NACOS:false}"
+  skills:
+    # 技能单源开关：nacos=技能正文与文件包都在 Nacos 配置里（默认）；db=落 skill 表 + 本地
+    # blob 目录。运行期不热切（切换要重启，见规格 §11.1），回退就是改回 nacos 再重启。
+    source: "${PAYROLL_SKILLS_SOURCE:nacos}"
+    # 仅 source=db 且 skill 表为空时生效：启动时从 Nacos 整体导入一次，重复启动不再导入。
+    # 只在 Web/all 侧开启，避免两个进程并发把同一批技能写两遍。
+    import-from-nacos: "${PAYROLL_SKILLS_IMPORT_FROM_NACOS:false}"
+  skill:
+    # 技能文件包读取缓存：按访问序 LRU，条数与正文总字节双上限，正文变化即失效。
+    file-cache:
+      max-entries: "${PAYROLL_SKILL_FILE_CACHE_MAX_ENTRIES:128}"
+      max-bytes: "${PAYROLL_SKILL_FILE_CACHE_MAX_BYTES:33554432}"
+    # db 源的资源字节落盘位置（内容寻址 <sha[0:2]>/<sha>）；data/ 已 gitignore，与 KB 附件同处置。
+    blob:
+      root: "${PAYROLL_SKILL_BLOB_ROOT:./data/skill-blobs}"
+      # 单个 blob 上限，默认与现网技能单文件配额同值（512KB），切库第一天不放宽。
+      max-bytes: "${PAYROLL_SKILL_BLOB_MAX_BYTES:524288}"
+    catalog:
+      # db 源目录快照的兜底新鲜度；跨实例的主动失效由下面的轮询器负责。
+      ttl-ms: "${PAYROLL_SKILL_CATALOG_TTL_MS:60000}"
+    invalidation:
+      # 跨实例目录失效轮询间隔（仅 db 源）；<=0 关闭，退化为只靠 catalog TTL 兜底。
+      poll-ms: "${PAYROLL_SKILL_INVALIDATION_POLL_MS:15000}"
   security:
     # 同一账号连续失败达到阈值后锁定，Redis 不可用时回退进程内计数。
     login-max-failures: "${PAYROLL_LOGIN_MAX_FAILURES:5}"
@@ -64,11 +115,18 @@ payroll:
   chat:
     # 单个用户同时进行的流式生成数，超出返回 429。
     max-concurrent-per-user: "${PAYROLL_CHAT_MAX_CONCURRENT:2}"
+    # 配额键 TTL，必须大于 turn-max-minutes，避免长轮次执行期间配额被提前回收。
+    quota-ttl-minutes: "${PAYROLL_CHAT_QUOTA_TTL_MINUTES:35}"
+    # deny=Redis 故障时拒绝新请求；local=single 才允许回退进程内计数；空按部署模式默认。
+    quota-fail-mode: "${PAYROLL_CHAT_QUOTA_FAIL_MODE:}"
     # 对话附件：只支持 Word/Excel/图片，原文件与提取文本落在独立目录。
     attachment:
       dir: "${PAYROLL_CHAT_ATTACHMENT_DIR:./data/chat-uploads}"
       max-files: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILES:5}"
       max-file-bytes: "${PAYROLL_CHAT_ATTACHMENT_MAX_FILE_BYTES:20971520}"
+      # 附件解析线程数与等待队列容量；队列满时该附件直接置为失败，前端可重新识别。
+      parse-threads: "${PAYROLL_CHAT_ATTACHMENT_PARSE_THREADS:2}"
+      parse-capacity: "${PAYROLL_CHAT_ATTACHMENT_PARSE_CAPACITY:100}"
     # 同一会话跨实例互斥锁的过期时间；需大于单轮回答的最长耗时（SSE 超时 10 分钟）。
     session-lock-minutes: "${PAYROLL_CHAT_SESSION_LOCK_MINUTES:15}"
     # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
@@ -80,13 +138,16 @@ payroll:
     # 事件流保留与单轮上限；续流窗口由 TTL 决定。
     turn-event-ttl-hours: "${PAYROLL_TURN_EVENT_TTL_HOURS:24}"
     turn-event-max: "${PAYROLL_TURN_EVENT_MAXLEN:10000}"
+    # 历史轮次清理：启动后最多 5 分钟首次执行，之后按周期删除超过保留天数的行；
+    # 周期 <= 0 关闭；只有 web/all 节点会执行，runtime 节点不重复扫库。
     turn-retention-days: "${PAYROLL_TURN_RETENTION_DAYS:90}"
+    turn-cleanup-interval-minutes: "${PAYROLL_TURN_CLEANUP_INTERVAL_MINUTES:360}"
     # 写操作确认：关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度核对。
     action-confirm:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
       ttl-minutes: "${PAYROLL_ACTION_PROPOSAL_TTL_MINUTES:15}"
       # 命中清单的写工具无论 enabled 如何都先出确认提案；默认覆盖知识库 6 个写工具。
-      # skill_run 额外由代码强制加入（不可通过配置移除）。
+      # skill_run、request_confirmation 与 request_input 额外由代码强制加入（不可通过配置移除）。
       always-confirm-tools: "${PAYROLL_ACTION_CONFIRM_ALWAYS_TOOLS:kb_create_library,kb_save_config,kb_grant_member,kb_remove_member,kb_move_directory,kb_rebuild_index,skill_run}"
     # 知识库 L0 确定性路由：enabled=false 时与旧 KbChatIntent 判定完全一致，便于灰度对比。
     kb-policy:
@@ -95,6 +156,25 @@ payroll:
       bound-candidate: "${PAYROLL_KB_POLICY_BOUND_CANDIDATE:false}"
       action-guard: "${PAYROLL_KB_POLICY_ACTION_GUARD:true}"
       follow-up-max-chars: "${PAYROLL_KB_POLICY_FOLLOW_UP_MAX_CHARS:20}"
+    # 方案 B（docs/kb-retrieval-as-context-spec.md）：need_kb 只决定是否提供材料，
+    # 不再把执行者改成 PayrollKbAgent；置 false 即回到改造前行为。
+    kb-executor:
+      enabled: "${PAYROLL_KB_EXECUTOR_ENABLED:false}"
+    # 检索即上下文：单智能体无 kb:read 时服务端预取一次 kb_search 并注入有界材料。
+    # B1 需在 #149（提示注入防护）完成后才可开启；关闭时只多一次布尔判断。
+    kb-context:
+      enabled: "${PAYROLL_KB_CONTEXT_ENABLED:false}"
+      max-results: "${PAYROLL_KB_CONTEXT_MAX_RESULTS:3}"
+      snippet-chars: "${PAYROLL_KB_CONTEXT_SNIPPET_CHARS:200}"
+      max-chars: "${PAYROLL_KB_CONTEXT_MAX_CHARS:900}"
+      min-score: "${PAYROLL_KB_CONTEXT_MIN_SCORE:0.0}"
+      min-overlap-terms: "${PAYROLL_KB_CONTEXT_MIN_OVERLAP_TERMS:1}"
+      timeout-ms: "${PAYROLL_KB_CONTEXT_TIMEOUT_MS:2000}"
+      # B2：只展示正文 [n] 实际引用的材料条目，保持注入序号不重排。
+      citation-filter:
+        enabled: "${PAYROLL_KB_CONTEXT_CITATION_FILTER_ENABLED:false}"
+      # B2：创作类问题提示词要求 need_kb=false，改变路由分布前需重跑金标。
+      creative-no-kb: "${PAYROLL_KB_CONTEXT_CREATIVE_NO_KB:false}"
   # 路由透明化：每轮记录实际链路（PIPELINE/AGENT/FLOW/GRAPH/TEAM_ACTIVE）并随消息落库。
   routing:
     enabled: "${PAYROLL_ROUTING_ENABLED:true}"
@@ -156,6 +236,12 @@ payroll:
     async-index: "${PAYROLL_MEMORY_ASYNC_INDEX:true}"
     # false=只召回当前会话（默认）；true=允许跨会话召回同一用户的历史问题。
     cross-session: "${PAYROLL_MEMORY_CROSS_SESSION:false}"
+    # 用户级工作偏好（对外「我的工作偏好」）：默认关闭；runtime/all 抽取，web/all 清理凭证。
+    profile:
+      enabled: "${PAYROLL_PROFILE_MEMORY_ENABLED:false}"
+      max-items-per-extraction: "${PAYROLL_PROFILE_MAX_ITEMS:3}"
+      inject-max-items: "${PAYROLL_PROFILE_INJECT_MAX_ITEMS:10}"
+      inject-max-chars: "${PAYROLL_PROFILE_INJECT_MAX_CHARS:600}"
   # 语义缓存：默认关闭；只缓存 AGENT 路径无工具调用的稳定问答。
   semantic-cache:
     enabled: "${PAYROLL_SEMANTIC_CACHE_ENABLED:false}"
@@ -186,7 +272,11 @@ payroll:
     answer-model: "${PAYROLL_KB_ANSWER_MODEL:qwen2.5:3b-instruct}"
     answer-timeout: "${PAYROLL_KB_ANSWER_TIMEOUT:120s}"
     task-threads: "${PAYROLL_KB_TASK_THREADS:2}"
-    # 扫描件兜底：无文字层页面按页渲染后交给 Tesseract；max-pages=0 表示不限页数。
+    # 单个入库任务链最多重试次数，达到上限后仅保留终态等待人工排查。
+    task-max-retries: "${PAYROLL_KB_TASK_MAX_RETRIES:3}"
+    # 启动时恢复重启遗留的排队/运行中任务；关闭后遗留任务保持原状。
+    recovery-enabled: "${PAYROLL_KB_RECOVERY_ENABLED:true}"
+    # 扫描件兜底：无文字层页面按页渲染后交给 OCR；max-pages=0 表示不限页数。
     ocr:
       enabled: "${PAYROLL_KB_OCR_ENABLED:true}"
       command: "${PAYROLL_KB_OCR_COMMAND:tesseract}"
@@ -195,6 +285,24 @@ payroll:
       dpi: "${PAYROLL_KB_OCR_DPI:300}"
       timeout-seconds: "${PAYROLL_KB_OCR_TIMEOUT:120}"
       max-pages: "${PAYROLL_KB_OCR_MAX_PAGES:0}"
+      # 档位链：rapidocr（主档，需 -Prapidocr 构建）→ tesseract（降级档）；
+      # 也可设为 rapidocr 或 tesseract 只用单档。每档结果先过质量门，未通过自动降级。
+      engine: "${PAYROLL_KB_OCR_ENGINE:chain}"
+      chain-order: "${PAYROLL_KB_OCR_CHAIN_ORDER:rapidocr,tesseract}"
+      cache-size: "${PAYROLL_KB_OCR_CACHE_SIZE:32}"
+      breaker-failures: "${PAYROLL_KB_OCR_BREAKER_FAILURES:3}"
+      breaker-cooldown-seconds: "${PAYROLL_KB_OCR_BREAKER_COOLDOWN:60}"
+      # 质量门阈值（黄金集校准）；min-cjk-ratio=0 表示不强制中文占比。
+      quality-gate:
+        min-chars: "${PAYROLL_KB_OCR_GATE_MIN_CHARS:8}"
+        min-alnum-ratio: "${PAYROLL_KB_OCR_GATE_MIN_ALNUM:0.5}"
+        min-cjk-ratio: "${PAYROLL_KB_OCR_GATE_MIN_CJK:0}"
+        min-confidence: "${PAYROLL_KB_OCR_GATE_MIN_CONFIDENCE:0}"
+      rapidocr:
+        enabled: "${PAYROLL_KB_OCR_RAPIDOCR_ENABLED:true}"
+        # 原生库与模型解压到该目录下的 ocrJava；默认落在系统临时目录。
+        model-dir: "${PAYROLL_KB_OCR_RAPIDOCR_MODEL_DIR:${java.io.tmpdir}}"
+        timeout-seconds: "${PAYROLL_KB_OCR_RAPIDOCR_TIMEOUT:60}"
     # 会话绑定知识库：单会话最多绑定库数；未绑定时默认检索的可读库上限；团队节点检索开关。
     chat:
       max-series: "${PAYROLL_KB_CHAT_MAX_SERIES:3}"
@@ -226,6 +334,14 @@ management:
   endpoint:
     health:
       show-details: when_authorized
+      # /livez、/readyz 映射到下面两个分组；readiness 不含 ES/技能来源。
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState,ping
+        readiness:
+          include: readinessState,payrollReadiness
   metrics:
     tags:
       application: payroll-agent

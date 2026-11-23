@@ -10,6 +10,8 @@ import io.agentscope.examples.payroll.repository.JsonPayrollRepository;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.examples.payroll.support.Permissions;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -20,623 +22,33 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.flywaydb.core.Flyway;
 
 /**
  * 薪酬管理台数据库：默认 H2 文件库，部门部署可切换 MySQL。
  *
- * <p>H2 使用内联 DDL 幂等建表；MySQL 使用 Flyway（classpath:db/migration/mysql）版本化建表，
- * 并由 HikariCP 提供连接池。两种库共用同一套仓储代码，方言差异集中在 upsert 与种子 SQL。
+ * <p>两种库共用同一套 Flyway 迁移（classpath:db/migration/common）：H2 以 MySQL 兼容模式执行，
+ * MySQL 原样执行，表结构只维护一份。HikariCP 只在 MySQL 下提供连接池，方言差异集中在 upsert
+ * 与种子 SQL。
  *
  * <p>默认文件为 {@code ./data/payroll.mv.db}。首次启动自动建表，并把 classpath 中的演示数据
  * 迁移进库；之后所有修改都以数据库为准。
  */
 public final class PayrollDatabase {
 
+    static final String MIGRATION_LOCATION = "classpath:db/migration/common";
+    /** 统一迁移前创建的 H2 库按 V21 打基线，避免对既有数据重放历史迁移。 */
+    private static final String H2_BASELINE_VERSION = "21";
+
     public static final String DEFAULT_URL =
-            "jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE";
+            "jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL";
     private static final String DEFAULT_USER = "sa";
     private static final String DEFAULT_PASSWORD = "";
-
-    private static final List<String> SCHEMA = List.of(
-            """
-            CREATE TABLE IF NOT EXISTS departments (
-                department_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(64) NOT NULL UNIQUE,
-                description VARCHAR(200) NOT NULL DEFAULT '',
-                active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS roles (
-                code VARCHAR(32) PRIMARY KEY,
-                name VARCHAR(64) NOT NULL,
-                description VARCHAR(200) NOT NULL DEFAULT '',
-                permissions_json CLOB NOT NULL,
-                builtin BOOLEAN NOT NULL DEFAULT FALSE,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS app_users (
-                user_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(32) NOT NULL UNIQUE,
-                display_name VARCHAR(64) NOT NULL,
-                password_hash VARCHAR(100) NOT NULL,
-                role_code VARCHAR(32) NOT NULL,
-                department_id BIGINT,
-                active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_login_at TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                session_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                title VARCHAR(120) NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                session_id BIGINT NOT NULL,
-                role VARCHAR(16) NOT NULL,
-                content CLOB NOT NULL,
-                tools_json CLOB,
-                model VARCHAR(128),
-                turn_id VARCHAR(36),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            ALTER TABLE chat_sessions
-                ADD COLUMN IF NOT EXISTS context_summary CLOB
-            """,
-            """
-            ALTER TABLE chat_sessions
-                ADD COLUMN IF NOT EXISTS context_turns INT NOT NULL DEFAULT 0
-            """,
-            """
-            ALTER TABLE chat_sessions
-                ADD COLUMN IF NOT EXISTS persona_key VARCHAR(128)
-            """,
-            """
-            ALTER TABLE chat_sessions
-                ADD COLUMN IF NOT EXISTS kb_series_ids CLOB
-            """,
-            """
-            ALTER TABLE chat_messages
-                ADD COLUMN IF NOT EXISTS citations_json CLOB
-            """,
-            """
-            ALTER TABLE chat_messages
-                ADD COLUMN IF NOT EXISTS routing_json CLOB
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user
-                ON chat_sessions (user_id, updated_at)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_messages_session
-                ON chat_messages (session_id, message_id)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_turns (
-                turn_id VARCHAR(36) PRIMARY KEY,
-                session_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                user_message_id BIGINT NOT NULL DEFAULT 0,
-                assistant_message_id BIGINT NOT NULL DEFAULT 0,
-                status VARCHAR(16) NOT NULL,
-                owner_node VARCHAR(64),
-                fencing_token BIGINT NOT NULL DEFAULT 0,
-                last_seq BIGINT NOT NULL DEFAULT 0,
-                error_message VARCHAR(500),
-                started_at TIMESTAMP NOT NULL,
-                updated_at TIMESTAMP NOT NULL,
-                heartbeat_at TIMESTAMP,
-                finished_at TIMESTAMP
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_turns_session
-                ON chat_turns (session_id, started_at)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_turns_status
-                ON chat_turns (status, updated_at)
-            """,
-            """
-            ALTER TABLE chat_turns
-                ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP
-            """,
-            """
-            UPDATE chat_turns SET heartbeat_at = updated_at WHERE heartbeat_at IS NULL
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_turns_heartbeat
-                ON chat_turns (status, heartbeat_at)
-            """,
-            """
-            ALTER TABLE chat_turns
-                ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMP
-            """,
-            """
-            UPDATE chat_turns SET deadline_at = DATEADD(MINUTE, 30, started_at)
-                WHERE deadline_at IS NULL AND finished_at IS NULL
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_fencing (
-                session_id BIGINT PRIMARY KEY,
-                fencing_token BIGINT NOT NULL
-            )
-            """,
-            """
-            ALTER TABLE chat_messages
-                ADD COLUMN IF NOT EXISTS turn_id VARCHAR(36)
-            """,
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_messages_turn
-                ON chat_messages (turn_id)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_attachments (
-                attachment_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                session_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                message_id BIGINT,
-                name VARCHAR(255) NOT NULL,
-                ext VARCHAR(16) NOT NULL,
-                size_bytes BIGINT NOT NULL,
-                storage_key VARCHAR(255) NOT NULL,
-                text_chars INT NOT NULL DEFAULT 0,
-                status VARCHAR(16) NOT NULL,
-                error VARCHAR(500),
-                created_at TIMESTAMP NOT NULL
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_attachments_message
-                ON chat_attachments (session_id, message_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_attachments_user
-                ON chat_attachments (user_id, created_at)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_tool_traces (
-                trace_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                message_id BIGINT NOT NULL,
-                session_id BIGINT NOT NULL,
-                tool_call_id VARCHAR(128),
-                tool_name VARCHAR(64) NOT NULL,
-                agent VARCHAR(32),
-                args_json CLOB,
-                result_json CLOB,
-                truncated BOOLEAN NOT NULL DEFAULT FALSE,
-                result_state VARCHAR(16),
-                duration_ms BIGINT NOT NULL DEFAULT 0,
-                employees_json CLOB,
-                period VARCHAR(16),
-                department VARCHAR(64),
-                amounts_json CLOB,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_message
-                ON chat_tool_traces (message_id, trace_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_session
-                ON chat_tool_traces (session_id)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS employees (
-                employee_id VARCHAR(32) PRIMARY KEY,
-                name VARCHAR(64) NOT NULL,
-                department VARCHAR(64) NOT NULL,
-                job_title VARCHAR(64),
-                base_salary DECIMAL(14,2) NOT NULL,
-                position_allowance DECIMAL(14,2) NOT NULL DEFAULT 0,
-                housing_fund_rate DECIMAL(8,4) NOT NULL DEFAULT 0,
-                social_insurance_base DECIMAL(14,2),
-                special_additional_deduction DECIMAL(14,2) NOT NULL DEFAULT 0,
-                hire_date DATE NOT NULL,
-                bank_account_masked VARCHAR(64),
-                email VARCHAR(128),
-                city VARCHAR(32) NOT NULL DEFAULT '默认',
-                active BOOLEAN NOT NULL DEFAULT TRUE,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS attendance (
-                employee_id VARCHAR(32) NOT NULL,
-                period VARCHAR(7) NOT NULL,
-                personal_leave_days DECIMAL(6,2) NOT NULL DEFAULT 0,
-                sick_leave_days DECIMAL(6,2) NOT NULL DEFAULT 0,
-                absent_days DECIMAL(6,2) NOT NULL DEFAULT 0,
-                weekday_overtime_hours DECIMAL(8,2) NOT NULL DEFAULT 0,
-                rest_day_overtime_hours DECIMAL(8,2) NOT NULL DEFAULT 0,
-                holiday_overtime_hours DECIMAL(8,2) NOT NULL DEFAULT 0,
-                PRIMARY KEY (employee_id, period)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS variable_pay (
-                employee_id VARCHAR(32) NOT NULL,
-                period VARCHAR(7) NOT NULL,
-                performance_bonus DECIMAL(14,2) NOT NULL DEFAULT 0,
-                other_allowance DECIMAL(14,2) NOT NULL DEFAULT 0,
-                PRIMARY KEY (employee_id, period)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS performance_reviews (
-                employee_id VARCHAR(32) NOT NULL,
-                period VARCHAR(7) NOT NULL,
-                score DECIMAL(6,2) NOT NULL,
-                coefficient DECIMAL(8,4) NOT NULL,
-                review_comment VARCHAR(500),
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (employee_id, period)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS city_policies (
-                city VARCHAR(32) PRIMARY KEY,
-                policy_json CLOB NOT NULL,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS payroll_runs (
-                run_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                period VARCHAR(7) NOT NULL,
-                scope VARCHAR(64) NOT NULL,
-                status VARCHAR(16) NOT NULL,
-                employee_count INT NOT NULL,
-                total_gross DECIMAL(16,2) NOT NULL,
-                total_deductions DECIMAL(16,2) NOT NULL,
-                total_net DECIMAL(16,2) NOT NULL,
-                total_employer_cost DECIMAL(16,2) NOT NULL,
-                excel_path VARCHAR(512),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                finalized_at TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS payroll_details (
-                run_id BIGINT NOT NULL,
-                employee_id VARCHAR(32) NOT NULL,
-                employee_name VARCHAR(64),
-                department VARCHAR(64),
-                city VARCHAR(32),
-                email VARCHAR(128),
-                adjustment_json CLOB,
-                result_json CLOB NOT NULL,
-                email_status VARCHAR(24) NOT NULL DEFAULT 'PENDING',
-                email_reason VARCHAR(500),
-                PRIMARY KEY (run_id, employee_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS payroll_run_failures (
-                run_id BIGINT NOT NULL,
-                employee_id VARCHAR(32) NOT NULL,
-                message VARCHAR(500),
-                PRIMARY KEY (run_id, employee_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS email_deliveries (
-                delivery_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                run_id BIGINT NOT NULL,
-                employee_id VARCHAR(32) NOT NULL,
-                email VARCHAR(128),
-                status VARCHAR(24) NOT NULL,
-                reason VARCHAR(500),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS approval_flows (
-                flow_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(64) NOT NULL,
-                scope_type VARCHAR(16) NOT NULL,
-                scope_value VARCHAR(64) NOT NULL,
-                min_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
-                max_amount DECIMAL(16,2),
-                priority INT NOT NULL DEFAULT 100,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                description VARCHAR(200) NOT NULL DEFAULT '',
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS approval_flow_steps (
-                step_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                flow_id BIGINT NOT NULL,
-                step_order INT NOT NULL,
-                name VARCHAR(64) NOT NULL,
-                approver_type VARCHAR(16) NOT NULL,
-                approver_value VARCHAR(64) NOT NULL,
-                min_amount DECIMAL(16,2),
-                max_amount DECIMAL(16,2),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_approval_flow_steps_flow
-                ON approval_flow_steps (flow_id, step_order)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS workflow_steps_json CLOB
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS current_step INT NOT NULL DEFAULT 0
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approval_flow_id BIGINT
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approval_flow_name VARCHAR(64)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS submitted_by_id BIGINT
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS submitted_by_name VARCHAR(64)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMP
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS submit_comment VARCHAR(500)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approved_by_id BIGINT
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approved_by_name VARCHAR(64)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS approval_comment VARCHAR(500)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS rejected_by_id BIGINT
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS rejected_by_name VARCHAR(64)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(500)
-            """,
-            """
-            ALTER TABLE payroll_runs
-                ADD COLUMN IF NOT EXISTS snapshot_hash VARCHAR(64)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS payroll_approval_events (
-                event_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                run_id BIGINT NOT NULL,
-                action VARCHAR(16) NOT NULL,
-                actor_id BIGINT,
-                actor_name VARCHAR(64),
-                flow_id BIGINT,
-                flow_name VARCHAR(64),
-                comment VARCHAR(500),
-                snapshot_hash VARCHAR(64),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            ALTER TABLE payroll_approval_events
-                ADD COLUMN IF NOT EXISTS step_order INT
-            """,
-            """
-            ALTER TABLE payroll_approval_events
-                ADD COLUMN IF NOT EXISTS step_name VARCHAR(64)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_approval_events_run
-                ON payroll_approval_events (run_id, event_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_approval_flows_scope
-                ON approval_flows (scope_type, scope_value, enabled)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS audit_log (
-                audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                actor_id BIGINT,
-                actor_name VARCHAR(64),
-                action VARCHAR(128) NOT NULL,
-                resource_type VARCHAR(32),
-                resource_id VARCHAR(256),
-                before_json CLOB,
-                after_json CLOB,
-                payload_json CLOB,
-                ip VARCHAR(64),
-                user_agent VARCHAR(256),
-                result VARCHAR(16) NOT NULL,
-                status_code INT,
-                message VARCHAR(500),
-                trace_id VARCHAR(64)
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_audit_occurred
-                ON audit_log (occurred_at)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_audit_actor
-                ON audit_log (actor_id, occurred_at)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_audit_resource
-                ON audit_log (resource_type, resource_id, occurred_at)
-            """,
-            // 动态团队数据地基。run_mode / agent_role / comment_text 避开 H2 关键字。
-            """
-            CREATE TABLE IF NOT EXISTS agent_team_runs (
-                run_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                plan_id VARCHAR(64) NOT NULL,
-                session_id BIGINT NOT NULL,
-                message_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                run_mode VARCHAR(16) NOT NULL,
-                task_type VARCHAR(32),
-                template_id VARCHAR(64),
-                plan_json CLOB NOT NULL,
-                catalog_snapshot_json CLOB,
-                score_snapshot_json CLOB,
-                status VARCHAR(24) NOT NULL,
-                fallback_reason VARCHAR(256),
-                baseline_run_id BIGINT,
-                fallback_of_run_id BIGINT,
-                retry_of_run_id BIGINT,
-                is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-                total_ms BIGINT NOT NULL DEFAULT 0,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                closed_at TIMESTAMP,
-                archived_at TIMESTAMP,
-                deleted_at TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS agent_run_records (
-                record_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                run_id BIGINT NOT NULL,
-                node_id VARCHAR(64) NOT NULL,
-                stage_key VARCHAR(64),
-                agent_id VARCHAR(64),
-                agent_role VARCHAR(32),
-                status VARCHAR(24) NOT NULL,
-                tool_calls INT NOT NULL DEFAULT 0,
-                tool_errors INT NOT NULL DEFAULT 0,
-                validation_passed BOOLEAN,
-                output_chars INT NOT NULL DEFAULT 0,
-                duration_ms BIGINT NOT NULL DEFAULT 0,
-                trace_ids_json CLOB,
-                input_digest VARCHAR(64),
-                message_json CLOB,
-                error_message VARCHAR(512),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_feedback (
-                feedback_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                message_id BIGINT NOT NULL,
-                session_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                rating VARCHAR(8) NOT NULL,
-                tags_json CLOB,
-                comment_text VARCHAR(1000),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT uq_chat_feedback_message_user UNIQUE (message_id, user_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_action_proposals (
-                proposal_id VARCHAR(36) PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                session_id BIGINT NOT NULL,
-                message_id BIGINT NOT NULL DEFAULT 0,
-                agent_path VARCHAR(32),
-                tool_name VARCHAR(128) NOT NULL,
-                params_json CLOB,
-                summary VARCHAR(500) NOT NULL,
-                risk_level VARCHAR(16) NOT NULL DEFAULT 'NORMAL',
-                safety_source VARCHAR(32),
-                status VARCHAR(16) NOT NULL,
-                idempotency_key VARCHAR(128),
-                snapshot_hash VARCHAR(64),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP,
-                confirmed_by BIGINT,
-                confirmed_at TIMESTAMP,
-                executed_at TIMESTAMP,
-                result_json CLOB,
-                error_message VARCHAR(500)
-            )
-            """,
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_action_proposals_idempotency
-                ON chat_action_proposals (user_id, idempotency_key)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_action_proposals_session
-                ON chat_action_proposals (session_id, status)
-            """,
-            """
-            ALTER TABLE chat_tool_traces ADD COLUMN IF NOT EXISTS run_id BIGINT
-            """,
-            """
-            ALTER TABLE chat_tool_traces ADD COLUMN IF NOT EXISTS node_id VARCHAR(64)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_message
-                ON agent_team_runs (message_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_session
-                ON agent_team_runs (session_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_team_runs_primary
-                ON agent_team_runs (message_id, is_primary)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_run_records_run
-                ON agent_run_records (run_id, node_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_run_records_agent
-                ON agent_run_records (agent_id, created_at)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_feedback_message
-                ON chat_feedback (message_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_tool_traces_run
-                ON chat_tool_traces (run_id, node_id)
-            """);
 
     private static final Map<String, PayrollPolicy> DEMO_CITY_POLICIES = demoCityPolicies();
 
@@ -647,11 +59,19 @@ public final class PayrollDatabase {
     private final HikariDataSource pool;
 
     private PayrollDatabase(String url, String user, String password, int poolSize) {
-        this.url = url;
+        this.url = withMysqlMode(url);
         this.user = user;
         this.password = password;
-        this.mysql = url.startsWith("jdbc:mysql:");
-        this.pool = mysql ? createPool(url, user, password, poolSize) : null;
+        this.mysql = this.url.startsWith("jdbc:mysql:");
+        this.pool = mysql ? createPool(this.url, user, password, poolSize) : null;
+    }
+
+    /** 共享迁移含 MySQL 语法，H2 必须以 MySQL 兼容模式打开。 */
+    private static String withMysqlMode(String url) {
+        if (!url.startsWith("jdbc:h2:") || url.toUpperCase(Locale.ROOT).contains("MODE=")) {
+            return url;
+        }
+        return url + (url.endsWith(";") ? "" : ";") + "MODE=MySQL";
     }
 
     /** MySQL 使用连接池；H2 保持单写者直连，避免本地/测试创建大量池与后台线程。 */
@@ -747,23 +167,12 @@ public final class PayrollDatabase {
     }
 
     private void initialize() {
-        if (mysql) {
-            migrateMysql();
-        } else {
+        if (!mysql) {
             ensureDirectory();
         }
+        migrate();
         try (Connection connection = connection()) {
             connection.setAutoCommit(false);
-            if (!mysql) {
-                try (Statement statement = connection.createStatement()) {
-                    for (String ddl : SCHEMA) {
-                        statement.execute(ddl);
-                    }
-                    for (String ddl : io.agentscope.examples.payroll.kb.KbSchema.DDL) {
-                        statement.execute(ddl);
-                    }
-                }
-            }
             seedCityPolicies(connection);
             seedReferenceData(connection);
             seedIdentityData(connection);
@@ -775,22 +184,172 @@ public final class PayrollDatabase {
         }
     }
 
-    /** MySQL 表结构由 Flyway 版本化管理，避免内联 DDL 与已有库结构漂移。 */
-    private void migrateMysql() {
-        Flyway flyway =
+    /**
+     * 表结构统一由 Flyway 版本化管理，H2 与 MySQL 执行同一套脚本。
+     *
+     * <p>H2 本地库在统一迁移前由内联 DDL 创建，没有迁移历史：先用同一套脚本幂等补齐结构，
+     * 再按 V21 打基线，既有数据不动，后续版本正常增量迁移。
+     */
+    private void migrate() {
+        var config =
                 Flyway.configure()
-                        .dataSource(pool)
-                        .locations("classpath:db/migration/mysql")
-                        .table("flyway_schema_history")
-                        .load();
+                        .locations(MIGRATION_LOCATION)
+                        .table("flyway_schema_history");
+        if (pool != null) {
+            config = config.dataSource(pool);
+        } else {
+            upgradeLegacyH2();
+            config =
+                    config.dataSource(url, user, password)
+                            .baselineOnMigrate(true)
+                            .baselineVersion(H2_BASELINE_VERSION);
+        }
         try {
-            flyway.migrate();
+            config.load().migrate();
         } catch (RuntimeException e) {
             throw new IllegalStateException(
-                    "MySQL 表结构迁移失败：目标库必须为空库或已由 Flyway 管理；"
-                            + "请勿手工建表，也不要指向已有业务表的库。原始错误："
+                    (mysql ? "MySQL" : "H2")
+                            + " 表结构迁移失败：请确认目标库为空库或已由 Flyway 管理，"
+                            + "且未手工修改过表结构。原始错误："
                             + e.getMessage(),
                     e);
+        }
+    }
+
+    /**
+     * 统一迁移前的 H2 库没有 flyway_schema_history，直接打基线会漏建后续版本的表。
+     *
+     * <p>按版本顺序重放同一套脚本，把 CREATE TABLE / CREATE INDEX / ADD COLUMN 改写成
+     * IF NOT EXISTS 形式，幂等补齐缺失结构；之后由 Flyway 记录 V21 基线。
+     */
+    private void upgradeLegacyH2() {
+        if (hasSchemaHistory() || tableCount() == 0) {
+            return;
+        }
+        Flyway flyway =
+                Flyway.configure()
+                        .locations(MIGRATION_LOCATION)
+                        .dataSource(url, user, password)
+                        .load();
+        for (var info : flyway.info().all()) {
+            if (info.getVersion() == null
+                    || info.getScript() == null
+                    || !appliedBaseline(info.getVersion().toString(), H2_BASELINE_VERSION)) {
+                continue;
+            }
+            for (String statement : splitStatements(readMigration(info.getScript()))) {
+                executeIfNotExists(statement);
+            }
+        }
+    }
+
+    /**
+     * 补建只重放到基线版本为止：基线之后的脚本要留给 Flyway 真正执行，否则历史库会被剧透成
+     * 「对象已存在、但没有迁移记录」，下一次真实迁移撞上 {@code CREATE TABLE} 直接失败。
+     */
+    static boolean appliedBaseline(String version, String baseline) {
+        String[] left = version.split("\\.");
+        String[] right = baseline.split("\\.");
+        for (int i = 0; i < Math.max(left.length, right.length); i++) {
+            int a = i < left.length ? Integer.parseInt(left[i]) : 0;
+            int b = i < right.length ? Integer.parseInt(right[i]) : 0;
+            if (a != b) {
+                return a < b;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasSchemaHistory() {
+        return scalar(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"
+                        + " WHERE TABLE_SCHEMA = 'PUBLIC' AND TABLE_NAME = 'flyway_schema_history'") > 0;
+    }
+
+    private int tableCount() {
+        return scalar(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'");
+    }
+
+    private int scalar(String sql) {
+        try (Connection connection = connection();
+                Statement statement = connection.createStatement();
+                ResultSet rs = statement.executeQuery(sql)) {
+            rs.next();
+            return rs.getInt(1);
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取数据库元数据失败：" + e.getMessage(), e);
+        }
+    }
+
+    private static String readMigration(String script) {
+        String path = MIGRATION_LOCATION.replace("classpath:", "") + "/" + script;
+        try (InputStream in = PayrollDatabase.class.getClassLoader().getResourceAsStream(path)) {
+            if (in == null) {
+                throw new IllegalStateException("找不到迁移脚本：" + path);
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("读取迁移脚本失败：" + path, e);
+        }
+    }
+
+    /** 迁移脚本只含单引号字符串与 -- 行注释，按分号切分即可。 */
+    static List<String> splitStatements(String sql) {
+        List<String> statements = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (!quoted && c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-') {
+                while (i < sql.length() && sql.charAt(i) != '\n') {
+                    i++;
+                }
+                current.append('\n');
+                continue;
+            }
+            if (c == '\'') {
+                quoted = !quoted;
+            }
+            if (c == ';' && !quoted) {
+                addStatement(statements, current);
+            } else {
+                current.append(c);
+            }
+        }
+        addStatement(statements, current);
+        return statements;
+    }
+
+    private static void addStatement(List<String> statements, StringBuilder current) {
+        String statement = current.toString().trim();
+        if (!statement.isEmpty()) {
+            statements.add(statement);
+        }
+        current.setLength(0);
+    }
+
+    private void executeIfNotExists(String statement) {
+        String idempotent =
+                statement
+                        .replaceFirst(
+                                "(?is)^CREATE\\s+TABLE\\s+(?!IF\\s+NOT\\s+EXISTS)",
+                                "CREATE TABLE IF NOT EXISTS ")
+                        .replaceFirst(
+                                "(?is)^CREATE\\s+UNIQUE\\s+INDEX\\s+(?!IF\\s+NOT\\s+EXISTS)",
+                                "CREATE UNIQUE INDEX IF NOT EXISTS ")
+                        .replaceFirst(
+                                "(?is)^CREATE\\s+INDEX\\s+(?!IF\\s+NOT\\s+EXISTS)",
+                                "CREATE INDEX IF NOT EXISTS ")
+                        .replaceFirst(
+                                "(?is)^(ALTER\\s+TABLE\\s+\\S+\\s+ADD\\s+COLUMN\\s+)(?!IF\\s+NOT\\s+EXISTS)",
+                                "$1IF NOT EXISTS ");
+        try (Connection connection = connection();
+                Statement jdbc = connection.createStatement()) {
+            jdbc.execute(idempotent);
+        } catch (SQLException e) {
+            throw new IllegalStateException(
+                    "补建历史 H2 表结构失败：" + e.getMessage() + "\nSQL: " + idempotent, e);
         }
     }
 

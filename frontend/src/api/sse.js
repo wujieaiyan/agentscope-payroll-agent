@@ -22,6 +22,19 @@ export async function resumeTurn(sessionId, turnId, afterSeq, onEvent, signal) {
   await consume(response, onEvent);
 }
 
+/** 429 统一契约 {code,retryAfterSeconds,message}：把可重试信息挂到 Error 上供 UI 倒计时。 */
+function rateLimitedError(response, payload) {
+  const message = (payload && payload.message) || `请求失败：HTTP ${response.status}`;
+  const error = new Error(message);
+  error.status = response.status;
+  if (payload && payload.code) error.code = payload.code;
+  const fromBody = Number(payload && payload.retryAfterSeconds);
+  const fromHeader = Number(response.headers.get('Retry-After'));
+  const retryAfter = [fromBody, fromHeader].find((value) => Number.isFinite(value) && value > 0);
+  if (retryAfter) error.retryAfterSeconds = retryAfter;
+  return error;
+}
+
 async function consume(response, onEvent) {
   if (response.status === 401) {
     window.location.href = '/login';
@@ -34,7 +47,7 @@ async function consume(response, onEvent) {
     } catch (error) {
       payload = null;
     }
-    throw new Error((payload && payload.message) || `请求失败：HTTP ${response.status}`);
+    throw rateLimitedError(response, payload);
   }
   if (!response.body) {
     throw new Error('当前浏览器不支持流式响应');

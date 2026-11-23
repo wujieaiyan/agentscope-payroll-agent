@@ -33,11 +33,16 @@ const sourceListModal = ref(null);
 const citationModal = ref(null);
 const attachments = ref([]);
 const attachmentInput = ref(null);
+const composerInput = ref(null);
 const attachmentBusy = ref(false);
 const draggingFiles = ref(false);
 const attachmentPreview = ref(null);
+const questionDrafts = reactive({});
+/** 429 后的发送冷却：按服务端 retryAfterSeconds 倒计时，避免容量恢复前反复提交。 */
+const retryCooldown = ref(0);
 const ATTACHMENT_ACCEPT = '.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
 const ATTACHMENT_EXT = ['docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
+const QUESTION_MAX = 2000;
 
 let controller = null;
 let turnState = { turnId: null, lastSeq: 0, startedAt: 0 };
@@ -47,6 +52,7 @@ let tabSync = null;
 let mirroring = false;
 let mirrorFinishing = false;
 let persistTimer = null;
+let retryTimer = null;
 let unmounted = false;
 const RESUME_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 // 打印机式输出：文本先入队再按固定节奏吐出，续流重放时也能逐字可见。
@@ -61,7 +67,12 @@ let typeTimer = null;
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value) || null);
 const attachmentsReady = computed(() => attachments.value.every((item) => item.status === 'READY'));
 const canSend = computed(
-  () => !busy.value && !attachmentBusy.value && attachmentsReady.value && draft.value.trim().length > 0
+  () =>
+    !busy.value &&
+    retryCooldown.value <= 0 &&
+    !attachmentBusy.value &&
+    attachmentsReady.value &&
+    draft.value.trim().length > 0
 );
 
 /** 流式阶段只统计已完成的 skill_read 次数，用于提示本轮读了多少个技能文件。 */
@@ -121,6 +132,14 @@ function formatTime(value) {
   return text.length > 10 ? text.slice(5) : text;
 }
 
+// 本地时间字符串：与服务端 created_at 同格式，避免乐观插入的消息显示成 UTC。
+function localTimestamp() {
+  const now = new Date();
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    + `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value) || value <= 0) return '';
   if (value < 1024) return `${value} B`;
@@ -142,14 +161,49 @@ function attachmentIcon(name) {
 }
 
 function attachmentStatusText(item) {
-  if (item.status === 'PARSING') return '解析中…';
+  if (item.status === 'PARSING') {
+    const progress = Number(item.progress) || 0;
+    return progress > 0 ? `解析中 ${progress}%` : '解析中…';
+  }
   if (item.status === 'FAILED') return item.error || '解析失败';
-  return item.text_chars ? `已识别 ${item.text_chars} 字` : '已就绪';
+  const engine = attachmentEngineLabel(item);
+  if (item.text_chars) {
+    return engine ? `已识别 ${item.text_chars} 字 · ${engine}` : `已识别 ${item.text_chars} 字`;
+  }
+  return engine ? `已就绪 · ${engine}` : '已就绪';
+}
+
+function attachmentEngineLabel(item) {
+  const meta = item?.extraction_meta;
+  if (!meta) return '';
+  if (meta.model) return meta.model;
+  if (meta.engine) return String(meta.engine).replace(/^native\//, '');
+  return '';
+}
+
+let attachmentPollTimer = null;
+
+function stopAttachmentPolling() {
+  if (attachmentPollTimer) {
+    window.clearTimeout(attachmentPollTimer);
+    attachmentPollTimer = null;
+  }
+}
+
+function scheduleAttachmentPolling() {
+  stopAttachmentPolling();
+  if (!activeId.value) return;
+  if (!attachments.value.some((item) => item.status === 'PARSING')) return;
+  attachmentPollTimer = window.setTimeout(async () => {
+    attachmentPollTimer = null;
+    await loadAttachments();
+  }, 1500);
 }
 
 async function loadAttachments() {
   if (!activeId.value) {
     attachments.value = [];
+    stopAttachmentPolling();
     return;
   }
   try {
@@ -157,6 +211,7 @@ async function loadAttachments() {
   } catch (error) {
     attachments.value = [];
   }
+  scheduleAttachmentPolling();
 }
 
 function pickAttachments() {
@@ -220,9 +275,32 @@ async function removeAttachment(item) {
   }
 }
 
+async function reparseAttachment(item) {
+  if (!activeId.value || attachmentBusy.value || item.status === 'PARSING') return;
+  try {
+    const updated = await api(
+      `/api/chat/sessions/${activeId.value}/attachments/${item.id}/reparse`,
+      { method: 'POST', body: {} }
+    );
+    attachments.value = attachments.value.map((entry) =>
+      entry.id === item.id ? updated : entry
+    );
+    scheduleAttachmentPolling();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 async function openAttachmentPreview(item) {
   if (item.status !== 'READY') return;
-  attachmentPreview.value = { name: item.name, text: '', truncated: false, chars: 0, loading: true };
+  attachmentPreview.value = {
+    name: item.name,
+    text: '',
+    truncated: false,
+    chars: 0,
+    loading: true,
+    engine: attachmentEngineLabel(item),
+  };
   try {
     const preview = await api(
       `/api/chat/sessions/${activeId.value}/attachments/${item.id}/text`
@@ -233,6 +311,7 @@ async function openAttachmentPreview(item) {
       truncated: Boolean(preview?.truncated),
       chars: preview?.chars || 0,
       loading: false,
+      engine: attachmentEngineLabel(item),
     };
   } catch (error) {
     attachmentPreview.value = null;
@@ -878,7 +957,22 @@ function newStreamingState() {
     resumable: false,
     gap: false,
     gapMessage: '',
+    queue: null,
   };
+}
+
+/** 429 冷却倒计时：期间发送按钮保持禁用，倒计时结束自动恢复。 */
+function startRetryCooldown(seconds) {
+  const wait = Math.max(1, Math.min(300, Math.round(Number(seconds) || 5)));
+  retryCooldown.value = wait;
+  if (retryTimer) window.clearInterval(retryTimer);
+  retryTimer = window.setInterval(() => {
+    retryCooldown.value = Math.max(0, retryCooldown.value - 1);
+    if (retryCooldown.value <= 0) {
+      window.clearInterval(retryTimer);
+      retryTimer = null;
+    }
+  }, 1000);
 }
 
 function delay(ms) {
@@ -963,6 +1057,12 @@ function handleEvent(event, data) {
   if (!state) return;
   touchSeq(data);
   switch (event) {
+    case 'queued':
+      state.queue = {
+        position: Math.max(1, Number(data.position) || 1),
+        etaSeconds: Math.max(0, Number(data.etaSeconds) || 0),
+      };
+      break;
     case 'turn':
       // 续流重放时同一个 turn 不应把游标回退到 0
       if (data.turn_id && turnState.turnId !== data.turn_id) {
@@ -973,6 +1073,7 @@ function handleEvent(event, data) {
     case 'snapshot':
       // 冷恢复直接替换为已合并状态，不再逐字重放历史增量。
       stopTyping();
+      state.queue = null;
       state.pendingText = '';
       state.text = data.text || '';
       if (Array.isArray(data.tools)) {
@@ -1000,6 +1101,7 @@ function handleEvent(event, data) {
       break;
     case 'start':
       state.model = data.model || state.model;
+      state.queue = null;
       break;
     case 'agent_start':
       state.agents.push({ id: data.agent, label: data.label || data.agent, text: '' });
@@ -1060,7 +1162,7 @@ function handleEvent(event, data) {
     case 'gap':
       // 断点已过期：丢弃残缺前缀并停止拼接，完成后以落库消息呈现完整回答。
       state.gap = true;
-      state.gapMessage = data.message || '部分回答过程已过期，完成后将以最终消息展示';
+      state.gapMessage = data.message || '部分回答过程已过期，回答已保存，完成后可刷新查看完整内容';
       state.text = '';
       state.pendingText = '';
       state.thinking = '';
@@ -1073,6 +1175,7 @@ function handleEvent(event, data) {
       break;
     case 'text':
       if (state.gap) break;
+      if (data.text) state.queue = null;
       enqueueText(data.text || '');
       break;
     case 'action_proposal':
@@ -1089,6 +1192,11 @@ function handleEvent(event, data) {
       state.cache = data.cache || null;
       if (Array.isArray(data.citations)) state.citations = data.citations;
       if (Array.isArray(data.proposals)) state.proposals = data.proposals;
+      // recovered=true 表示 done 由服务端按落库消息补发：断点过期清空拼接后仍要展示最终回答。
+      if (data.recovered) {
+        state.gap = false;
+        gapNotice.value = '';
+      }
       // 模型没有流式文本时才用 done 的整段回复兜底，避免与队列重复；断点过期时交给落库消息。
       if (!state.gap && !state.text && !state.pendingText && data.reply) enqueueText(data.reply);
       clearTurnMarker(activeId.value, turnState.turnId);
@@ -1132,6 +1240,7 @@ function streamSnapshot() {
       cancelled: state.cancelled,
       gap: state.gap,
       gapMessage: state.gapMessage,
+      queue: state.queue,
     },
   };
 }
@@ -1490,7 +1599,7 @@ async function send() {
     content: text,
     tools: [],
     attachments: sendingAttachments,
-    created_at: new Date().toISOString(),
+    created_at: localTimestamp(),
   });
   scrollBottom(true);
 
@@ -1507,6 +1616,12 @@ async function send() {
     if (error.name !== 'AbortError' && state && !state.cancelled && !unmounted) {
       if (turnState.turnId) {
         await resumeLoop(sessionId, turnState.lastSeq);
+      } else if (error.status === 429) {
+        // 容量拒绝：入口还没有建轮次，恢复输入并倒计时，服务端已给出可重试时间。
+        if (!draft.value) draft.value = text;
+        if (!attachments.value.length) attachments.value = sendingAttachments;
+        startRetryCooldown(error.retryAfterSeconds);
+        streamFailed(error.message || '当前排队已满，请稍后重试');
       } else {
         streamFailed('网络异常，请求未送达，请重试');
       }
@@ -1583,6 +1698,36 @@ function onKeydown(event) {
 function useSuggestion(text) {
   draft.value = text;
   send();
+}
+
+/** 把助手回答插入输入框当前光标处，保留已输入内容并自动补换行，便于继续编辑。 */
+function insertToComposer(message) {
+  const snippet = (message.content || '').trim();
+  if (!snippet) {
+    toast('这条回答没有可插入的内容', 'warning');
+    return;
+  }
+  const input = composerInput.value;
+  const start = input ? input.selectionStart : draft.value.length;
+  const end = input ? input.selectionEnd : draft.value.length;
+  const before = draft.value.slice(0, start);
+  const after = draft.value.slice(end);
+  const lead = before && !before.endsWith('\n') ? '\n' : '';
+  const tail = after && !after.startsWith('\n') ? '\n' : '';
+  draft.value = `${before}${lead}${snippet}${tail}${after}`;
+  const caret = before.length + lead.length + snippet.length;
+  nextTick(() => {
+    const target = composerInput.value;
+    if (!target) return;
+    target.focus();
+    target.setSelectionRange(caret, caret);
+    target.scrollTop = target.scrollHeight;
+  });
+  if (draft.value.length > QUESTION_MAX) {
+    toast(`已插入，当前 ${draft.value.length} 字，超过 ${QUESTION_MAX} 字上限，请删减后再发送`, 'warning');
+  } else {
+    toast('已插入输入框，可继续编辑后发送');
+  }
 }
 
 async function previewRoute() {
@@ -1710,18 +1855,170 @@ async function submitFeedback(message, rating) {
   }
 }
 
-async function decide(proposal, decision) {
-  if (decision === 'CONFIRM' && !window.confirm('确认执行该写操作？')) return;
+function isRequestConfirm(proposal) {
+  return Boolean(proposal) && proposal.tool_name === 'request_confirmation';
+}
+
+function confirmParams(proposal) {
+  if (!proposal) return {};
+  if (proposal.params && typeof proposal.params === 'object') return proposal.params;
+  try {
+    return JSON.parse(proposal.params_json || '{}');
+  } catch (error) {
+    return {};
+  }
+}
+
+function confirmDetail(proposal) {
+  const detail = confirmParams(proposal).detail;
+  return detail ? String(detail) : '';
+}
+
+function isQuestionProposal(proposal) {
+  return Boolean(proposal) && proposal.tool_name === 'request_input';
+}
+
+function questionItems(proposal) {
+  const list = confirmParams(proposal).questions;
+  return Array.isArray(list) ? list : [];
+}
+
+function questionDraft(proposal) {
+  const key = proposal.proposal_id;
+  if (!questionDrafts[key]) {
+    const state = {};
+    for (const item of questionItems(proposal)) {
+      const qid = String(item.id || '');
+      if (!qid) continue;
+      state[qid] = {
+        selected: item.default_value ? [String(item.default_value)] : [],
+        text: '',
+      };
+    }
+    questionDrafts[key] = state;
+  }
+  return questionDrafts[key];
+}
+
+function questionState(proposal, item) {
+  const draft = questionDraft(proposal);
+  const qid = String(item.id || '');
+  if (!draft[qid]) draft[qid] = { selected: [], text: '' };
+  return draft[qid];
+}
+
+function questionSelected(proposal, item, option) {
+  return questionState(proposal, item).selected.includes(option);
+}
+
+function toggleQuestionOption(proposal, item, option) {
+  const state = questionState(proposal, item);
+  if (item.multiple) {
+    const index = state.selected.indexOf(option);
+    if (index >= 0) state.selected.splice(index, 1);
+    else state.selected.push(option);
+    return;
+  }
+  state.selected = state.selected[0] === option ? [] : [option];
+}
+
+function questionAnswered(proposal, item) {
+  const state = questionState(proposal, item);
+  return state.selected.length > 0 || Boolean(state.text.trim());
+}
+
+function questionReady(proposal) {
+  const items = questionItems(proposal);
+  return items.length > 0 && items.every((item) => questionAnswered(proposal, item));
+}
+
+function questionAnswers(proposal) {
+  const answers = {};
+  for (const item of questionItems(proposal)) {
+    const state = questionState(proposal, item);
+    const values = [...state.selected];
+    const text = state.text.trim();
+    if (text) values.push(text);
+    const qid = String(item.id || '');
+    if (qid && values.length) answers[qid] = values;
+  }
+  return answers;
+}
+
+function questionResult(proposal) {
+  let payload = proposal && proposal.result_json;
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload);
+    } catch (error) {
+      payload = null;
+    }
+  }
+  return payload && typeof payload === 'object' ? payload : null;
+}
+
+function submittedAnswer(proposal, item) {
+  const answers = questionResult(proposal)?.answers;
+  const value = answers ? answers[String(item.id || '')] : null;
+  if (Array.isArray(value)) return value.filter(Boolean).join('；');
+  return value ? String(value) : '未填写';
+}
+
+async function sendFollowup(text) {
+  const startedAt = Date.now();
+  while (busy.value && Date.now() - startedAt < 8000) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  if (busy.value) {
+    draft.value = text;
+    toast('已确认，请点击发送继续', 'info');
+    return;
+  }
+  const previous = draft.value;
+  draft.value = text;
+  await send();
+  if (previous.trim() && !draft.value) draft.value = previous;
+}
+
+async function decide(proposal, decision, answers) {
+  const requestConfirm = isRequestConfirm(proposal);
+  const question = isQuestionProposal(proposal);
+  if (decision === 'CONFIRM' && question && !questionReady(proposal)) {
+    toast('请先完成卡片中的全部问题', 'warning');
+    return;
+  }
+  if (decision === 'CONFIRM' && !requestConfirm && !question && !window.confirm('确认执行该写操作？')) return;
   try {
     const idempotencyKey =
       proposal.idempotency_key ||
       (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${proposal.proposal_id}-${Date.now()}`);
+    const body = { decision, idempotency_key: proposal.idempotency_key || idempotencyKey };
+    if (question && decision === 'CONFIRM') body.answers = answers || questionAnswers(proposal);
     const updated = await api(`/api/chat/actions/${proposal.proposal_id}/confirm`, {
       method: 'POST',
-      body: { decision, idempotency_key: proposal.idempotency_key || idempotencyKey },
+      body,
     });
-    toast(decision === 'CONFIRM' ? '操作已执行' : '提案已取消', 'success');
+    toast(
+      decision === 'CONFIRM'
+        ? requestConfirm || question
+          ? '已提交，正在继续'
+          : '操作已执行'
+        : '提案已取消',
+      'success'
+    );
+    let followup = '';
+    if (requestConfirm && decision === 'CONFIRM') {
+      followup = String(confirmParams(proposal).followup || '');
+    }
+    if (question && decision === 'CONFIRM') {
+      const payload = questionResult(updated) || questionResult(proposal);
+      followup = payload && typeof payload.followup === 'string' ? payload.followup : '';
+    }
     if (updated) Object.assign(proposal, updated);
+    if (followup) {
+      await sendFollowup(followup);
+      return;
+    }
     await loadMessages(true);
   } catch (error) {
     toast(error.message, 'error');
@@ -1773,9 +2070,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true;
+  stopAttachmentPolling();
   window.removeEventListener('online', retryOnNetwork);
   document.removeEventListener('visibilitychange', onVisibilityChange);
   if (persistTimer) window.clearTimeout(persistTimer);
+  if (retryTimer) window.clearInterval(retryTimer);
   stopTyping();
   if (controller) controller.abort();
   if (tabSync) {
@@ -1949,6 +2248,9 @@ onBeforeUnmount(() => {
                   {{ pathLabel(message.routing) }}
                 </button>
                 <button v-if="message.model" class="chip plain">{{ message.model }}</button>
+                <button class="chip" title="插入到输入框" @click="insertToComposer(message)">
+                  插入
+                </button>
                 <button class="chip" @click="openDetail(message, 'traces')">
                   计算依据{{ message.tools?.length ? `（${message.tools.length}）` : '' }}
                 </button>
@@ -2014,13 +2316,58 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="badge">{{ statusText(proposal.status) }}</span>
                 </div>
-                <div class="proposal-summary">
-                  工具 <span class="mono">{{ proposal.tool_name }}</span>
-                </div>
-                <pre v-if="proposal.params_json" class="proposal-params">{{ pretty(proposal.params_json) }}</pre>
+                <template v-if="isRequestConfirm(proposal)">
+                  <div v-if="confirmDetail(proposal)" class="proposal-summary">
+                    {{ confirmDetail(proposal) }}
+                  </div>
+                </template>
+                <template v-else-if="isQuestionProposal(proposal)">
+                  <div class="question-list">
+                    <div
+                      v-for="(item, index) in questionItems(proposal)"
+                      :key="item.id || index"
+                      class="question-item"
+                    >
+                      <div class="question-title">{{ index + 1 }}. {{ item.question }}</div>
+                      <div v-if="item.options && item.options.length" class="question-options">
+                        <button
+                          v-for="option in item.options"
+                          :key="option"
+                          type="button"
+                          class="question-option"
+                          :class="{ on: questionSelected(proposal, item, option) }"
+                          :disabled="proposal.status !== 'PENDING'"
+                          @click="toggleQuestionOption(proposal, item, option)"
+                        >{{ option }}</button>
+                      </div>
+                      <textarea
+                        v-if="proposal.status === 'PENDING' && item.allow_free_text !== false"
+                        v-model="questionState(proposal, item).text"
+                        class="question-text"
+                        rows="2"
+                        placeholder="补充说明（可选）"
+                      ></textarea>
+                      <div v-else-if="proposal.status !== 'PENDING'" class="question-answer">
+                        {{ submittedAnswer(proposal, item) }}
+                      </div>
+                    </div>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="proposal-summary">
+                    工具 <span class="mono">{{ proposal.tool_name }}</span>
+                  </div>
+                  <pre v-if="proposal.params_json" class="proposal-params">{{ pretty(proposal.params_json) }}</pre>
+                </template>
                 <div v-if="proposal.error_message" class="error-text">{{ proposal.error_message }}</div>
                 <div v-if="proposal.status === 'PENDING'" class="proposal-actions">
-                  <button class="primary sm" @click="decide(proposal, 'CONFIRM')">确认执行</button>
+                  <button
+                    class="primary sm"
+                    :disabled="isQuestionProposal(proposal) && !questionReady(proposal)"
+                    @click="decide(proposal, 'CONFIRM')"
+                  >
+                    {{ isQuestionProposal(proposal) ? '提交选择' : isRequestConfirm(proposal) ? '确认' : '确认执行' }}
+                  </button>
                   <button class="ghost sm" @click="decide(proposal, 'CANCEL')">取消</button>
                 </div>
               </div>
@@ -2255,8 +2602,17 @@ onBeforeUnmount(() => {
               <span v-else-if="streaming.paused">已暂停</span>
               <span v-else-if="streaming.gap">部分过程已跳过</span>
               <span v-else-if="streaming.text">正在输出</span>
+              <span v-else-if="streaming.queue">排队中（第 {{ streaming.queue.position }} 位）</span>
               <span v-else-if="busy">正在思考</span>
               <span v-else-if="streaming.resumable">连接已中断</span>
+            </div>
+            <div
+              v-if="streaming.queue && !streaming.text"
+              class="muted"
+              style="font-size: 12px; margin-bottom: 6px"
+            >
+              当前排队第 {{ streaming.queue.position }} 位<template v-if="streaming.queue.etaSeconds">
+                ，预计等待约 {{ streaming.queue.etaSeconds }} 秒</template>
             </div>
             <div class="bubble" :class="{ error: streaming.error }">
               <template v-if="streaming.text">
@@ -2274,7 +2630,7 @@ onBeforeUnmount(() => {
                   >[{{ part.index }}]</button>
                 </template>
               </template>
-              <span v-else-if="!streaming.error && !streaming.gap && !streaming.paused" class="typing"><i></i><i></i><i></i></span>
+              <span v-else-if="!streaming.error && !streaming.gap && !streaming.paused && !streaming.queue" class="typing"><i></i><i></i><i></i></span>
               <template v-if="streaming.error">{{ streaming.error }}</template>
               <template v-else-if="streaming.cancelled">（本轮回答已取消）</template>
               <template v-else-if="streaming.gap">{{ streaming.gapMessage }}</template>
@@ -2353,12 +2709,57 @@ onBeforeUnmount(() => {
                 </span>
                 <span class="badge">{{ statusText(proposal.status) }}</span>
               </div>
-              <div class="proposal-summary">
-                工具 <span class="mono">{{ proposal.tool_name }}</span>
-              </div>
-              <pre v-if="proposal.params_json" class="proposal-params">{{ pretty(proposal.params_json) }}</pre>
-              <div class="proposal-actions">
-                <button class="primary sm" @click="decide(proposal, 'CONFIRM')">确认执行</button>
+              <template v-if="isRequestConfirm(proposal)">
+                <div v-if="confirmDetail(proposal)" class="proposal-summary">
+                  {{ confirmDetail(proposal) }}
+                </div>
+              </template>
+              <template v-else-if="isQuestionProposal(proposal)">
+                <div class="question-list">
+                  <div
+                    v-for="(item, index) in questionItems(proposal)"
+                    :key="item.id || index"
+                    class="question-item"
+                  >
+                    <div class="question-title">{{ index + 1 }}. {{ item.question }}</div>
+                    <div v-if="item.options && item.options.length" class="question-options">
+                      <button
+                        v-for="option in item.options"
+                        :key="option"
+                        type="button"
+                        class="question-option"
+                        :class="{ on: questionSelected(proposal, item, option) }"
+                        :disabled="proposal.status !== 'PENDING'"
+                        @click="toggleQuestionOption(proposal, item, option)"
+                      >{{ option }}</button>
+                    </div>
+                    <textarea
+                      v-if="proposal.status === 'PENDING' && item.allow_free_text !== false"
+                      v-model="questionState(proposal, item).text"
+                      class="question-text"
+                      rows="2"
+                      placeholder="补充说明（可选）"
+                    ></textarea>
+                    <div v-else-if="proposal.status !== 'PENDING'" class="question-answer">
+                      {{ submittedAnswer(proposal, item) }}
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="proposal-summary">
+                  工具 <span class="mono">{{ proposal.tool_name }}</span>
+                </div>
+                <pre v-if="proposal.params_json" class="proposal-params">{{ pretty(proposal.params_json) }}</pre>
+              </template>
+              <div v-if="proposal.status === 'PENDING'" class="proposal-actions">
+                <button
+                  class="primary sm"
+                  :disabled="isQuestionProposal(proposal) && !questionReady(proposal)"
+                  @click="decide(proposal, 'CONFIRM')"
+                >
+                  {{ isQuestionProposal(proposal) ? '提交选择' : isRequestConfirm(proposal) ? '确认' : '确认执行' }}
+                </button>
                 <button class="ghost sm" @click="decide(proposal, 'CANCEL')">取消</button>
               </div>
             </div>
@@ -2428,6 +2829,14 @@ onBeforeUnmount(() => {
               @click.stop="openAttachmentPreview(item)"
             >预览</button>
             <button
+              v-if="item.status !== 'PARSING'"
+              type="button"
+              class="attachment-action"
+              title="重新识别（按原文件重跑 OCR）"
+              :disabled="attachmentBusy"
+              @click.stop="reparseAttachment(item)"
+            >重识</button>
+            <button
               type="button"
               class="attachment-action remove"
               title="移除附件"
@@ -2454,6 +2863,7 @@ onBeforeUnmount(() => {
             @click="pickAttachments"
           >＋</button>
           <textarea
+            ref="composerInput"
             v-model="draft"
             rows="1"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行；可上传 docx/xlsx/图片"
@@ -2461,13 +2871,15 @@ onBeforeUnmount(() => {
             @paste="onComposerPaste"
           ></textarea>
           <button v-if="busy" class="danger" @click="stop">暂停</button>
-          <button v-else class="primary" :disabled="!canSend" @click="send">发送</button>
+          <button v-else class="primary" :disabled="!canSend" @click="send">
+            {{ retryCooldown > 0 ? `${retryCooldown}s 后可发送` : '发送' }}
+          </button>
         </div>
         <div class="composer-foot">
           <span class="left">
             <span>问题会按路由规则交给单个智能体或动态团队处理；附件内容仅作为资料引用</span>
           </span>
-          <span>{{ draft.length }} / 2000</span>
+          <span>{{ draft.length }} / {{ QUESTION_MAX }}</span>
         </div>
       </footer>
 
@@ -2481,7 +2893,8 @@ onBeforeUnmount(() => {
             <div v-if="attachmentPreview.loading" class="muted">加载中…</div>
             <template v-else>
               <div class="muted" style="font-size: 12px; margin-bottom: 8px">
-                已识别 {{ attachmentPreview.chars }} 字，以下为本轮发送给模型的文本预览
+                已识别 {{ attachmentPreview.chars }} 字<template v-if="attachmentPreview.engine"> ·
+                {{ attachmentPreview.engine }}</template>，以下为本轮发送给模型的文本预览
                 <template v-if="attachmentPreview.truncated">（前 4000 字）</template>
               </div>
               <pre class="attachment-preview">{{ attachmentPreview.text }}</pre>

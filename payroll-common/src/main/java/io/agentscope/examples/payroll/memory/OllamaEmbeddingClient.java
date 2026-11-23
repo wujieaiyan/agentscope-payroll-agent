@@ -12,12 +12,29 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** 调用 Ollama /api/embed 生成向量；服务不可用时抛异常，由上层降级。 */
 public final class OllamaEmbeddingClient implements EmbeddingClient {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** 同一问题在 KB 预取与记忆召回中先后出现，短 TTL 共享向量可省一次嵌入调用。 */
+    private static final long QUERY_CACHE_TTL_MS = 3_000L;
+    private static final int QUERY_CACHE_MAX = 64;
+    private static final Map<String, CachedVector> RECENT =
+            Collections.synchronizedMap(
+                    new LinkedHashMap<>(16, 0.75f, true) {
+                        @Override
+                        protected boolean removeEldestEntry(Map.Entry<String, CachedVector> eldest) {
+                            return size() > QUERY_CACHE_MAX;
+                        }
+                    });
+
+    private record CachedVector(float[] vector, long expiresAt) {
+    }
 
     private final HttpClient http;
     private final URI embedUri;
@@ -25,15 +42,26 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
     private final String model;
     private final int dim;
     private final Duration timeout;
+    private final EmbeddingCircuitBreaker breaker;
 
     public OllamaEmbeddingClient(
             String baseUrl, String model, int dim, Duration timeout) {
+        this(baseUrl, model, dim, timeout, null);
+    }
+
+    public OllamaEmbeddingClient(
+            String baseUrl,
+            String model,
+            int dim,
+            Duration timeout,
+            EmbeddingCircuitBreaker breaker) {
         String base = baseUrl == null ? "" : baseUrl.trim().replaceAll("/+$", "");
         this.embedUri = URI.create(base + "/api/embed");
         this.tagsUri = URI.create(base + "/api/tags");
         this.model = model;
         this.dim = dim;
         this.timeout = timeout == null ? Duration.ofSeconds(3) : timeout;
+        this.breaker = breaker;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     }
 
@@ -48,8 +76,17 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
 
     @Override
     public List<float[]> embedAll(List<String> texts) {
+        return embedAll(texts, timeout);
+    }
+
+    /** 指定本次请求的预算；连接建立与读取合计不超过 {@code limit}。 */
+    public List<float[]> embedAll(List<String> texts, Duration limit) {
         if (texts == null || texts.isEmpty()) {
             return List.of();
+        }
+        List<float[]> cached = cachedVectors(texts);
+        if (cached != null) {
+            return cached;
         }
         try {
             ObjectNode body = JSON.createObjectNode();
@@ -58,7 +95,7 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
             texts.forEach(input::add);
             HttpRequest request =
                     HttpRequest.newBuilder(embedUri)
-                            .timeout(timeout)
+                            .timeout(limit == null ? timeout : limit)
                             .header("Content-Type", "application/json")
                             .POST(
                                     HttpRequest.BodyPublishers.ofString(
@@ -84,6 +121,7 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
                 }
                 result.add(vector);
             }
+            cacheVectors(texts, result);
             return result;
         } catch (IOException e) {
             throw new IllegalStateException("嵌入请求失败：" + e.getMessage(), e);
@@ -95,6 +133,9 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
 
     @Override
     public boolean available() {
+        if (breaker != null && breaker.isOpen()) {
+            return false;
+        }
         try {
             HttpRequest request =
                     HttpRequest.newBuilder(tagsUri)
@@ -119,6 +160,39 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    /** 仅当整批文本都在有效期内命中时直接返回，避免批量请求混用新旧向量。 */
+    private List<float[]> cachedVectors(List<String> texts) {
+        long now = System.currentTimeMillis();
+        synchronized (RECENT) {
+            List<float[]> vectors = new ArrayList<>(texts.size());
+            for (String text : texts) {
+                CachedVector cached = RECENT.get(cacheKey(text));
+                if (cached == null || cached.expiresAt() < now) {
+                    return null;
+                }
+                vectors.add(cached.vector());
+            }
+            return vectors;
+        }
+    }
+
+    /** 只缓存少量短文本（问题向量），批量入库等大请求不入缓存以免挤掉近期问题。 */
+    private void cacheVectors(List<String> texts, List<float[]> vectors) {
+        if (texts.size() > 4) {
+            return;
+        }
+        long expiresAt = System.currentTimeMillis() + QUERY_CACHE_TTL_MS;
+        synchronized (RECENT) {
+            for (int i = 0; i < texts.size(); i++) {
+                RECENT.put(cacheKey(texts.get(i)), new CachedVector(vectors.get(i), expiresAt));
+            }
+        }
+    }
+
+    private String cacheKey(String text) {
+        return embedUri + "|" + model + "|" + text;
     }
 
     private static float[] toVector(JsonNode node) {

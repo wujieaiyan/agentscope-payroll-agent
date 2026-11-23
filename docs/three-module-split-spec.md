@@ -133,7 +133,7 @@ payroll:
 
 ## 7. 构建与部署
 
-- 构建：`mvn -q -DskipTests package` 产出 `payroll-backend/target/payroll-backend.jar`、`payroll-agent/target/payroll-agent.jar`。
+- 构建：`mvn -q -DskipTests package` 产出 `payroll-backend/target/payroll-backend-exec.jar`、`payroll-agent/target/payroll-agent-runtime.jar`。
 - 前端：`cd frontend && npm ci && npm run build` 产出 `frontend/dist`。
 - 镜像：
   - `payroll-frontend`：`nginx:alpine` + `dist/` + `nginx.conf`

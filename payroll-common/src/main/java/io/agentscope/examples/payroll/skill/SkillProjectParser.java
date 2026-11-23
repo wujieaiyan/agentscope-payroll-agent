@@ -24,12 +24,12 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 目录式技能项目解析器：Git/ZIP 导入落到临时目录后，由本类转成可发布到 Nacos 的
+ * 目录式技能项目解析器：Git/ZIP 导入落到临时目录后，由本类转成可写入 {@link SkillStore} 的
  * 正文、frontmatter 元信息与白名单文件包。
  *
  * <p>{@code data/}、{@code .git/}、{@code node_modules/} 整体忽略；根目录只保留固定文件，
  * 其余目录只保留 {@code references/**}、{@code scripts/**}、{@code assets/**}。
- * 非 UTF-8 文件跳过并告警，超限直接失败，避免把大仓库塞进 Nacos。
+ * 非 UTF-8 文件跳过并告警，超限直接失败，避免把大仓库塞进技能存储。
  */
 public final class SkillProjectParser {
 
@@ -144,17 +144,17 @@ public final class SkillProjectParser {
         }
         String value = raw.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-");
         value = value.replaceAll("^-+", "").replaceAll("-+$", "");
-        if (value.length() > 64) {
-            value = value.substring(0, 64).replaceAll("-+$", "");
+        if (value.length() > SkillIds.MAX_ID_LENGTH) {
+            value = value.substring(0, SkillIds.MAX_ID_LENGTH).replaceAll("-+$", "");
         }
-        return NacosSkillRegistry.isValidId(value) ? value : null;
+        return SkillIds.isValid(value) ? value : null;
     }
 
     private static String resolveId(
             String overrideId, Map<String, Object> metadata, Path root, List<String> warnings) {
         if (overrideId != null && !overrideId.isBlank()) {
             String explicit = overrideId.trim();
-            if (!NacosSkillRegistry.isValidId(explicit)) {
+            if (!SkillIds.isValid(explicit)) {
                 throw new PayrollException("非法技能 ID：" + explicit);
             }
             return explicit;
