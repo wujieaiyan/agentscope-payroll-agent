@@ -9,3 +9,7 @@ regexes = [
   '''0123456789abcdef0123456789abcdef''',
   '''AKIAABCDEFGHIJKLMNOP''',
 ]
+# 该用例的 diff 夹具整份都是假密钥（AWS/GitHub/Slack/OpenAI/私钥），逐条放行会随夹具演进漏项。
+paths = [
+  '''payroll-tests/src/test/java/io/agentscope/examples/payroll/devteam/DevSecretScannerTest\.java''',
+]
