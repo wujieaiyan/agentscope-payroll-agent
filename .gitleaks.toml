@@ -1,0 +1,11 @@
+# 沿用默认规则，只放行单测里刻意构造的合成密钥（AES 测试向量、secret 扫描器样例）。
+# 其余位置仍按默认规则扫描。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "单测夹具中的占位密钥，不是真实凭据"
+regexes = [
+  '''0123456789abcdef0123456789abcdef''',
+  '''AKIAABCDEFGHIJKLMNOP''',
+]

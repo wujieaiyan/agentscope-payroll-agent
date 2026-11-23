@@ -4,6 +4,10 @@ target/
 *.log
 logs/
 data/
+# 演示种子数据必须随包发布：JsonPayrollRepository.demo() 从 classpath 读这三份文件，
+# 不入库则 CI 与新克隆启动即失败。其余 data/ 仍忽略。
+!payroll-common/src/main/resources/data/
+!payroll-common/src/main/resources/data/*.json
 output/
 work/
 frontend/node_modules/
