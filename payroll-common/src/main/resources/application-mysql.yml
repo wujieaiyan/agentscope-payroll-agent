@@ -1,7 +1,7 @@
 # MySQL 双库支持：--spring.profiles.active=mysql（或 dept=mysql,redis）
 #
 # 目标库需提前存在（建库与账号见 docs/mysql-redis-deploy.md），
-# 表结构由 Flyway 在启动时按 db/migration/mysql 版本化创建。
+# 表结构由 Flyway 在启动时按 db/migration/common 版本化创建（H2/MySQL 共用）。
 spring:
   # 该 profile 不启用 Redis 自动装配，保持与本地 H2 一致的行为。
   autoconfigure:

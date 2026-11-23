@@ -72,7 +72,7 @@ Spring profile：默认 H2 单机；`dept` = `mysql,redis`（`application-common
 
 - 提交信息中文，前缀 `feat:` / `fix:` / `test:` / `docs:` / `refactor:`；一句话说清「为什么」。
 - 分支从 `main` 切出，PR 一律以 `main` 为 base；push 前核对 `git log origin/main..HEAD` 实际范围。
-- 新增数据库结构：H2 建表与 `payroll-common/src/main/resources/db/migration/mysql/V{n}__*.sql` 同步，二者不可只改一边。
+- 新增数据库结构：只改 `payroll-common/src/main/resources/db/migration/common/V{n}__*.sql` 这一份 Flyway 迁移，H2（`MODE=MySQL`）与 MySQL 共用；不得再写内联 H2 DDL。SQL 需两种方言都可执行。
 - 新增管理接口：在权限表登记权限码（如 `usage:read`），controller 加 `@PreAuthorize`，并补权限测试。
 - 模型调用链路上的横切能力（记录、限流、缓存）走中间件（`MiddlewareBase`），不要散落在业务代码。
 - 前端新增页面：路由 + `AppLayout` 导航项 + 单测，图表优先无第三方依赖的 SVG 组件。

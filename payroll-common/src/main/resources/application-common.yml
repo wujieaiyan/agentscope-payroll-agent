@@ -64,7 +64,7 @@ payroll:
     # 启动时向 runtime /internal/health 取时间做偏移自检，超过该秒数只告警不阻断。
     clock-skew-warning-seconds: "${PAYROLL_INTERNAL_CLOCK_SKEW_WARNING_SECONDS:60}"
   db:
-    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE}"
+    url: "${PAYROLL_DB_URL:jdbc:h2:file:./data/payroll;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL}"
     user: "${PAYROLL_DB_USER:sa}"
     password: "${PAYROLL_DB_PASSWORD:}"
   output-dir: "${PAYROLL_OUTPUT_DIR:output}"

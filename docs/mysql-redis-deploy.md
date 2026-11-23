@@ -20,18 +20,25 @@ GRANT ALL PRIVILEGES ON payroll.* TO 'payroll'@'%';
 FLUSH PRIVILEGES;
 ```
 
-表结构由应用启动时的 Flyway 自动创建，**不要手工建表**。脚本位于：
+表结构由应用启动时的 Flyway 自动创建，**不要手工建表**。脚本位于
+`payroll-common/src/main/resources/db/migration/common/`，由 H2（`MODE=MySQL`）与 MySQL
+共用同一套版本化迁移，不存在第二份内联 DDL：
 
-- `src/main/resources/db/migration/mysql/V1__payroll_core.sql`
-- `src/main/resources/db/migration/mysql/V2__knowledge_base.sql`
-- `src/main/resources/db/migration/mysql/V3__chat_routing.sql`：新增
+- `V1__payroll_core.sql`
+- `V2__knowledge_base.sql`
+- `V3__chat_routing.sql`：新增
   `chat_messages.routing_json`（TEXT）与 `chat_action_proposals` 表（写操作提案，
   含状态、有效期、快照哈希、执行结果与幂等键唯一索引）。`chat_action_proposals`
   与消息同事务写入，删除会话时一并清理；过期只改状态，不做独立 TTL 删除。
 
-Flyway 未开启 `baselineOnMigrate`：目标库必须是空库，或已有 `flyway_schema_history` 且版本可继续。
+MySQL 未开启 `baselineOnMigrate`：目标库必须是空库，或已有 `flyway_schema_history` 且版本可继续。
 指向“非空但没有 Flyway 历史表”的库（例如手工建过表的旧库）会直接启动失败并提示
 `目标库必须为空库或已由 Flyway 管理`，以免跳过建表脚本、在缺列的表上写入。
+
+若 MySQL 开发库是在“H2/MySQL 双写 DDL”时期创建的，`V6`/`V13`/`V19` 的校验和已随共享迁移调整
+（`TIMESTAMPADD` 替换 `DATE_ADD`、多列 `ADD COLUMN` 拆成单列）。启动前执行一次
+`flyway repair`（或用 `docker compose down -v` 重建开发卷）刷新校验和，否则 Flyway 会因
+checksum mismatch 拒绝启动。
 
 ## 2. 启动应用
 

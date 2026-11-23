@@ -824,7 +824,7 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 本地默认已启用 `mysql` profile；Web 与 agent-runtime 拆分部署时必须用 `SPRING_PROFILES_ACTIVE=dept`（等价于 `mysql,redis`），轮次租约与事件流依赖 Redis 跨进程共享：
 
-- MySQL：Flyway 版本化建表（`db/migration/mysql`）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
+- MySQL：Flyway 版本化建表（`db/migration/common`，与 H2 共用同一套迁移）+ HikariCP 连接池，URL 需以 `jdbc:mysql:` 开头；
   目标库必须是空库或已由 Flyway 管理，非空且无 `flyway_schema_history` 的库会直接启动失败，避免误接管业务表。
 - Redis：Spring Session 会话共享、登录失败锁定、单用户对话并发配额（超出返回 429）、
   同一会话跨实例互斥（`payroll:chat:lock:<sessionId>`，锁随请求结束释放，实例崩溃后按 TTL 自动过期）。
