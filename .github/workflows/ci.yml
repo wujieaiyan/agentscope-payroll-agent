@@ -48,3 +48,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+        env:
+          # gitleaks-action v2 起扫描 PR 必须显式拿到令牌，否则直接失败。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
