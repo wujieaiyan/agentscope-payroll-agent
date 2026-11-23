@@ -147,6 +147,24 @@ class SkillPromptBudgetTest {
     }
 
     @Test
+    @DisplayName("目录行只有 id 与描述，不渲染正文长度")
+    void catalogLineOmitsContentLength() {
+        // 长度是 strip() 归一后的字符数，Nacos 与库里同一份内容差 1 个字，
+        // 渲染进提示词就让切库前后的目录集体改字节（规格 §17 V-12）。
+        SkillPromptBudget.Result result =
+                SkillPromptBudget.build(
+                        List.of(contentlessSkill("tax-guide", "个税申报规则")),
+                        WINDOW,
+                        PREDICT,
+                        null);
+
+        assertTrue(
+                result.block().contains("- tax-guide：个税申报规则\n"),
+                result.block());
+        assertFalse(result.block().contains("B）"), result.block());
+    }
+
+    @Test
     @DisplayName("关注文本分词：ASCII 过滤停用词，CJK 取二元组并限流")
     void extractsFocusTerms() {
         List<String> terms = SkillPromptBudget.focusTerms("Payroll the tax-guide 个税申报");

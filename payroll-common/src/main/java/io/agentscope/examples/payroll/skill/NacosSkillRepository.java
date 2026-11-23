@@ -47,7 +47,7 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
         NacosConfigClient.ListResult list(String dataIdPattern);
     }
 
-    private record Entry(long fetchedAt, AgentSkill skill, long chars) {
+    private record Entry(long fetchedAt, AgentSkill skill, long chars, String resourceHash) {
     }
 
     private record Catalog(Set<String> ids, Map<String, SkillManifest> manifests, long fetchedAt) {
@@ -245,7 +245,7 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
                 String id =
                         dataId.substring(
                                 0, dataId.length() - NacosSkillRegistry.DATA_ID_SUFFIX.length());
-                if (NacosSkillRegistry.isValidId(id)) {
+                if (SkillIds.isValid(id)) {
                     remoteIds.add(id);
                     remoteManifests.put(id, manifestOf(id, entry.content()));
                 }
@@ -306,16 +306,27 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
         return SkillManifests.forId(id, description, content, metadata, SOURCE);
     }
 
-    /** 正文已缓存时才补上 hasResources，避免目录阶段多读一次文件包。 */
+    /** 正文已缓存时才补上资源指纹：目录阶段的 list 只带回正文，不含伴生文件包。 */
     private SkillManifest enrich(SkillManifest manifest) {
         Entry entry;
         synchronized (cache) {
             entry = cache.get(manifest.id());
         }
-        if (entry == null || entry.skill() == null) {
-            return manifest;
+        return entry == null ? manifest : manifest.withResourceHash(entry.resourceHash());
+    }
+
+    /**
+     * 管理台保存后丢弃目录与正文快照：技能资源只有在装配正文时才看得到，
+     * 沿用旧条目会让刚改过的参考文件继续留在已缓存智能体里。
+     */
+    @Override
+    public void invalidate() {
+        catalog = null;
+        synchronized (cache) {
+            cache.clear();
+            cachedChars = 0;
         }
-        return manifest.withHasResources(!entry.skill().getResources().isEmpty());
+        missingWarned.clear();
     }
 
     private AgentSkill cachedSkill(String id) {
@@ -343,7 +354,7 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
                         "[Skill] 读取 Nacos 配置 {} 异常，沿用上次成功加载的版本：{}",
                         dataId,
                         e.getMessage());
-                Entry refreshed = new Entry(now, entry.skill(), entry.chars());
+                Entry refreshed = new Entry(now, entry.skill(), entry.chars(), entry.resourceHash());
                 put(id, refreshed);
                 SkillMetrics.contentLoaded(SOURCE, false, refreshed.chars());
                 return refreshed;
@@ -356,7 +367,9 @@ public final class NacosSkillRepository implements AgentSkillRepository, Payroll
             skill = withResources(skill);
         }
         long chars = skill == null ? 0 : skill.getSkillContent().length();
-        Entry fresh = new Entry(now, skill, chars);
+        String resourceHash =
+                skill == null ? "" : SkillManifests.resourceHash(skill.getResources());
+        Entry fresh = new Entry(now, skill, chars, resourceHash);
         put(id, fresh);
         SkillMetrics.contentLoaded(SOURCE, false, chars);
         if (skill == null) {

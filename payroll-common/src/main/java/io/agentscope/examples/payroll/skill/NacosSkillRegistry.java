@@ -1,7 +1,5 @@
 package io.agentscope.examples.payroll.skill;
 
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.util.MarkdownSkillParser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
@@ -15,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,66 +23,13 @@ import org.slf4j.LoggerFactory;
  * <p>列表把 Nacos 技能与三个内置角色技能合并：同名 Nacos 技能覆盖内置版本，
  * 删除覆盖后自动回退内置提示词。读路径带 TTL 缓存，写操作直接发布/删除 Nacos 配置。
  */
-public final class NacosSkillRegistry {
+public final class NacosSkillRegistry implements SkillStore {
 
     public static final String DATA_ID_SUFFIX = ".md";
     public static final String SOURCE_NACOS = "nacos";
     public static final String SOURCE_BUILTIN = "builtin";
 
     private static final Logger log = LoggerFactory.getLogger(NacosSkillRegistry.class);
-    private static final Pattern ID_PATTERN = Pattern.compile("^[a-z][a-z0-9-]{1,63}$");
-    private static final int MAX_ID_LENGTH = 64;
-
-    /** 管理台列表项；contentLength 为去掉 frontmatter 后的正文字数，fileCount 按需加载时为 0。 */
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public record SkillSummary(
-            String id,
-            String description,
-            String source,
-            boolean builtin,
-            boolean overridden,
-            long updatedAt,
-            int contentLength,
-            int fileCount) {
-    }
-
-    /** 编辑详情：content 为正文（不含 frontmatter），保存时由服务端重新生成 frontmatter。 */
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public record SkillDetail(
-            String id,
-            String description,
-            String content,
-            String source,
-            boolean builtin,
-            boolean overridden,
-            long updatedAt,
-            List<SkillFilePackage.Summary> files,
-            boolean executionEnabled,
-            Map<String, Object> metadata) {
-
-        public SkillDetail(
-                String id,
-                String description,
-                String content,
-                String source,
-                boolean builtin,
-                boolean overridden,
-                long updatedAt,
-                List<SkillFilePackage.Summary> files,
-                boolean executionEnabled) {
-            this(
-                    id,
-                    description,
-                    content,
-                    source,
-                    builtin,
-                    overridden,
-                    updatedAt,
-                    files,
-                    executionEnabled,
-                    Map.of());
-        }
-    }
 
     private record RemoteSkill(
             String id,
@@ -225,24 +169,27 @@ public final class NacosSkillRegistry {
         }
     }
 
+    @Override
     public boolean writable() {
         return settings.enabled();
     }
 
-    /** /health 组件：Nacos 是否在配置中启用；关闭时该组件报 SKIPPED。 */
-    public boolean nacosEnabled() {
+    @Override
+    public boolean enabled() {
         return settings.enabled();
     }
 
-    /** 最近一次成功列表的 epoch 毫秒（0 = 从未成功）；只读快照，不触发 Nacos 请求。 */
+    @Override
     public long lastSuccessfulListAt() {
         return lastSuccessfulListAt;
     }
 
+    @Override
     public String location() {
         return settings.enabled() ? settings.server() + "/" + settings.group() : "代码内置";
     }
 
+    @Override
     public List<SkillSummary> list() {
         Snapshot snap = snapshot();
         List<SkillSummary> summaries = new ArrayList<>();
@@ -260,6 +207,7 @@ public final class NacosSkillRegistry {
         return List.copyOf(summaries);
     }
 
+    @Override
     public SkillDetail detail(String id) {
         String skillId = normalizeId(id);
         RemoteSkill remote = snapshot().byId().get(skillId);
@@ -275,7 +223,9 @@ public final class NacosSkillRegistry {
                     remote.updatedAt(),
                     summaries(filesOf(remote)),
                     remote.executionEnabled(),
-                    remote.metadata());
+                    remote.metadata(),
+                    "",
+                    0);
         }
         if (builtin) {
             AgentSkill skill = RoleSkills.skill(skillId);
@@ -289,18 +239,22 @@ public final class NacosSkillRegistry {
                     0,
                     List.of(),
                     false,
-                    Map.of());
+                    Map.of(),
+                    "",
+                    0);
         }
         throw new PayrollException("技能不存在：" + skillId);
     }
 
     /** 管理台文件列表；不存在或 Nacos 不可用时为空。 */
+    @Override
     public List<SkillFilePackage.Summary> files(String id) {
         RemoteSkill remote = snapshot().byId().get(normalizeId(id));
         return remote == null ? List.of() : summaries(filesOf(remote));
     }
 
     /** 读取单个文件内容；路径越界与不存在分别报错。 */
+    @Override
     public String fileContent(String id, String path) {
         String skillId = normalizeId(id);
         String normalized = SkillFilePackage.normalizePath(path);
@@ -316,6 +270,7 @@ public final class NacosSkillRegistry {
     }
 
     /** 全量替换文件包；空列表等于删除文件包。 */
+    @Override
     public synchronized List<SkillFilePackage.Summary> replaceFiles(
             String id, List<SkillFilePackage.SkillFile> files) {
         requireWritable();
@@ -346,7 +301,7 @@ public final class NacosSkillRegistry {
             throw new PayrollException(
                     "写入 Nacos 配置 " + dataId + " 失败，请检查 Nacos 连接与账号权限");
         }
-        snapshot = null;
+        dropSnapshot();
         fileCache.put(
                 skillId,
                 new CachedFiles(
@@ -355,6 +310,7 @@ public final class NacosSkillRegistry {
         return summaries(clean);
     }
 
+    @Override
     public synchronized boolean deleteFile(String id, String path) {
         requireWritable();
         String skillId = normalizeId(id);
@@ -378,6 +334,7 @@ public final class NacosSkillRegistry {
         return create(id, description, content, false);
     }
 
+    @Override
     public synchronized SkillSummary create(
             String id, String description, String content, boolean executionEnabled) {
         requireWritable();
@@ -388,6 +345,7 @@ public final class NacosSkillRegistry {
         return save(skillId, description, content, executionEnabled);
     }
 
+    @Override
     public synchronized SkillSummary update(
             String id, String description, String content, boolean executionEnabled) {
         requireWritable();
@@ -404,6 +362,7 @@ public final class NacosSkillRegistry {
      * <p>覆盖已有技能时保留执行开关，其余元信息以导入项目为准；内置技能允许被覆盖，
      * 但不允许静默覆盖，必须由调用方显式确认。
      */
+    @Override
     public synchronized SkillSummary importProject(
             SkillProjectParser.ParsedProject project, boolean overwrite) {
         requireWritable();
@@ -434,7 +393,7 @@ public final class NacosSkillRegistry {
                             + DATA_ID_SUFFIX
                             + " 失败，请检查 Nacos 连接与账号权限");
         }
-        snapshot = null;
+        dropSnapshot();
         List<SkillFilePackage.SkillFile> files =
                 SkillFilePackage.normalizeAll(project.files(), fileSettings);
         String filesDataId = SkillFilePackage.dataId(skillId);
@@ -460,7 +419,7 @@ public final class NacosSkillRegistry {
                             + filesDataId
                             + " 写入失败，请重试或重新发布文件");
         }
-        snapshot = null;
+        dropSnapshot();
         fileCache.remove(skillId);
         int fileCount = fileSettings.enabled() ? files.size() : 0;
         log.info(
@@ -477,9 +436,11 @@ public final class NacosSkillRegistry {
                 builtin,
                 System.currentTimeMillis(),
                 cleanContent.length(),
-                fileCount);
+                fileCount,
+                "");
     }
 
+    @Override
     public synchronized boolean delete(String id) {
         requireWritable();
         String skillId = normalizeId(id);
@@ -505,10 +466,19 @@ public final class NacosSkillRegistry {
         } catch (RuntimeException e) {
             log.warn("[Skill] 删除技能 {} 的文件包异常，已忽略：{}", skillId, e.getMessage());
         }
-        snapshot = null;
+        dropSnapshot();
         fileCache.remove(skillId);
         log.info("[Skill] 已删除 Nacos 技能 {}", skillId);
         return true;
+    }
+
+    /**
+     * 写成功后同时丢弃注册表快照与运行期技能仓库快照：只清自己的话，本节点仍要等目录
+     * TTL（默认 60s）才让新正文/新文件进入智能体缓存指纹。
+     */
+    private void dropSnapshot() {
+        snapshot = null;
+        SkillRepositories.invalidateShared();
     }
 
     private SkillSummary save(
@@ -530,7 +500,7 @@ public final class NacosSkillRegistry {
                             + DATA_ID_SUFFIX
                             + " 失败，请检查 Nacos 连接与账号权限");
         }
-        snapshot = null;
+        dropSnapshot();
         // 正文变了，文件包必须重绑 mdHash，否则读取时会被判定为版本错配而忽略。
         List<SkillFilePackage.SkillFile> existingFiles =
                 existing == null ? List.of() : filesOf(existing);
@@ -567,7 +537,8 @@ public final class NacosSkillRegistry {
                 builtin,
                 System.currentTimeMillis(),
                 cleanContent.length(),
-                fileCount);
+                fileCount,
+                "");
     }
 
     private boolean exists(String id) {
@@ -618,7 +589,7 @@ public final class NacosSkillRegistry {
                     continue;
                 }
                 String id = dataId.substring(0, dataId.length() - DATA_ID_SUFFIX.length());
-                if (!isValidId(id)) {
+                if (!SkillIds.isValid(id)) {
                     continue;
                 }
                 byId.put(id, parseRemote(id, entry));
@@ -736,7 +707,8 @@ public final class NacosSkillRegistry {
                 builtin,
                 remote.updatedAt(),
                 remote.content().length(),
-                0);
+                0,
+                "");
     }
 
     private static SkillSummary builtinSummary(String id) {
@@ -749,7 +721,8 @@ public final class NacosSkillRegistry {
                 false,
                 0,
                 skill.getSkillContent().length(),
-                0);
+                0,
+                "");
     }
 
     private static List<SkillFilePackage.Summary> summaries(
@@ -758,22 +731,7 @@ public final class NacosSkillRegistry {
     }
 
     private static String normalizeId(String id) {
-        String value = id == null ? "" : id.trim();
-        if (value.isBlank()) {
-            throw new PayrollException("技能 ID 必填");
-        }
-        if (value.length() > MAX_ID_LENGTH) {
-            throw new PayrollException("技能 ID 不能超过 " + MAX_ID_LENGTH + " 个字符");
-        }
-        if (!isValidId(value)) {
-            throw new PayrollException(
-                    "技能 ID 只能包含小写字母、数字和短横线，且以小写字母开头（2–64 位）");
-        }
-        return value;
-    }
-
-    public static boolean isValidId(String id) {
-        return id != null && ID_PATTERN.matcher(id).matches();
+        return SkillIds.normalize(id);
     }
 
     private void requireWritable() {

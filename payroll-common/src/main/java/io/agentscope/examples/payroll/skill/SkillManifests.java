@@ -7,6 +7,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -40,7 +41,7 @@ public final class SkillManifests {
                 version(skill.getMetadata()),
                 contentHash(content),
                 content.length(),
-                !skill.getResources().isEmpty(),
+                resourceHash(skill.getResources()),
                 SkillExecutions.executionEnabled(skill),
                 skill.getSource());
     }
@@ -60,9 +61,37 @@ public final class SkillManifests {
                 version(metadata),
                 contentHash(body),
                 body.length(),
-                false,
+                "",
                 SkillExecutions.executionEnabled(metadata),
                 source);
+    }
+
+    /**
+     * 资源指纹：路径与各自内容哈希排序后聚合。文件集合相同则指纹相同（与挂载顺序无关），
+     * 任一文件改名或改内容都会变化。空集合返回空串，供目录阶段区分「未知」与「无资源」。
+     */
+    public static String resourceHash(Map<String, String> resources) {
+        if (resources == null || resources.isEmpty()) {
+            return "";
+        }
+        Map<String, String> hashes = new LinkedHashMap<>(resources.size());
+        resources.forEach((path, content) -> hashes.put(path, contentHash(content)));
+        return resourceHashOf(hashes);
+    }
+
+    /**
+     * 已经持有逐文件指纹时的聚合入口。库侧（{@code skill_resource.sha256}）存的就是同一算法算出的
+     * sha256，必须共用这条聚合语句，否则同一批字节在 Nacos 源与 db 源得到两个指纹，切换存储时
+     * 智能体缓存会整批重建。
+     */
+    public static String resourceHashOf(Map<String, String> pathToContentHash) {
+        if (pathToContentHash == null || pathToContentHash.isEmpty()) {
+            return "";
+        }
+        List<String> pairs = new ArrayList<>(pathToContentHash.size());
+        pathToContentHash.forEach((path, hash) -> pairs.add(path + ':' + hash));
+        pairs.sort(String::compareTo);
+        return contentHash(String.join(";", pairs));
     }
 
     /** 从任意 metadata 提取标签；支持逗号分隔字符串与集合。 */

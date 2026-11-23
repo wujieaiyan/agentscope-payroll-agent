@@ -18,6 +18,10 @@ import io.agentscope.examples.payroll.service.PayrollChatService;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollServices;
 import io.agentscope.examples.payroll.service.PayslipFormatter;
+import io.agentscope.examples.payroll.skill.JdbcSkillStore;
+import io.agentscope.examples.payroll.skill.LocalDiskSkillBlobStore;
+import io.agentscope.examples.payroll.skill.SkillMigrationCheck;
+import io.agentscope.examples.payroll.skill.SkillNacosSource;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.io.BufferedReader;
@@ -32,6 +36,7 @@ import java.util.List;
  *
  * <pre>
  *   --migrate-to-mysql [--force]    把现有 H2 数据迁移到 MySQL（需先停止后端实例）
+ *   --skill-migration-check        技能存储切库前对账（只读比 Nacos 与技能表，不一致退出码 1）
  *   --demo                         离线演示：批量核算 + 工资条 + 校验（无需模型）
  *   --payroll EMP001 --period 2026-10   单人核算并打印工资条
  *   --department 研发部 --period 2026-10 部门批量核算
@@ -53,6 +58,10 @@ public final class PayrollApplication {
             }
             if (options.migrateToMysql) {
                 runMigration(options.force);
+                return;
+            }
+            if (options.skillMigrationCheck) {
+                System.exit(runSkillMigrationCheck() ? 0 : 1);
                 return;
             }
 
@@ -115,6 +124,40 @@ public final class PayrollApplication {
                 env("PAYROLL_MIGRATE_TARGET_USER", "payroll"),
                 env("PAYROLL_MIGRATE_TARGET_PASSWORD", "payroll"),
                 force);
+    }
+
+    /**
+     * 切换前对账（规格 §11.3）：只读比 Nacos 与技能表，任一硬差异非零退出。
+     *
+     * <p>做成命令行而不是管理台接口：这道门要在<b>还没切到 db 源</b>之前跑，而接口只有在应用起来后
+     * 才存在；对账本身两头都直连（Nacos 配置 + {@code skill_definition}），与 {@code payroll.skills.source}
+     * 当前取值无关。
+     *
+     * @return 是否一致（可以切换）
+     */
+    private static boolean runSkillMigrationCheck() {
+        JdbcSkillStore store =
+                new JdbcSkillStore(
+                        PayrollDatabase.openDefault(), LocalDiskSkillBlobStore.fromEnvironment());
+        SkillMigrationCheck.Result result =
+                new SkillMigrationCheck(new SkillNacosSource(), store).check();
+        System.out.println(
+                "技能对账："
+                        + (result.match() ? "一致，可以切换" : "不一致，禁止切换（硬差异 " + result.problemCount() + " 项）"));
+        System.out.println(
+                "Nacos " + result.nacosCount() + " 条 / 库 " + result.dbCount() + " 条，文件包比对："
+                        + (result.checkedFiles()
+                                ? "已执行"
+                                : "未执行（PAYROLL_SKILL_FILES_ENABLED=false，或技能字节整批读不回，原因见 problems）"));
+        result.asMap()
+                .forEach(
+                        (key, value) -> {
+                            // asMap 里的差异项一律是 List，其余键（match/计数/开关）已在上面两行说过。
+                            if (value instanceof List<?> items && !items.isEmpty()) {
+                                System.out.println("  " + key + "：" + items);
+                            }
+                        });
+        return result.match();
     }
 
     private static String env(String name, String fallback) {
@@ -314,6 +357,7 @@ public final class PayrollApplication {
 
                 用法：
                   --migrate-to-mysql [--force]        迁移 H2 数据到 MySQL（先停止 Web）
+                  --skill-migration-check             切换技能存储前对账（只读，不一致退出码 1）
                   --demo                              离线演示（无需模型）
                   --payroll EMP001 --period 2026-10   单人核算并打印工资条
                   --department 研发部 --period 2026-10 部门批量核算
@@ -362,6 +406,7 @@ public final class PayrollApplication {
         private boolean demo;
         private boolean help;
         private boolean migrateToMysql;
+        private boolean skillMigrationCheck;
         private boolean force;
         private String period;
         private String payrollId;
@@ -375,6 +420,7 @@ public final class PayrollApplication {
                 switch (args[i]) {
                     case "--demo" -> options.demo = true;
                     case "--migrate-to-mysql" -> options.migrateToMysql = true;
+                    case "--skill-migration-check" -> options.skillMigrationCheck = true;
                     case "--force" -> options.force = true;
                     case "--port" -> options.port = requireValue(args, ++i, "--port");
                     case "--help", "-h" -> options.help = true;

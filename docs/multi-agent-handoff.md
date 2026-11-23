@@ -1714,3 +1714,121 @@ docker build -f docker/sandbox-init.Dockerfile -t payroll-sandbox-init:local .
 ```
 
 多沙箱节点时各节点独立初始化数据（工作区不共享），首期按单沙箱部署。
+
+## 34. 技能存储迁移到 MySQL + 本地 blob（P0，2026-11-22/23）
+
+规格与全部验收记录见 [`skill-storage-mysql-oss-spec.md`](skill-storage-mysql-oss-spec.md)
+（v0.8）。P0-1…P0-8b 已实现，**工作树未提交**，默认仍是 `nacos` 源，因此现网行为零变化。
+面向运维的开关与命令写在 README「技能存储来源」。
+
+### 34.1 结构与开关
+
+- 新代码集中在 `payroll-common/.../skill/`：`SkillBlobStore` 端口 + `LocalDiskSkillBlobStore`
+  （内容寻址 `<sha[0:2]>/<sha>`、原子改名、读时校验哈希、512KB 上限）、`JdbcSkillStore`（管理面写，
+  单事务里 bump `revision` 并清理本轮新 blob）、`DbSkillRepository`（运行期读：目录单查询 + TTL 快照 +
+  按内容身份 `(version_id, resource_hash)` 命中的 LRU）、`CompositeSkillRepository`（包内置回退）、
+  `SkillInvalidationPoller`（跨实例失效）、`SkillNacosImporter`、`SkillMigrationCheck`。
+- DDL 只有一份：`V22__skill_definition.sql`（四表，索引折进建表体——MySQL 8 的 `CREATE INDEX`
+  不支持 `IF NOT EXISTS`）。`revision` 是乐观并发令牌，也是聚合指纹的输入。
+- 开关 `PAYROLL_SKILLS_SOURCE`（`nacos` 默认 / `db`）：db 源多四个 bean，Nacos 源一个不加。
+  跨实例失效 `PAYROLL_SKILL_INVALIDATION_POLL_MS`（默认 15s，`<=0` 不起线程）。
+  导入 `PAYROLL_SKILLS_IMPORT_FROM_NACOS=true` 只在 db 源且表为空时生效。
+- 新增测试 `SkillDbSourceWiringTest`（容器装配契约）、`SkillMigrationCheckTest`（对账门 15 用例）、
+  `SkillInvalidationPollerTest`（8 用例）、`SkillCatalogOrderContractTest`、`SkillFingerprintContractTest`、
+  `SkillPromptBudgetTest.catalogLineOmitsContentLength`（目录行不渲染字节数）。
+  全量基线 **1405 用例 0 失败 4 跳过**（含 V-12 的目录行契约测试、v0.10 对账门新增的 2 条失败归因用例、
+  第 7 项 P1-1 新增的 6 条、第 8 项 P1-2 新增的 9 条与第 9 项 P1-3 新增的 7 条；跳过 4 是这几轮没挂
+  `PAYROLL_TEST_MYSQL_*`，`DdlSyntaxTest` 的 MySQL 腿回到跳过，挂上为 3）。
+
+### 34.2 两个必须知道的坑
+
+- **`@Primary` 不能摘**：db 源下 `dbSkillRepository` 与 `skillRepository` 同为
+  `AgentSkillRepository`，`AgentAdminController` 用 `ObjectProvider.getIfAvailable()`，
+  去掉 `PayrollCoreConfiguration:495` 的 `@Primary` 进程直接起不来（歧义）。唯一性靠 `@Primary`，
+  不是靠少注册一个 bean——轮询器与导入器要按具体类型拿裸 `DbSkillRepository`。
+- **新 bean 别直接调 `SkillRepositories.shared()`**：槽位为空时它会按环境变量自建仓库，
+  其中含一个不受 Spring 管理的连接池（`install()` 只 WARN 不关旧实例）。注入
+  `ObjectProvider<AgentSkillRepository>` 再 `getIfAvailable(SkillRepositories::shared)`。
+
+### 34.3 真机证据（2026-11-23，本机）与未收口项
+
+跑通了的：MySQL 8 上的建表 + 幂等重放（`DdlSyntaxTest` 的 MySQL 腿首次真跑）、db 源进程拉起并完成
+18 条技能装配、两个 db 源 JVM + 共享 MySQL 的跨实例失效（1 次样本 10.139s）、
+A-01/A-02/A-04 基线（目录构建均值 14.09ms → 1.06ms、db 侧 P95 ≤ 2.1ms）。
+
+**未收口，接手第一件事看这里**：
+
+1. **V-01 对账拿不到退出码 0，卡的是数据不是代码**：Nacos 里 `ai-coding`、`user-talk` 两份正文
+   `strip()` 后只有 22 字，过不了 200 字门槛，导入器按规则拒收 → `missingInDb`。切库前必须先补全或删除。
+2. **V-12 已拍板 (b)+(a) 并实施，按新口径通过（2026-11-23）**：`SkillManifest.catalogLine()`（`:57-66`）
+   不再渲染正文字节数（原来 `（379B）` vs `（378B）`，db 写入时 `strip()` 掉尾部换行每条差 1 字），
+   判定口径同步改成「遮掉 `_nacos`/`_db` 源标签、正文按 `strip()` 归一后逐字符一致、超预算截断点允许漂移」。
+   重测：目录段逐行一致，归一后正文差异只剩 `it-support`（那条是 T-12 测量真写进库里的正文），
+   注入段只剩 2 行截断点漂移。契约测试 `SkillPromptBudgetTest.catalogLineOmitsContentLength`。
+   **切库当天别再拿「目录字节数变了」当回归**。
+3. **`SkillMigrationCheck` 的那个 P1 误诊已修（v0.10，2026-11-23）**：原来一个 blob 读不回会级联成 18 条
+   「库内运行期数据缺失（版本行未落库或被删）」，而版本行明明在库里——blob 根指错时硬差异从 3 涨到 22。
+   现在与 P0-6 修 `missingInDb` 级联同形：`Buckets.runtimeRead` 一短路，四个文件桶保持为空，
+   只记一条 `读取技能资源失败，本轮未比对文件包（正文与执行开关仍已比对）：<原因>`，
+   `checkedFiles` 报未执行，`bodyMismatch`/`executionMismatch` 照旧逐条比。文案另补了 `<技能 id>/<路径>`。
+   **但这条运维前置没变，也别指望门禁自证**：`--skill-migration-check` 只认 `PAYROLL_SKILL_BLOB_ROOT`
+   环境变量（不读 Spring 键），读不出不等于根错，它无法告诉你哪个根才是对的——**必须与写入实例同值**。
+4. **A-03 与「实例只建一次」的端到端计数没拿到**：db 源的 `AgentRuntimeApplication` 需要
+   `PAYROLL_AGENT_RUNTIME_TOKEN`，该令牌只在 IDEA 运行配置里（按红线不落文件、不进命令行）。
+   要补就必须在 IDEA 里 Run 一个 db 源实例。
+5. **本机 `payroll` 主库上还有未提交的方案C schema 统一**改过 V6/V13/V19，连真库的 JVM 会
+   `FlywayValidateException: Migration checksum mismatch for version 6/13/19`。
+   上面所有真机证据取自一次性模式 `payroll_skill_e2e`（同一套迁移、同一台 MySQL 8.0）。
+   方案C 提交后 V-01 应在真 `payroll` 库上重跑一次。
+6. **部署面尚未跟进**：`docker/docker-compose.yml` 与 `docs/mysql-redis-deploy.md`、
+   `docs/multi-node-deploy.md` 都还没有 `PAYROLL_SKILLS_SOURCE`/`PAYROLL_SKILL_BLOB_ROOT` 这些键
+   （P0 默认 `nacos`，不改行为，所以本批有意没动）。真要用 db 源上线，缺的是给两个应用服务加开关，
+   并处理 blob 目录的多节点可见性：本地磁盘适配器 + 共享 MySQL 意味着**A 节点写的字节 B 节点读不到**，
+   现阶段只能靠共享卷（同一 NFS/挂载点）绕，正解是 P3-1 的 `S3SkillBlobStore`（规格 §6 第 249 条、§19 P3）。
+   `skill_blob.storage_location` 列已为多介质共存预留，换适配器不用改表。
+7. **管理面写路径的 revision 契约已落（P1-1，v0.11，2026-11-23）**：`PUT /api/admin/skills/{id}`、
+   `DELETE /{id}`、`PUT /{id}/files`、`DELETE /{id}/files/{路径}` 四个接口接受可选 `?revision=`
+   （P1-1 当时就是这四个，第 9 项后共七个），
+   db 源下不一致返回 409 + `currentRevision`；`SkillStore` 端口是**默认重载**委托到无 token 的原方法，
+   所以 `NacosSkillRegistry` 零改动（Nacos 没有行级 revision）。审计 `detail` 补 `revision`/`versionNo`
+   两键，内置与 Nacos 源两键都不写。两条接口事实值得记：文件包写入同样递增 `skill_definition.revision`，
+   所以那两个文件接口的响应体会回吐写后的新 token（**前端必须覆盖旧值**，否则下一次保存必撞假 409）；
+   写后为补 `versionNo` 会重读一次详情，读失败只少一个审计字段、不把已提交的写变成 5xx。
+   **没做**：前端还没回传 revision（P1-4，本批只把后端契约与响应字段备好）、`SkillImportService`
+   导入路径的 token 语义（P1-3，已随第 9 条收口）。当时另欠的 ETag 与 `versions`/`rollback` 端点已随下一条收口。
+8. **版本列表 / 回滚 / `change_note` / ETag 已落（P1-2，v0.12，2026-11-23）**：`GET /{id}/versions`
+   返回版本时间线（**不含正文**，`current` 按 `current_version_id` 判定而不是取最大序号）、
+   `POST /{id}/versions/{n}/rollback?revision=` 按「追加一条新版本 + 复制 `skill_resource` 清单行 + 移指针」
+   实现，**历史行的 `body_md` 一字不改**，所以序号只增不减；`PUT /{id}` 多收一个可选 `change_note`
+   （≤200 字符，超限整笔写不生效，正文没变时补写在当前版本行、空白表示不改而不是清空）；
+   `GET /{id}/files/{路径}` 的响应带内容 sha256 的 `ETag`，`If-None-Match` 命中返回 304 空体。
+   端口 `SkillStore` 上新增的 `versions`/`rollback` 都是**默认方法**：Nacos 源列表给空、回滚**直接报错**
+   （静默成功会让管理台以为生效），`NacosSkillRegistry` 零改动，**本批不需要新迁移**（`change_note`
+   列 V22 早就建好）。三条最容易踩的：回滚前会逐个 `blobStore.exists()` 验目标版本的字节，
+   缺任何一个就拒绝回滚（指针一移运行期整批装配会撞「技能资源缺失」），`PAYROLL_SKILL_FILES_ENABLED=false`
+   时跳过；`meta_json`/描述/执行开关沿用**当前**版本而不是目标版本，回滚只换正文与文件包两维；
+   当时 `skill_version.created_by` 恒空串（store 不收操作者），这条欠账已随第 9 项收口。
+   **没做**：真机还没按过这两个端点（只有 JUnit 证据，随 P1-5）；前端时间线抽屉与回滚确认属 P1-4；
+   版本裁剪/孤儿回收属 P2-1，本批只保证「回滚需要的字节还在」，不保证「旧版本一定还在」。
+9. **操作者归属与导入令牌已落（P1-3，v0.13，2026-11-24）**：`SkillStore` 端口再加六个带 `operator`
+   的**默认重载**（`create` 五参 :89、`update` 七参 :130、`replaceFiles` 四参 :66、`deleteFile` 四参 :81、
+   `rollback` 四参 :161、`importProject` 四参 :180；`delete` 有意不加操作者变体），
+   `NacosSkillRegistry` 第三轮零改动；`POST /api/admin/skills/import/git` 与 `/import/zip` 多收一个
+   可选 `?revision=` 并把操作者透传下去（这两条路径 P0-5 起就走端口，本批补的是令牌与归属，
+   不是改走端口）。到这里带 `?revision=` 的写接口共**七个**。三列归属全在 `V22` 里早就建好
+   （`skill_definition.created_by`/`updated_by`、`skill_version.created_by`），**本批无新迁移**。
+   五条最容易写错的：操作者取自 `AuditContext`（`SkillAdminController.operator()` 一处收口）而不是
+   请求体，客户端报什么名字都不作数；空白操作者归一成 SQL **NULL** 而不是 `"admin"`
+   （`JdbcSkillStore.operatorOrNull`），写默认值等于给每次匿名写找个固定背锅人；
+   `skill_definition.created_by` **只在插入时写**、后续写只刷 `updated_by`，而 `skill_version.created_by`
+   是**每条版本行各自的作者**——回滚新增的那条记按下回滚的人，不是原作者；
+   导入 dryRun 既不 `markRevision` 也不留审计行（预览不许在审计里冒充一次真写入）；
+   覆盖确认门的 409 `currentRevision` 为 `null`、令牌过期的 409 带真值，前端只能按**有没有这个键**分流，
+   按消息文本分流会把「先确认覆盖」降级成「刷新重试」。另修一处文档事实错误：`skill.import.db`
+   这个审计动作从来没有产生过（`SkillNacosImporter` 不持 `AuditService`），规格 §13-6 按现状改写。
+   测试 `JdbcSkillStoreTest` 21 → **24**、`SkillAdminControllerTest` 30 → **33**、
+   `SkillImportServiceTest` 12 → **13**，全量 **1405 用例 0 失败 4 跳过**；十一条变异 P1–P11
+   （`D:\tmp\p13_mutation.py`）全部被红测捕获。**没做**：真机仍未按过导入接口与归属列
+   （三轮回归都没挂 `PAYROLL_TEST_MYSQL_*`，MySQL 腿在跳过状态，随 P1-5）；前端展示
+   `createdBy`/`updatedBy` 与回滚确认属 P1-4。
+

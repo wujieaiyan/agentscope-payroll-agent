@@ -1,10 +1,14 @@
 package io.agentscope.examples.payroll.db;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agentscope.examples.payroll.skill.SkillIds;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -12,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Assumptions;
@@ -64,6 +69,16 @@ class DdlSyntaxTest {
     private static final Set<String> RESERVED =
             Set.of(MYSQL_RESERVED.toLowerCase(Locale.ROOT).split("\\s+"));
 
+    /** V22 建出的索引：表、列序、唯一性一并锁定，改名或漏列都要在这里失败。 */
+    private static final Map<String, String> EXPECTED_SKILL_INDEXES =
+            Map.of(
+                    "uk_skill_version_no", "skill_version:skill_id,version_no:true",
+                    "uk_skill_resource_path", "skill_resource:version_id,path:true",
+                    "idx_skill_version_hash", "skill_version:content_hash:false",
+                    "idx_skill_resource_skill", "skill_resource:skill_id,path:false",
+                    "idx_skill_resource_blob", "skill_resource:sha256:false",
+                    "idx_skill_def_updated", "skill_definition:updated_at,skill_id:false");
+
     private final PayrollDatabase database = PayrollDatabase.inMemory("ddl-" + System.nanoTime());
 
     @Test
@@ -71,6 +86,23 @@ class DdlSyntaxTest {
     void identifiersAvoidReservedWords() throws Exception {
         try (Connection connection = database.connection()) {
             assertIdentifiersPortable(connection);
+        }
+    }
+
+    @Test
+    @DisplayName("技能四表的索引名、列序与唯一性符合运行期查询")
+    void skillIndexesMatchRuntimeQueries() throws Exception {
+        try (Connection connection = database.connection()) {
+            assertSkillIndexes(connection);
+        }
+    }
+
+    @Test
+    @DisplayName("skill_id 列宽与 SkillIds 的 ID 规则同源，且存得下满长 ID")
+    void skillIdColumnsMatchIdRule() throws Exception {
+        try (Connection connection = database.connection()) {
+            assertSkillIdColumns(connection);
+            insertMaxLengthId(connection);
         }
     }
 
@@ -94,6 +126,8 @@ class DdlSyntaxTest {
         }
         try (Connection connection = DriverManager.getConnection(url, user, password)) {
             assertIdentifiersPortable(connection);
+            assertSkillIndexes(connection);
+            assertSkillIdColumns(connection);
         }
     }
 
@@ -119,6 +153,114 @@ class DdlSyntaxTest {
         assertTrue(offenders.isEmpty(), "列名/索引名撞上 MySQL 保留字：" + offenders);
     }
 
+    private static void assertSkillIndexes(Connection connection) throws Exception {
+        Map<String, String> actual = skillIndexSignatures(connection);
+        for (Map.Entry<String, String> expected : EXPECTED_SKILL_INDEXES.entrySet()) {
+            String name = expected.getKey();
+            // 唯一键折进建表体才能随表幂等重放，而 H2 给约束派生的索引加 _INDEX_n 后缀，MySQL 用原名。
+            // 所以名字按前缀认，列序与唯一性仍按完整签名比——改名、漏列、颠倒列序都得在这里红。
+            List<String> matches =
+                    actual.entrySet().stream()
+                            .filter(
+                                    entry ->
+                                            entry.getKey().equals(name)
+                                                    || entry.getKey().startsWith(name + "_index_"))
+                            .map(Map.Entry::getValue)
+                            .toList();
+            assertFalse(matches.isEmpty(), "缺少索引 " + name + "，实际有 " + actual.keySet());
+            assertTrue(
+                    matches.contains(expected.getValue()),
+                    name
+                            + " 期望 "
+                            + expected.getValue()
+                            + " 实际 "
+                            + matches);
+        }
+    }
+
+    private static void assertSkillIdColumns(Connection connection) throws Exception {
+        List<String> found = new ArrayList<>();
+        for (String table : tables(connection)) {
+            Integer size = columnSize(connection, table, "skill_id");
+            if (size != null) {
+                found.add(table.toLowerCase(Locale.ROOT));
+                assertEquals(
+                        SkillIds.MAX_ID_LENGTH,
+                        size,
+                        table + ".skill_id 必须与 ID 上限同宽，否则长 ID 只写不读");
+            }
+        }
+        assertEquals(List.of("skill_definition", "skill_resource", "skill_version"), found.stream().sorted().toList());
+    }
+
+    private static void insertMaxLengthId(Connection connection) throws Exception {
+        String id = "s" + "x".repeat(SkillIds.MAX_ID_LENGTH - 1);
+        assertTrue(SkillIds.isValid(id), id);
+        // MySQL 腿跑在持久库上，同一 schema 可以反复验；H2 那两条每次都是新库，删不删都一样。
+        // 不清的话第二次执行撞主键，测出来的会是「这行已经在」而不是「满长 ID 写得进」。
+        try (PreparedStatement cleanup =
+                connection.prepareStatement("DELETE FROM skill_version WHERE skill_id = ?")) {
+            cleanup.setString(1, id);
+            cleanup.executeUpdate();
+        }
+        try (PreparedStatement cleanup =
+                connection.prepareStatement("DELETE FROM skill_definition WHERE skill_id = ?")) {
+            cleanup.setString(1, id);
+            cleanup.executeUpdate();
+        }
+        try (PreparedStatement definition =
+                connection.prepareStatement(
+                        "INSERT INTO skill_definition (skill_id, name, content_hash, revision)"
+                                + " VALUES (?, ?, ?, 1)")) {
+            definition.setString(1, id);
+            definition.setString(2, "满长技能");
+            definition.setString(3, "0".repeat(64));
+            assertEquals(1, definition.executeUpdate());
+        }
+        try (PreparedStatement version =
+                connection.prepareStatement(
+                        "INSERT INTO skill_version (skill_id, version_no, body_md, meta_json,"
+                                + " content_hash) VALUES (?, 1, ?, '{}', ?)")) {
+            version.setString(1, id);
+            version.setString(2, "# 正文");
+            version.setString(3, "0".repeat(64));
+            assertEquals(1, version.executeUpdate());
+        }
+        try (PreparedStatement query =
+                connection.prepareStatement(
+                        "SELECT d.skill_id FROM skill_definition d"
+                                + " JOIN skill_version v ON v.skill_id = d.skill_id WHERE d.skill_id = ?")) {
+            query.setString(1, id);
+            try (ResultSet rs = query.executeQuery()) {
+                assertTrue(rs.next(), "满长 skill_id 未能写入并关联");
+                assertEquals(id, rs.getString(1));
+            }
+        }
+    }
+
+    /** 索引签名：{@code 表:列1,列2:是否唯一}，小写比较，屏蔽两种库的大小写差异。 */
+    private static Map<String, String> skillIndexSignatures(Connection connection)
+            throws Exception {
+        Map<String, String> signatures = new TreeMap<>();
+        for (String table : tables(connection)) {
+            if (!table.toLowerCase(Locale.ROOT).startsWith("skill")) {
+                continue;
+            }
+            Map<String, List<String>> columns = indexColumns(connection, table);
+            Map<String, Boolean> unique = uniqueFlags(connection, table);
+            for (Map.Entry<String, List<String>> entry : columns.entrySet()) {
+                signatures.put(
+                        entry.getKey().toLowerCase(Locale.ROOT),
+                        table.toLowerCase(Locale.ROOT)
+                                + ":"
+                                + String.join(",", entry.getValue())
+                                + ":"
+                                + unique.getOrDefault(entry.getKey(), false));
+            }
+        }
+        return signatures;
+    }
+
     private static List<String> tables(Connection connection) throws Exception {
         DatabaseMetaData metaData = connection.getMetaData();
         List<String> names = new ArrayList<>();
@@ -142,6 +284,18 @@ class DdlSyntaxTest {
         return names;
     }
 
+    private static Integer columnSize(Connection connection, String table, String column)
+            throws Exception {
+        try (ResultSet rs = columns(connection, table)) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("COLUMN_NAME"))) {
+                    return rs.getInt("COLUMN_SIZE");
+                }
+            }
+        }
+        return null;
+    }
+
     private static ResultSet columns(Connection connection, String table) throws Exception {
         return connection
                 .getMetaData()
@@ -163,6 +317,20 @@ class DdlSyntaxTest {
             }
         }
         return columns;
+    }
+
+    private static Map<String, Boolean> uniqueFlags(Connection connection, String table)
+            throws Exception {
+        Map<String, Boolean> unique = new LinkedHashMap<>();
+        try (ResultSet rs = indexes(connection, table)) {
+            while (rs.next()) {
+                String index = rs.getString("INDEX_NAME");
+                if (index != null) {
+                    unique.putIfAbsent(index, !rs.getBoolean("NON_UNIQUE"));
+                }
+            }
+        }
+        return unique;
     }
 
     private static ResultSet indexes(Connection connection, String table) throws Exception {

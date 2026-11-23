@@ -6,9 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -113,6 +116,74 @@ class SkillMetricsTest {
 
         assertEquals(initial + 1, count(SkillMetrics.AGENT_CACHE_REBUILD, "reason", "initial"));
         assertEquals(unknown + 1, count(SkillMetrics.AGENT_CACHE_REBUILD, "reason", "unknown"));
+    }
+
+    @Test
+    @DisplayName("目录失效按触发来源打标，滞后把时钟倒挂截零")
+    void recordsInvalidationsAndClampsLag() {
+        long write = count(SkillMetrics.INVALIDATIONS, "trigger", "write");
+        long poll = count(SkillMetrics.INVALIDATIONS, "trigger", "poll");
+
+        SkillMetrics.invalidation(" Write ");
+        SkillMetrics.invalidation("poll");
+
+        assertEquals(write + 1, count(SkillMetrics.INVALIDATIONS, "trigger", "write"));
+        assertEquals(poll + 1, count(SkillMetrics.INVALIDATIONS, "trigger", "poll"));
+
+        SkillMetrics.invalidationLag(-5_000L);
+        Timer lag = registry.find(SkillMetrics.INVALIDATION_LAG).timer();
+        assertNotNull(lag);
+        assertEquals(1L, lag.count());
+        assertEquals(0D, lag.max(TimeUnit.MILLISECONDS), "库时钟超前时不能记成负滞后");
+
+        SkillMetrics.invalidationLag(4_000L);
+        assertEquals(2L, lag.count());
+        assertEquals(4_000D, lag.max(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    @DisplayName("两个 Timer 都发布分位数直方图，P95 门槛才有数据来源")
+    void publishesPercentileHistograms() {
+        // SimpleMeterRegistry 不实现分位数发布，histogramCounts() 恒空：门槛判的是 Prometheus exposition，
+        // 所以这里换成真的 Prometheus 注册表，看抓出来有没有 _bucket 行。
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        Metrics.globalRegistry.add(prometheus);
+        try {
+            SkillMetrics.catalogBuilt("bench-histogram", TimeUnit.MILLISECONDS.toNanos(2));
+            SkillMetrics.invalidationLag(1_500L);
+
+            String scrape = prometheus.scrape();
+            // 不开直方图时 Prometheus 侧只有 count/sum/max，门槛只能拿 max 判定，会被一次抖动永久钉住。
+            assertTrue(
+                    hasBucketLine(scrape, "skill_catalog_build_duration"),
+                    "目录构建耗时没开分位数，A-01 的 P95 没有数据来源");
+            assertTrue(
+                    hasBucketLine(scrape, "skill_invalidation_lag"),
+                    "跨实例失效滞后没开分位数，V-07 的 P95 没有数据来源");
+        } finally {
+            Metrics.globalRegistry.remove(prometheus);
+        }
+    }
+
+    private static boolean hasBucketLine(String scrape, String metricPrefix) {
+        return scrape.lines()
+                .anyMatch(line -> line.startsWith(metricPrefix) && line.contains("_bucket{"));
+    }
+
+    @Test
+    @DisplayName("目录行数 gauge 只记成功读取，失败传来的负数不覆盖上一次的好值")
+    void reportsCatalogQueryRows() {
+        SkillMetrics.catalogQueried("bench-rows", 12L);
+        assertEquals(12D, catalogRows("bench-rows"));
+
+        SkillMetrics.catalogQueried("bench-rows", -1L);
+        assertEquals(12D, catalogRows("bench-rows"));
+    }
+
+    private double catalogRows(String source) {
+        Gauge gauge = registry.find(SkillMetrics.CATALOG_QUERY_ROWS).tag("source", source).gauge();
+        assertNotNull(gauge);
+        return gauge.value();
     }
 
     private long count(String name, String... tagPairs) {

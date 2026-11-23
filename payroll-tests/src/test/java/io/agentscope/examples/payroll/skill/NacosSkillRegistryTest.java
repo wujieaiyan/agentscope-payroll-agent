@@ -6,8 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillDetail;
-import io.agentscope.examples.payroll.skill.NacosSkillRegistry.SkillSummary;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.Duration;

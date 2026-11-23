@@ -38,6 +38,7 @@ import io.agentscope.examples.payroll.skill.RoleSkills;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.skill.SkillExecutions;
 import io.agentscope.examples.payroll.skill.SkillManifest;
+import io.agentscope.examples.payroll.skill.SkillManifests;
 import io.agentscope.examples.payroll.skill.SkillMetrics;
 import io.agentscope.examples.payroll.skill.SkillRepositories;
 import io.agentscope.examples.payroll.usage.UsageModelCatalog;
@@ -463,48 +464,49 @@ public final class PayrollAgentFactory {
                 + ':' + settings.timeoutSeconds();
     }
 
-    /**
-     * 技能正文哈希、资源与执行开关参与缓存签名：任一变化都必须让旧的系统提示词与工具集失效。
-     * 目录仓库直接取 manifest 哈希，避免每次签名都重新拉取全部技能正文。
-     */
+    /** 共享仓库视图下的技能指纹，见 {@link #skillFingerprint(AgentSkillRepository, List)}。 */
     private static String skillFingerprint(List<String> skillIds) {
+        return skillFingerprint(SkillRepositories.shared(), skillIds);
+    }
+
+    /**
+     * 仓库视图下的技能指纹：正文哈希、资源指纹与执行开关任一变化都必须让旧的系统提示词与
+     * 工具集失效。
+     *
+     * <p>资源是烤进 {@link AgentSkill} 的，只有装配过正文才看得到（{@code getResources()}
+     * 内存态），因此签名前先取一次技能，让仓库把资源指纹算好，再读 manifest 的预计算哈希：
+     * 每轮对话只付一次缓存查找，不必重新哈希整个文件包。少了这一步，只改参考文件时
+     * 指纹不变，已缓存智能体会让模型继续读旧文件，直到条目被淘汰。
+     */
+    static String skillFingerprint(AgentSkillRepository repository, List<String> skillIds) {
         if (skillIds == null || skillIds.isEmpty()) {
             return "";
         }
-        AgentSkillRepository repository = SkillRepositories.shared();
         PayrollSkillCatalog catalog =
                 repository instanceof PayrollSkillCatalog candidate ? candidate : null;
         StringBuilder fingerprint = new StringBuilder();
         for (String skillId : new LinkedHashSet<>(skillIds)) {
-            if (catalog != null) {
-                Optional<SkillManifest> manifest = catalog.manifest(skillId);
-                if (manifest.isPresent()) {
-                    SkillManifest value = manifest.get();
-                    fingerprint.append(skillId)
-                            .append(':')
-                            .append(value.source())
-                            .append(':')
-                            .append(value.contentHash())
-                            .append(':')
-                            .append(value.hasResources() ? "res" : "")
-                            .append(':')
-                            .append(value.executionEnabled() ? "exec" : "")
-                            .append(';');
-                    continue;
-                }
-            }
             AgentSkill skill = repository.getSkill(skillId);
-            String content = skill == null || skill.getSkillContent() == null
-                    ? "missing"
-                    : Integer.toHexString(skill.getSkillContent().hashCode());
-            String resources = skill == null || skill.getResources().isEmpty()
-                    ? ""
-                    : Integer.toHexString(skill.getResources().hashCode());
-            String execution = skill != null && SkillExecutions.executionEnabled(skill)
-                    ? "exec"
-                    : "";
-            fingerprint.append(skillId).append(':').append(content).append(':').append(resources)
-                    .append(':').append(execution).append(';');
+            SkillManifest value =
+                    catalog != null
+                            ? catalog.manifest(skillId).orElse(null)
+                            : SkillManifests.fromSkill(skill);
+            if (value == null && skill != null) {
+                value = SkillManifests.fromSkill(skill);
+            }
+            fingerprint.append(skillId).append(':');
+            if (value == null) {
+                fingerprint.append("missing");
+            } else {
+                fingerprint.append(value.source())
+                        .append(':')
+                        .append(value.contentHash())
+                        .append(':')
+                        .append(value.resourceHash())
+                        .append(':')
+                        .append(value.executionEnabled() ? "exec" : "");
+            }
+            fingerprint.append(';');
         }
         return fingerprint.toString();
     }

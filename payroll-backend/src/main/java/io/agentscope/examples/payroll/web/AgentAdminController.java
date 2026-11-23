@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -70,10 +71,13 @@ public class AgentAdminController {
             NacosFlowRegistry flowRegistry,
             AuthService authService,
             AuditService auditService,
-            ModelConnectionRegistry modelRegistry) {
+            ModelConnectionRegistry modelRegistry,
+            ObjectProvider<AgentSkillRepository> skillRepositories) {
         this(
                 registry,
-                SkillRepositories.create(),
+                // db 源的仓库是容器 bean（复用 Spring 连接池）；nacos 源没有这个 bean，退回进程内共享槽位。
+                // 直接调 SkillRepositories.create() 会让 db 源多开一个 Hikari 池。
+                skillRepositories.getIfAvailable(SkillRepositories::shared),
                 flowRegistry,
                 authService,
                 auditService,

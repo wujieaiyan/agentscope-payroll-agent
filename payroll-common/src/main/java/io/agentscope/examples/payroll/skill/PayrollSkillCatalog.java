@@ -26,4 +26,13 @@ public interface PayrollSkillCatalog {
 
     /** id → 裸名称，供工具组激活中间件 O(1) 解析。 */
     Map<String, String> nameById();
+
+    /**
+     * 丢弃本仓库的目录与正文快照，让下一次读取立刻看到管理台刚写入的技能。
+     *
+     * <p>只影响本进程：管理台写入与运行期读取分属不同节点时仍要等 TTL
+     * （或 {@code payroll.skill.invalidation.poll-ms} 的聚合修订号轮询）。
+     */
+    default void invalidate() {
+    }
 }

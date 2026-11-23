@@ -292,6 +292,86 @@ class NacosSkillRepositoryTest {
     }
 
     @Test
+    @DisplayName("资源指纹随文件包内容变化，正文不变也要让智能体重建")
+    void resourceHashTracksFilePackage() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put("payroll-calculator.files.json", filePackage("# FAQ v1"));
+        AtomicLong now = new AtomicLong(1_000);
+        NacosSkillRepository repository = repository(configs, now);
+
+        // 冷启动时目录还没装配过正文，资源状态未知，只能呈现为空
+        assertEquals("", resourceHash(repository));
+        assertNotNull(repository.getSkill(RoleSkills.CALCULATOR));
+        String first = resourceHash(repository);
+        assertFalse(first.isEmpty(), "装配正文后目录应带上资源指纹");
+
+        configs.put("payroll-calculator.files.json", filePackage("# FAQ v2"));
+        assertEquals(first, resourceHash(repository), "TTL 内沿用快照，不重复读取");
+        now.set(61_000);
+        assertNotNull(repository.getSkill(RoleSkills.CALCULATOR));
+
+        assertTrue(!first.equals(resourceHash(repository)), "换文件内容必须换资源指纹");
+    }
+
+    @Test
+    @DisplayName("invalidate 后不必等 TTL 就读到管理台刚保存的正文与文件")
+    void invalidateDropsRuntimeSnapshots() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put("payroll-calculator.files.json", filePackage("# FAQ v1"));
+        NacosSkillRepository repository = repository(configs, clock()::get, ttl(), new AtomicInteger());
+        assertNotNull(repository.getSkill(RoleSkills.CALCULATOR));
+        String before = resourceHash(repository);
+
+        String newBody = "## 角色\n按新规范执行计算。";
+        configs.put(
+                "payroll-calculator.md",
+                CALCULATOR_MD.replace("按 Nacos 规范执行计算。", "按新规范执行计算。"));
+        configs.put(
+                "payroll-calculator.files.json",
+                filePackage(SkillFilePackage.mdHash(newBody), "# FAQ v2"));
+        assertEquals(before, resourceHash(repository), "TTL 内应沿用旧快照");
+
+        repository.invalidate();
+
+        AgentSkill skill = repository.getSkill(RoleSkills.CALCULATOR);
+        assertNotNull(skill);
+        assertTrue(skill.getSkillContent().contains("按新规范执行计算"));
+        assertEquals("# FAQ v2", skill.getResource("references/faq.md"));
+        assertTrue(!before.equals(resourceHash(repository)));
+    }
+
+    @Test
+    @DisplayName("文件包停用后目录不再报资源指纹")
+    void resourceHashStaysEmptyWhenFilesDisabled() {
+        Map<String, String> configs = new HashMap<>(allConfigs());
+        configs.put("payroll-calculator.files.json", filePackage("# FAQ"));
+        NacosSkillRepository repository =
+                new NacosSkillRepository(
+                        settings(ttl()),
+                        dataId -> Optional.ofNullable(configs.get(dataId)),
+                        null,
+                        clock()::get,
+                        new SkillFileSettings(false, 1024, 2048));
+
+        assertNotNull(repository.getSkill(RoleSkills.CALCULATOR));
+
+        assertEquals("", resourceHash(repository));
+    }
+
+    private static String filePackage(String faqContent) {
+        return filePackage(SkillFilePackage.mdHash(CALCULATOR_BODY), faqContent);
+    }
+
+    private static String filePackage(String mdHash, String faqContent) {
+        return SkillFilePackage.compose(
+                mdHash, List.of(new SkillFilePackage.SkillFile("references/faq.md", faqContent)));
+    }
+
+    private static String resourceHash(NacosSkillRepository repository) {
+        return repository.manifest(RoleSkills.CALCULATOR).orElseThrow().resourceHash();
+    }
+
+    @Test
     @DisplayName("关闭文件包时不请求伴生配置")
     void skipsFilesWhenDisabled() {
         Map<String, String> configs = new HashMap<>(allConfigs());

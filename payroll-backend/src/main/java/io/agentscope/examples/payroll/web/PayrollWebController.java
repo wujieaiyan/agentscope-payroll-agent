@@ -112,7 +112,7 @@ public class PayrollWebController {
         this.runtimeHealthService = runtimeHealthService;
     }
 
-    /** 组件健康：db/redis/nacos/es 只回状态；核心依赖不可用整体 503，不再暴露地址。 */
+    /** 组件健康：db/redis/skills/es 只回状态；核心依赖不可用整体 503，不再暴露地址。 */
     @GetMapping("/health")
     public ResponseEntity<ApiResponse> health() {
         RuntimeHealthService.Report report = runtimeHealthService.snapshot();

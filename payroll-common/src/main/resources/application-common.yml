@@ -54,10 +54,11 @@ payroll:
     per-url-timeout-ms: "${PAYROLL_RUNTIME_PER_URL_TIMEOUT_MS:5000}"
     submit-budget-ms: "${PAYROLL_RUNTIME_SUBMIT_BUDGET_MS:10000}"
   health:
-    # readiness 只探测 DB + Redis；ES/Nacos 只进各自 Actuator 详情，不参与摘流。
+    # readiness 只探测 DB + Redis；ES 与技能来源只进各自 Actuator 详情，不参与摘流。
     readiness-deps: "${PAYROLL_HEALTH_READINESS_DEPS:db,redis}"
-    # /health 中 Nacos 组件的新鲜度窗口：超过该时长未成功列表即报 DOWN（整体降级）。
-    nacos-stale-seconds: "${PAYROLL_HEALTH_NACOS_STALE_SECONDS:300}"
+    # /health 中 skills 组件的新鲜度窗口：超过该时长未成功列出技能即报 DOWN（整体降级）。
+    # 组件来源随 payroll.skills.source 变（Nacos 或 skill 表），键名不变。
+    skills-stale-seconds: "${PAYROLL_HEALTH_SKILLS_STALE_SECONDS:300}"
   internal:
     # runtime 内部接口 HMAC 密钥；null/空时内部提交不可用。
     token: "${PAYROLL_AGENT_RUNTIME_TOKEN:}"
@@ -84,11 +85,29 @@ payroll:
     source: "${PAYROLL_DEFINITIONS_SOURCE:nacos}"
     # 仅 source=db 且表为空时生效：启动从 Nacos 导入一次，重复执行不产生重复行。
     import-from-nacos: "${PAYROLL_DEFINITIONS_IMPORT_FROM_NACOS:false}"
+  skills:
+    # 技能单源开关：nacos=技能正文与文件包都在 Nacos 配置里（默认）；db=落 skill 表 + 本地
+    # blob 目录。运行期不热切（切换要重启，见规格 §11.1），回退就是改回 nacos 再重启。
+    source: "${PAYROLL_SKILLS_SOURCE:nacos}"
+    # 仅 source=db 且 skill 表为空时生效：启动时从 Nacos 整体导入一次，重复启动不再导入。
+    # 只在 Web/all 侧开启，避免两个进程并发把同一批技能写两遍。
+    import-from-nacos: "${PAYROLL_SKILLS_IMPORT_FROM_NACOS:false}"
   skill:
     # 技能文件包读取缓存：按访问序 LRU，条数与正文总字节双上限，正文变化即失效。
     file-cache:
       max-entries: "${PAYROLL_SKILL_FILE_CACHE_MAX_ENTRIES:128}"
       max-bytes: "${PAYROLL_SKILL_FILE_CACHE_MAX_BYTES:33554432}"
+    # db 源的资源字节落盘位置（内容寻址 <sha[0:2]>/<sha>）；data/ 已 gitignore，与 KB 附件同处置。
+    blob:
+      root: "${PAYROLL_SKILL_BLOB_ROOT:./data/skill-blobs}"
+      # 单个 blob 上限，默认与现网技能单文件配额同值（512KB），切库第一天不放宽。
+      max-bytes: "${PAYROLL_SKILL_BLOB_MAX_BYTES:524288}"
+    catalog:
+      # db 源目录快照的兜底新鲜度；跨实例的主动失效由下面的轮询器负责。
+      ttl-ms: "${PAYROLL_SKILL_CATALOG_TTL_MS:60000}"
+    invalidation:
+      # 跨实例目录失效轮询间隔（仅 db 源）；<=0 关闭，退化为只靠 catalog TTL 兜底。
+      poll-ms: "${PAYROLL_SKILL_INVALIDATION_POLL_MS:15000}"
   security:
     # 同一账号连续失败达到阈值后锁定，Redis 不可用时回退进程内计数。
     login-max-failures: "${PAYROLL_LOGIN_MAX_FAILURES:5}"
@@ -315,7 +334,7 @@ management:
   endpoint:
     health:
       show-details: when_authorized
-      # /livez、/readyz 映射到下面两个分组；readiness 不含 ES/Nacos。
+      # /livez、/readyz 映射到下面两个分组；readiness 不含 ES/技能来源。
       probes:
         enabled: true
       group:

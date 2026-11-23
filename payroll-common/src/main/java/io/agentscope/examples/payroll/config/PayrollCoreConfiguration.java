@@ -68,9 +68,22 @@ import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosRuntimeSettings;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
+import io.agentscope.examples.payroll.skill.SkillStore;
 import io.agentscope.examples.payroll.skill.SkillFileSettings;
 import io.agentscope.examples.payroll.skill.SkillImportService;
 import io.agentscope.examples.payroll.skill.SkillImportSettings;
+import io.agentscope.core.skill.repository.AgentSkillRepository;
+import io.agentscope.examples.payroll.skill.BuiltInSkillRepository;
+import io.agentscope.examples.payroll.skill.CompositeSkillRepository;
+import io.agentscope.examples.payroll.skill.DbSkillRepository;
+import io.agentscope.examples.payroll.skill.JdbcSkillStore;
+import io.agentscope.examples.payroll.skill.LocalDiskSkillBlobStore;
+import io.agentscope.examples.payroll.skill.SkillBlobStore;
+import io.agentscope.examples.payroll.skill.SkillInvalidationPoller;
+import io.agentscope.examples.payroll.skill.SkillNacosImporter;
+import io.agentscope.examples.payroll.skill.SkillNacosSource;
+import io.agentscope.examples.payroll.skill.SkillRepositories;
+import io.agentscope.examples.payroll.skill.SkillsSource;
 import io.agentscope.examples.payroll.team.ActiveTeamCoordinator;
 import io.agentscope.examples.payroll.team.ShadowEvaluator;
 import io.agentscope.examples.payroll.team.ShadowReportService;
@@ -83,6 +96,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -100,6 +114,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -167,22 +182,22 @@ public class PayrollCoreConfiguration {
                 database, redisHealthProbe, deploymentMode, readinessDeps, registry);
     }
 
-    /** /health 的组件快照：db/redis/nacos/es，只回状态，不暴露地址与账号。 */
+    /** /health 的组件快照：db/redis/skills/es，只回状态，不暴露地址与账号。 */
     @Bean
     public RuntimeHealthService runtimeHealthService(
             PayrollDatabase database,
             RedisHealthProbe redisHealthProbe,
             DeploymentMode deploymentMode,
-            NacosSkillRegistry skillRegistry,
+            SkillStore skillStore,
             VectorMemoryService vectorMemoryService,
-            @Value("${payroll.health.nacos-stale-seconds:300}") long nacosStaleSeconds) {
+            @Value("${payroll.health.skills-stale-seconds:300}") long skillsStaleSeconds) {
         return new RuntimeHealthService(
                 database,
                 redisHealthProbe,
                 deploymentMode,
-                skillRegistry,
+                skillStore,
                 vectorMemoryService,
-                nacosStaleSeconds);
+                skillsStaleSeconds);
     }
 
     @Bean
@@ -401,19 +416,137 @@ public class PayrollCoreConfiguration {
         return new NacosFlowRegistry(NacosSkillSettings.fromEnvironment(), runtimeSettings);
     }
 
-    /** 技能管理直接读写 Nacos 中的 {@code <skill-id>.md}，与运行时技能仓库同源。 */
+    /**
+     * 技能来源开关（规格 §11.1）：单源，切换要重启。不做 {@code both}/热切换——两条写路径互不可见，
+     * 热切会让一半请求写进没人读的那一侧。取值非法直接让容器起不来，好过静默按 Nacos 跑。
+     */
     @Bean
-    public NacosSkillRegistry skillRegistry(
+    public SkillsSource skillsSource(@Value("${payroll.skills.source:nacos}") String source) {
+        SkillsSource parsed = SkillsSource.parse(source);
+        log.info("[Skill] 技能来源：{}", parsed.value());
+        return parsed;
+    }
+
+    /** 技能文件字节的按内容寻址存储（规格 §6）。 */
+    @Bean
+    public SkillBlobStore skillBlobStore(
+            @Value("${payroll.skill.blob.root:./data/skill-blobs}") String root,
+            @Value("${payroll.skill.blob.max-bytes:524288}") long maxBlobBytes) {
+        return new LocalDiskSkillBlobStore(root, maxBlobBytes);
+    }
+
+    /**
+     * 技能表仓储。Nacos 源也注册：§11.3 的切换前对账与 §11.4 的回滚演练都要在还没切库时读一次库，
+     * 而构造本身不开连接——只有目录创建那一次落盘。
+     */
+    @Bean
+    public JdbcSkillStore jdbcSkillStore(PayrollDatabase database, SkillBlobStore skillBlobStore) {
+        return new JdbcSkillStore(database, skillBlobStore);
+    }
+
+    /** Nacos 侧技能注册表：现网默认源的管理面读写实现，也是 {@code @Primary SkillStore} 的取值之一。 */
+    @Bean
+    public NacosSkillRegistry nacosSkillRegistry(
             @Value("${payroll.skill.file-cache.max-entries:128}") int fileCacheMaxEntries,
             @Value("${payroll.skill.file-cache.max-bytes:33554432}") long fileCacheMaxBytes) {
         return new NacosSkillRegistry(fileCacheMaxEntries, fileCacheMaxBytes);
     }
 
-    /** 技能项目导入：Git 浅克隆或 ZIP 解压后解析并整体发布到 Nacos。 */
+    /**
+     * 管理面技能存储端口：按 {@code payroll.skills.source} 二选一（规格 §8）。注入方（管理台、
+     * Git/ZIP 导入服务、{@code /health}）只认这个端口，换存储不动调用点。
+     *
+     * <p>{@code @Primary} 是必需的：此刻容器里有三个 {@link SkillStore}（本 bean 与上面两个具体实现），
+     * 按接口注入必须有明确胜出者。返回的就是那两个 bean 之一，不是第三个实例。
+     */
     @Bean
-    public SkillImportService skillImportService(NacosSkillRegistry skillRegistry) {
+    @Primary
+    public SkillStore skillStore(
+            SkillsSource skillsSource,
+            NacosSkillRegistry nacosSkillRegistry,
+            JdbcSkillStore jdbcSkillStore) {
+        SkillStore store = skillsSource == SkillsSource.DB ? jdbcSkillStore : nacosSkillRegistry;
+        log.info("[Skill] 管理台读写技能存储：{}", store.location());
+        return store;
+    }
+
+    /**
+     * db 源的运行期读路径（目录快照 + 按内容身份缓存的正文），与 {@link #skillStore} 共用同一个
+     * {@link JdbcSkillStore}，管理台写入后缓存联动才是同一份状态。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "payroll.skills", name = "source", havingValue = "db")
+    public DbSkillRepository dbSkillRepository(
+            JdbcSkillStore jdbcSkillStore,
+            @Value("${payroll.skill.catalog.ttl-ms:60000}") long catalogTtlMillis) {
+        return new DbSkillRepository(jdbcSkillStore, catalogTtlMillis);
+    }
+
+    /**
+     * 智能体装配用的技能仓库（规格 §11.1）。db 源由容器建好再放进 {@link SkillRepositories#install}
+     * 的共享槽位，让读路径复用 Spring 的 {@code PayrollDatabase} 连接池；Nacos 源不注册本 bean，
+     * 沿用 {@code shared()} 的懒加载，行为零变化。
+     *
+     * <p>{@code @Primary} 是必需的：{@link DbSkillRepository} 自身也是 {@code AgentSkillRepository}，
+     * db 源下按类型注入会同时命中两个候选，容器直接启动失败（真机第一次拉起 db 源就撞在这）。按类型要
+     * 的都是「应用面仓库」，即带内置回退的组合仓库，而不是只看技能表的裸 db 仓库。
+     */
+    @Bean(destroyMethod = "close")
+    @Primary
+    @ConditionalOnProperty(prefix = "payroll.skills", name = "source", havingValue = "db")
+    public AgentSkillRepository skillRepository(
+            JdbcSkillStore jdbcSkillStore, DbSkillRepository dbSkillRepository) {
+        AgentSkillRepository repository =
+                new CompositeSkillRepository(
+                        List.of(dbSkillRepository, new BuiltInSkillRepository()));
+        SkillRepositories.install(repository);
+        log.info("[Skill] 角色提示词读取技能表 {}，缺失时回退代码内置版本", jdbcSkillStore.location());
+        return repository;
+    }
+
+    /**
+     * 跨实例目录失效轮询（规格 §10）：P0-7 只交付了类，本批接成 bean，启停交给容器。
+     * {@code poll-ms <= 0} 时不建线程，只保留同进程写后的主动失效。
+     */
+    @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(prefix = "payroll.skills", name = "source", havingValue = "db")
+    public SkillInvalidationPoller skillInvalidationPoller(
+            JdbcSkillStore jdbcSkillStore,
+            DbSkillRepository dbSkillRepository,
+            @Value("${payroll.skill.invalidation.poll-ms:15000}") long pollMillis) {
+        return new SkillInvalidationPoller(jdbcSkillStore, dbSkillRepository::refresh, pollMillis);
+    }
+
+    /** §11.2 的一次性导入器：读端自己开一个 Nacos 客户端，不复用注册表的 TTL 快照（理由见该类注释）。 */
+    @Bean
+    public SkillNacosImporter skillNacosImporter(JdbcSkillStore jdbcSkillStore) {
+        return new SkillNacosImporter(new SkillNacosSource(), jdbcSkillStore);
+    }
+
+    /**
+     * 技能一次性导入：空表且显式开启时，启动把 Nacos 现有技能灌进技能表（幂等，规格 §11.1）。
+     * 与智能体定义的导入开关同构，且同样只在 db 源生效——Nacos 模式下灌库等于制造两个权威。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "payroll.skills", name = "import-from-nacos", havingValue = "true")
+    public ApplicationRunner skillNacosImportRunner(
+            SkillNacosImporter importer, SkillsSource skillsSource) {
+        return args -> {
+            if (skillsSource != SkillsSource.DB) {
+                log.info(
+                        "[Skill] 来源是 {}，忽略 payroll.skills.import-from-nacos（导入只对 db 源生效）",
+                        skillsSource.value());
+                return;
+            }
+            importer.importAllIfEmpty();
+        };
+    }
+
+    /** 技能项目导入：Git 浅克隆或 ZIP 解压后解析并整体发布到当前生效的技能存储源。 */
+    @Bean
+    public SkillImportService skillImportService(SkillStore skillStore) {
         return new SkillImportService(
-                skillRegistry,
+                skillStore,
                 SkillFileSettings.fromEnvironment(),
                 SkillImportSettings.fromEnvironment());
     }

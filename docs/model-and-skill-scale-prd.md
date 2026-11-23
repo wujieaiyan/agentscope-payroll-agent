@@ -266,7 +266,7 @@ D2 已确认（2026-11-20）：页面录入的密钥加密后写入数据库 `mo
 ### 4.1 目标态：两级加载
 
 ```text
-第一级：技能目录（元数据）—— id / name / description / tags / version / contentHash / contentLength / hasResources
+第一级：技能目录（元数据）—— id / name / description / tags / version / contentHash / contentLength / resourceHash
 第二级：技能正文与文件包 —— 仅在模型调用 load_skill_through_path 或系统预注入选中时加载
 ```
 
@@ -338,11 +338,15 @@ token 估算：CJK 1 字 ≈ 1 token；ASCII 4 字符 ≈ 1 token
 
 ```text
 ## 可用技能目录（共 42 个，未加载正文）
-- payroll-calc：工资核算规则与公式（v3, 12KB）
-- tax-guide：个税专项附加扣除（v2, 8KB）
+- payroll-calc：工资核算规则与公式（v3）
+- tax-guide：个税专项附加扣除（v2）
 ...
 需要某个技能的完整步骤时，调用 load_skill_through_path(skillId, "SKILL.md")。
 ```
+
+> 2026-11-23 更正：目录行**不渲染正文字节数**。那个数是 `strip()` 归一后的字符数，切到 MySQL 存储后
+> 同一份内容与 Nacos 差 1 个字，会让整份目录集体改字节并把注入截断点推走一行
+> （`skill-storage-mysql-oss-spec.md` §17 V-12）。本例最初写的 `（v3, 12KB）` 从未是实现形状。
 
 约束：
 

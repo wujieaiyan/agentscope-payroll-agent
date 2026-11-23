@@ -8,8 +8,11 @@ import static org.mockito.Mockito.mock;
 import io.agentscope.examples.payroll.config.DeploymentMode;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.memory.VectorMemoryService;
+import io.agentscope.examples.payroll.skill.JdbcSkillStore;
+import io.agentscope.examples.payroll.skill.LocalDiskSkillBlobStore;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.NacosSkillSettings;
+import io.agentscope.examples.payroll.skill.SkillFileSettings;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Map;
@@ -20,7 +23,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 class RuntimeHealthServiceTest {
 
     @Test
-    @DisplayName("组件快照只含状态，未配置的 Nacos/Redis/ES 报 SKIPPED")
+    @DisplayName("组件快照只含状态，未配置的技能来源/Redis/ES 报 SKIPPED")
     void reportsComponentsWithoutAddresses() {
         PayrollDatabase database = PayrollDatabase.inMemory("health-up-" + System.nanoTime());
         RuntimeHealthService service =
@@ -37,7 +40,7 @@ class RuntimeHealthServiceTest {
         assertEquals(RuntimeHealthService.UP, report.status());
         assertFalse(report.down());
         assertEquals(
-                Map.of("db", "UP", "redis", "SKIPPED", "nacos", "SKIPPED", "es", "SKIPPED"),
+                Map.of("db", "UP", "redis", "SKIPPED", "skills", "SKIPPED", "es", "SKIPPED"),
                 report.components());
         String text = report.components().toString();
         assertFalse(text.contains("jdbc"), text);
@@ -98,13 +101,13 @@ class RuntimeHealthServiceTest {
     }
 
     @Test
-    @DisplayName("Nacos 超过新鲜度窗口只报 DEGRADED，不摘流")
-    void staleNacosOnlyDegrades() throws Exception {
+    @DisplayName("技能来源超过新鲜度窗口只报 DEGRADED，不摘流")
+    void staleSkillsOnlyDegrades() throws Exception {
         NacosSkillRegistry skills = enabledSkills();
         setLastSuccessfulListAt(skills, System.currentTimeMillis() - 600_000L);
         RuntimeHealthService service =
                 new RuntimeHealthService(
-                        PayrollDatabase.inMemory("health-nacos-" + System.nanoTime()),
+                        PayrollDatabase.inMemory("health-skills-" + System.nanoTime()),
                         new RedisHealthProbe(null, DeploymentMode.SINGLE, null),
                         DeploymentMode.SINGLE,
                         skills,
@@ -113,9 +116,35 @@ class RuntimeHealthServiceTest {
 
         RuntimeHealthService.Report report = service.snapshot();
 
-        assertEquals("DOWN", report.components().get("nacos"));
+        assertEquals("DOWN", report.components().get("skills"));
         assertFalse(report.down());
         assertEquals(RuntimeHealthService.DEGRADED, report.status());
+    }
+
+    @Test
+    @DisplayName("db 源的 skills 组件键与 Nacos 源同一个，未列过报 UNKNOWN")
+    void dbSourceDrivesTheSameComponentKey() {
+        JdbcSkillStore skills =
+                new JdbcSkillStore(
+                        PayrollDatabase.inMemory("health-db-skills-" + System.nanoTime()),
+                        new LocalDiskSkillBlobStore(
+                                "./target/health-skill-blobs", 1024 * 1024),
+                        SkillFileSettings.defaults());
+        RuntimeHealthService service =
+                new RuntimeHealthService(
+                        PayrollDatabase.inMemory("health-db-skills2-" + System.nanoTime()),
+                        new RedisHealthProbe(null, DeploymentMode.SINGLE, null),
+                        DeploymentMode.SINGLE,
+                        skills,
+                        VectorMemoryService.disabled(),
+                        300);
+
+        assertEquals(
+                RuntimeHealthService.UNKNOWN,
+                service.snapshot().components().get("skills"),
+                "还没成功列过技能目录，不能假装新鲜");
+        skills.list();
+        assertEquals(RuntimeHealthService.UP, service.snapshot().components().get("skills"));
     }
 
     private RuntimeHealthService service(RedisHealthProbe probe, DeploymentMode mode) {
