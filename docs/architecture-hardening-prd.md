@@ -805,7 +805,7 @@ backlog 校正（对应任务 #142–#152）：
 | `payroll.nacos.list.max-pages` | 50 | 2 | 列表翻页上限 |
 | `payroll.skill.file-cache.max-entries` | 128 | 3 | 文件包缓存条数 |
 | `payroll.skill.file-cache.max-bytes` | 33554432 | 3 | 文件包缓存字节上限 |
-| `payroll.health.nacos-stale-seconds` | 300 | 3 | `/health` 中 Nacos 新鲜度窗口，超过即 DOWN |
+| `payroll.health.skills-stale-seconds` | 300 | 3 | `/health` 中技能目录新鲜度窗口，超过即 DOWN。原键 `payroll.health.nacos-stale-seconds`，2026-11-23 随技能单源开关改名（该组件两源同一算法，继续叫 nacos 会让 db 源的告警挂错名词），见 `skill-storage-mysql-oss-spec.md` §11.1 第 5 条 |
 | `payroll.usage.daily-token-budget` | 0 | 3 | 每日 token 预算，0 为不限 |
 | `payroll.auth.force-password-change` | true | 3 | 首改密开关 |
 | `payroll.deployment.mode` | `single` | 4 | `single` 保留本地降级；`cluster` 禁用租约/配额/事件本地回退 |

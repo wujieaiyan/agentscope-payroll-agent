@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { login } from '../stores/auth';
+import { landingPath } from '../router/workspaces';
 
 const router = useRouter();
 const route = useRoute();
@@ -15,8 +16,8 @@ async function submit() {
   error.value = '';
   busy.value = true;
   try {
-    await login(username.value.trim(), password.value);
-    router.push(route.query.redirect || '/chat');
+    const user = await login(username.value.trim(), password.value);
+    router.push(route.query.redirect || landingPath(user));
   } catch (e) {
     error.value = e.message || '登录失败';
     password.value = '';

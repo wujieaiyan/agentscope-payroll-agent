@@ -188,7 +188,7 @@ class DevApprovalServiceTest {
                 "dev",
                 "",
                 """
-                +++ b/payroll-common/src/main/resources/db/migration/mysql/V15__dev.sql
+                +++ b/payroll-common/src/main/resources/db/migration/common/V15__dev.sql
                 +ALTER TABLE payroll_item ADD COLUMN note VARCHAR(64);
                 """,
                 "hash-1");
@@ -212,7 +212,7 @@ class DevApprovalServiceTest {
         assertTrue(DevApprovalService.requiresPerTask("+++ b/docs/interfaces.md\n+x"));
         assertTrue(
                 DevApprovalService.requiresPerTask(
-                        "+++ b/payroll-common/src/main/resources/db/migration/mysql/V15__x.sql"));
+                        "+++ b/payroll-common/src/main/resources/db/migration/common/V15__x.sql"));
         assertTrue(DevApprovalService.requiresPerTask("+++ b/payroll-common/pom.xml"));
         assertTrue(DevApprovalService.requiresPerTask("+++ b/frontend/package-lock.json"));
         assertTrue(DevApprovalService.requiresPerTask("+++ b/backend/requirements.txt"));

@@ -1,0 +1,12 @@
+# 生产唯一形态（D3）：--spring.profiles.active=prod 会通过 profile group 拉起 mysql + redis。
+# 缺项由 TopologyGuard 在启动期直接失败，不做进程内降级；允许组合见 docs/deployment-matrix.md。
+server:
+  address: "${PAYROLL_SERVER_ADDRESS:0.0.0.0}"
+
+payroll:
+  deployment:
+    # 多实例：Redis 故障时轮次租约/事件/配额直接 503，由 readiness 摘流。
+    mode: cluster
+  chat:
+    # 明确拒绝而不是回退进程内计数，避免多节点重复计费。
+    quota-fail-mode: deny

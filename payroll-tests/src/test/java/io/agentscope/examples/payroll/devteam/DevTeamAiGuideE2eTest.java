@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
  * {@code PAYROLL_DEV_MODEL=ollama:<模型>} 后才会执行，避免把有限模型与耗时带进全量回归。
  * 任务运行在隔离克隆里，交付只在目标仓库本地建分支与提交，不推送。
  */
+@Tag("e2e")
 class DevTeamAiGuideE2eTest {
 
     private static final String ENV_PROJECT = "PAYROLL_DEV_E2E_PROJECT";

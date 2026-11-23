@@ -33,6 +33,7 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -48,6 +49,7 @@ import org.springframework.test.context.DynamicPropertySource;
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(ChatAttachmentWebTest.StubChatConfig.class)
+@Tag("integration")
 class ChatAttachmentWebTest {
 
     private static final String ADMIN_PASSWORD = "attachment-admin-pass";

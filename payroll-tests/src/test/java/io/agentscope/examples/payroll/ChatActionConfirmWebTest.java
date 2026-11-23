@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -51,6 +52,7 @@ import org.springframework.test.context.DynamicPropertySource;
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(ChatActionConfirmWebTest.StubConfig.class)
+@Tag("integration")
 class ChatActionConfirmWebTest {
 
     private static final String ADMIN_PASSWORD = "action-admin-pass";

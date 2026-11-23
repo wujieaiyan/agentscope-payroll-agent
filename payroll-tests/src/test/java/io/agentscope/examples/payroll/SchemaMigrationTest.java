@@ -24,7 +24,7 @@ class SchemaMigrationTest {
     void h2AppliesSharedMigrations() throws Exception {
         PayrollDatabase database = PayrollDatabase.inMemory("schema-" + System.nanoTime());
         try (Connection connection = database.connection()) {
-            assertEquals(44, tableCount(connection));
+            assertEquals(45, tableCount(connection));
             assertColumn(connection, "chat_messages", "routing_json");
             assertColumn(connection, "chat_messages", "citations_json");
             assertColumn(connection, "chat_messages", "turn_id");
@@ -34,6 +34,7 @@ class SchemaMigrationTest {
             assertColumn(connection, "app_users", "must_change_password");
             assertColumn(connection, "audit_log", "write_result");
             assertColumn(connection, "dev_tasks", "finished_at");
+            assertColumn(connection, "agent_definition", "payload_json");
             assertEquals(1, scalar(connection, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.INDEXES"
                     + " WHERE INDEX_NAME = 'UK_CHAT_MESSAGES_TURN'"));
             assertEquals("MySQL", setting(connection, "MODE"));
@@ -55,7 +56,7 @@ class SchemaMigrationTest {
         try (Connection connection = second.connection()) {
             assertTrue(seeded > 0, "演示员工应在首次初始化时写入");
             assertEquals(seeded, scalar(connection, "SELECT COUNT(*) FROM employees"));
-            assertEquals(20, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
+            assertEquals(21, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
                     + " WHERE \"version\" IS NOT NULL"));
         }
     }

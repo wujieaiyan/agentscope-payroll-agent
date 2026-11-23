@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -24,6 +25,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @SpringBootTest(
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Tag("integration")
 class FlowAdminWebTest {
 
     private static final Path OUTPUT_DIR = tempDir();

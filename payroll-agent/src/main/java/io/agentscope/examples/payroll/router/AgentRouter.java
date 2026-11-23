@@ -3,6 +3,7 @@ package io.agentscope.examples.payroll.router;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.PromptLibrary;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.team.TeamLlmClient;
 import java.nio.charset.StandardCharsets;
@@ -35,61 +36,17 @@ public final class AgentRouter {
     private static final long DEFAULT_CACHE_TTL_SECONDS = 300L;
     private static final int DEFAULT_CACHE_MAX_ENTRIES = 512;
 
-    private static final String INSTRUCTION =
-            """
-            你是薪酬管理台的智能体路由决策器。根据用户问题在三个执行目标中选择一个：
-            - "agent"：单个专家智能体直接作答，必须给出候选列表中的 agent_id；
-            - "team"：由多个智能体动态组队完成，仅当“团队可用：是”时可选；
-            - "pipeline"：内置三段薪酬流水线（计算 → 验证 → 核算），只用于工资核算类问题。
-
-            只输出一个合法 JSON 对象，不要 Markdown 代码围栏，不要解释：
-            {"target":"agent|team|pipeline","agent_id":"候选 id 或空串","reason":"一句话中文理由","confidence":0.0}
-
-            判断规则：
-            1. 工资计算、批量核算、工资条明细等需要严格核算的问题，优先 "pipeline"，需要多角色协作且团队可用时选 "team"；
-            2. 单一专家即可胜任的问题，选 "agent" 并给出最匹配的 agent_id；
-            3. 问候、寒暄、自我介绍、能力咨询、对回答方式的追问等通用对话，选名称、描述或 tags
-               含闲聊、情感、通用、助理的候选智能体（如情感专家），不要选 "pipeline"；
-            4. 知识库类问题（建库、解析/分块/检索配置、目录与成员权限、入库任务）不要选 "pipeline"；
-               其中建库、保存配置、加/移成员、移动目录、重建索引等写操作只能选 "agent"，
-               并优先 tags 含 kb 或 kb-config 的候选智能体；只读问答同样优先该智能体；
-            5. 非薪酬问题只有候选都不匹配时才选 "pipeline"；薪酬问题无法确定时选 "pipeline"，
-               并给出较低的 confidence。
-            """;
+    private static final String INSTRUCTION = PromptLibrary.get("router-instruction");
 
     /** 仅追加在非薪酬问题上；薪酬问题继续使用 {@link #INSTRUCTION} 原文，保证 prompt 可比。 */
-    private static final String KB_SECTION =
-            """
-
-            知识库判定（need_kb / kb_kind，仅非薪酬问题需要填写）：
-            - need_kb：本轮是否需要检索知识库。制度、流程、条款、手册、产品资料、技术文档类问题，
-              或对上一轮已引用内容的追问填 true；视频制作、写作、闲聊、纯数据查询、执行类指令填 false。
-            - need_kb 只决定是否给执行者补充资料，不决定由谁回答：问题属于哪个候选的专长就选哪个
-              候选，不要因为需要检索就改选 "pipeline"；只有候选都不匹配时才按第 5 条选 "pipeline"。
-            - kb_kind：需要检索填 "read"；知识库管理操作（建库、解析/分块/检索配置、目录与成员权限、
-              入库任务）填 "admin"；其余填 "none"。
-            - 输出 JSON 需同时包含这两个字段，缺省按 false / "none" 处理：
-              {"target":"agent|team|pipeline","agent_id":"候选 id 或空串","need_kb":false,"kb_kind":"none","reason":"一句话中文理由","confidence":0.0}
-            """;
+    private static final String KB_SECTION = PromptLibrary.get("router-kb-section");
 
     /** 非薪酬问题的创作类判定：小模型容易把带“写”字的请求一律当办公文书。 */
-    private static final String CREATIVE_SECTION =
-            """
-
-            创作类判定（仅非薪酬问题）：
-            - 诗词、歌词、小说、散文、剧本等文学创作，选名称、描述或 tags 最贴近该领域的创作类智能体；
-            - 只有通知、报告、会议纪要、邮件等办公文书才选办公文书类智能体；
-              不要因为句中出现“写”“创作”等字样就选办公文书专家。
-            """;
+    private static final String CREATIVE_SECTION = PromptLibrary.get("router-creative-section");
 
     /** 单独开关：创作类问题不再顺带检索知识库，避免诗词答复引用制度资料。 */
     private static final String CREATIVE_NO_KB_SECTION =
-            """
-
-            创作类检索判定（仅非薪酬问题）：
-            - 诗词、歌词、小说、散文、剧本、文案等创作类问题 need_kb=false；
-              除非用户明确要求引用制度、条款或资料，否则不要开启知识库检索。
-            """;
+            PromptLibrary.get("router-creative-no-kb-section");
 
     /** 上一轮执行记录：只用于多轮延续判定，不作为数据来源。 */
     public record Prior(String agentId, String question, String answer) {
@@ -111,16 +68,7 @@ public final class AgentRouter {
 
     /** 多轮延续：上一轮由某智能体作答后，追问默认留在该智能体。 */
     private static final String CONTINUATION_SECTION =
-            """
-
-            多轮延续（优先于其他规则）：
-            上一轮用户问题：%s
-            上一轮执行者：%s；答复开头：
-            %s
-            - 若本轮是对上一轮的追问、补充、修改、续写、评价或纠正（例如对上一轮诗词提出修改意见），
-              必须保持 target="agent" 且 agent_id="%s"，need_kb 与上一轮一致；
-            - 只有用户明确提出与上一轮无关的新任务时，才允许改选其他智能体、团队或 pipeline。
-            """;
+            PromptLibrary.get("router-continuation-section");
 
     /** 模型调用抽象，便于单测注入固定输出。 */
     @FunctionalInterface

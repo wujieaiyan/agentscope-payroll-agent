@@ -4,6 +4,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
+import io.agentscope.examples.payroll.agent.PromptLibrary;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.time.Duration;
 import java.util.List;
@@ -23,12 +24,7 @@ public final class TeamLlmClient {
     private static final Logger log = LoggerFactory.getLogger(TeamLlmClient.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final int PREVIEW_LIMIT = 600;
-    private static final String SYSTEM_PROMPT =
-            """
-            你是薪酬管理台团队编排的结构化决策器。
-            只输出一个合法 JSON 对象，不要 Markdown 代码围栏，不要解释，不要调用工具。
-            字段值必须来自用户消息中给出的枚举与候选列表，禁止编造 ID。
-            """;
+    private static final String SYSTEM_PROMPT = PromptLibrary.get("team-planner-system");
 
     private static final String AGENT_NAME = "PayrollTeamPlanner";
 

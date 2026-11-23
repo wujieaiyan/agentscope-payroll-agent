@@ -13,9 +13,11 @@ import io.agentscope.examples.payroll.db.H2LlmUsageStore;
 import io.agentscope.examples.payroll.db.H2UserProfileStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
+import io.agentscope.examples.payroll.db.JdbcAgentDefinitionRepository;
 import io.agentscope.examples.payroll.db.ModelCredentialStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
+import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import io.agentscope.examples.payroll.health.PayrollReadinessHealthIndicator;
 import io.agentscope.examples.payroll.health.RedisHealthProbe;
 import io.agentscope.examples.payroll.health.RuntimeHealthService;
@@ -95,6 +97,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -360,10 +363,36 @@ public class PayrollCoreConfiguration {
         return new NacosRuntimeSettings();
     }
 
-    /** 智能体定义与全局核算智能体设置都以 Nacos 为存储，管理接口与运行时共享同一实例。 */
+    /** M5.1：定义来源数据库时的持久化端口；Nacos 模式也注册，便于回滚演练。 */
     @Bean
-    public NacosAgentRegistry agentRegistry(NacosRuntimeSettings runtimeSettings) {
-        return new NacosAgentRegistry(NacosSkillSettings.fromEnvironment(), runtimeSettings);
+    public AgentDefinitionRepository agentDefinitionRepository(PayrollDatabase database) {
+        return new JdbcAgentDefinitionRepository(database);
+    }
+
+    /**
+     * 智能体定义与全局核算智能体设置共享同一实例；定义来源由
+     * {@code payroll.definitions.source} 决定（默认 nacos，db 为 M5.1 落库形态）。
+     */
+    @Bean
+    public NacosAgentRegistry agentRegistry(
+            NacosRuntimeSettings runtimeSettings,
+            AgentDefinitionRepository agentDefinitionRepository,
+            @Value("${payroll.definitions.source:nacos}") String definitionsSource) {
+        return new NacosAgentRegistry(
+                NacosSkillSettings.fromEnvironment(),
+                runtimeSettings,
+                agentDefinitionRepository,
+                definitionsSource);
+    }
+
+    /** M5.1 一次性导入：空表且显式开启时，把 Nacos 现有目录迁入数据库（幂等）。 */
+    @Bean
+    @ConditionalOnProperty(
+            prefix = "payroll.definitions",
+            name = "import-from-nacos",
+            havingValue = "true")
+    public ApplicationRunner agentDefinitionImportRunner(NacosAgentRegistry agentRegistry) {
+        return args -> agentRegistry.importFromNacosIfEmpty();
     }
 
     /** 流程定义与全局默认流程同样存储于 Nacos，管理台与对话运行时共享同一实例。 */

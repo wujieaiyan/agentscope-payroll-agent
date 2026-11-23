@@ -6,33 +6,27 @@
 核心原则：**大模型负责“听懂”和“解释”，确定性引擎负责“算对”。** 模型不参与任何金额计算，
 所有数字都来自 `PayrollEngine`，保证结果可复算、可审计。
 
-## 架构
+## 定位与架构
 
-```
-自然语言对话（CLI / 管理台“智能问答”）   本地 Web 管理台（Spring Boot 3 / 127.0.0.1）
-      │                                     │
-      ▼                                     ▼
-PayrollChatService（固定三阶段编排）   PayrollWebController（REST）
-  ├─ ① 计算智能体：理解诉求 / 调用工具        ├─ 员工 / 考核 / 城市政策 / 考勤维护
-  ├─ ② 验证智能体：对核算对象独立校验        │  （含 Excel 导入与模板下载）
-  └─ ③ 核算智能体：汇总记录生成最终答复      ├─ 工资批次预览、微调、出账
-      │                                     ├─ 对话式问答（SSE 流式）
-      ▼ @Tool（8 个，返回结构化 JSON）        └─ 确认后 dry-run 全员发信
-PayrollTools
-      │
-      └──────────────┬───────────────────────┘
-                     ▼
-PayrollEngine（BigDecimal 全链路）
-  ├─ 个税累计预扣法（跨月递推）
-  ├─ 城市社保 / 公积金（基数上下限）
-  ├─ 绩效奖金系数 + 出账前人工微调
-  ├─ 考勤扣款 / 三类加班 / 入职首月折算
-  └─ 发薪前勾稽校验
-                     │
-      ┌──────────────┴───────────────┐
-      ▼                              ▼
-关系库（默认 MySQL，测试用 H2；主数据 + 批次 + 明细 + 邮件审计）   Excel（POI）
-```
+产品主线为 **Agent 平台 + 薪酬运营** 双主线：平台提供智能体、流程、技能、模型连接与知识库，
+薪酬是首个旗舰场景包；两个工作台共享同一套对话入口、权限与审计。金额计算始终由确定性
+`PayrollEngine` 完成，模型只负责理解与解释。
+
+一轮对话可能的执行链路为 **流程（FLOW）→ 单智能体（AGENT）→ 动态团队（TEAM_ACTIVE）→
+图编排 POC（GRAPH）→ 流水线（PIPELINE）**，按可用性与能力门禁逐级选择，失败按类型回退；
+每条消息都落库路由快照，前端以 chip 展示。
+
+架构的单一事实源见 [`docs/architecture.md`](docs/architecture.md)（进程、模块、路由、配置矩阵、质量门）。
+变更纪律与整改计划见 [`docs/architecture-review.md`](docs/architecture-review.md)、
+[`docs/architecture-remediation-spec.md`](docs/architecture-remediation-spec.md)。
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | 进程 / 模块 / 路由 / 配置矩阵 |
+| [`docs/agent-orchestration.md`](docs/agent-orchestration.md) | 流程 DAG 模型与执行语义 |
+| [`docs/scenario-packs.md`](docs/scenario-packs.md) | 场景包接入契约 |
+| [`docs/deployment-matrix.md`](docs/deployment-matrix.md) | profile × 依赖 × 允许组合 |
+| [`docs/restore-runbook.md`](docs/restore-runbook.md) | 备份与恢复 |
 
 ## 功能
 
@@ -265,6 +259,16 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
   保存 `activeFlowId`。画布与执行语义详见 [docs/agent-orchestration.md](docs/agent-orchestration.md)，
   配置模板见 `docs/nacos-skills/payroll-flows.json`。
 
+定义存储来源（M5.1）：
+
+- `PAYROLL_DEFINITIONS_SOURCE=nacos`（默认）：整份列表存 Nacos，行为与本节一致。
+- `PAYROLL_DEFINITIONS_SOURCE=db`：定义落 `agent_definition` 表（共享 Flyway V21），
+  数据库为权威；写入成功后 best-effort 发布 Nacos 变更通知，通知失败只告警不回滚。
+  读失败直接返回 503，不会静默回退 Nacos 旧文档。
+- `PAYROLL_DEFINITIONS_IMPORT_FROM_NACOS=true`：仅 db 模式且表为空时，启动从 Nacos 导入一次；
+  重复启动或已有数据时跳过，不产生重复行。
+- 更新/删除沿用 revision 契约：写前重读比对，不一致返回 409（带 `currentRevision`），前端提示刷新。
+
 配置结构（字段为 camelCase，时间为 ISO-8601）：
 
 ```json
@@ -286,7 +290,6 @@ DRAFT --提交审批--> PENDING_APPROVAL --审批通过--> APPROVED --出账--> 
 ```
 
 Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口需要该账号拥有配置发布权限。
-多个实例同时编辑时按“最后一次写入”覆盖，暂未做版本号或乐观锁。
 
 ## 技能管理（Nacos）
 
@@ -503,7 +506,8 @@ GET /api/chat/sessions/{sessionId}/messages/{messageId}/traces
 
 ## 多智能体编排
 
-对话不是单 Agent ReAct 循环，而是由 `PayrollChatService` 固定编排的三段流水线：
+一轮对话默认按「流程 → 单智能体 → 动态团队」选择链路，均不可用时才落到下面的三段流水线兜底。
+流水线由 `PayrollChatService` 固定编排，不依赖模型判断顺序：
 
 | 阶段 | 智能体 | 可用工具 | 职责与产出 |
 | --- | --- | --- | --- |

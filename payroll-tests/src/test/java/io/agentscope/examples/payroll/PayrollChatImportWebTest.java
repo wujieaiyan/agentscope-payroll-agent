@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -31,6 +32,7 @@ import org.springframework.test.context.DynamicPropertySource;
         classes = PayrollWebApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(PayrollChatImportWebTest.StubChatConfig.class)
+@Tag("integration")
 class PayrollChatImportWebTest {
 
     private static final Path OUTPUT_DIR = tempDir();

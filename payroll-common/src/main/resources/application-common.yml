@@ -9,8 +9,10 @@ server:
 spring:
   profiles:
     # 部门级部署：--spring.profiles.active=dept 同时启用 MySQL 与 Redis。
+    # 生产：--spring.profiles.active=prod 同样拉起 MySQL 与 Redis，再由 TopologyGuard 校验。
     group:
       dept: mysql,redis
+      prod: mysql,redis
   # 向量库客户端由 PayrollConfiguration 手动创建，禁用 Boot 的 ES 自动装配。
   # Redis 相关自动装配默认关闭，仅在 redis profile 中放开，避免本地/测试强依赖 Redis。
   autoconfigure:
@@ -76,6 +78,12 @@ payroll:
   usage:
     # 每用户每日 token 预算，0 表示不限；超限新轮次返回 429。
     daily-token-budget: "${PAYROLL_USAGE_DAILY_TOKEN_BUDGET:0}"
+  definitions:
+    # nacos=智能体定义整份 JSON 存 Nacos（默认，兼容存量）；db=落 agent_definition 表，
+    # 数据库为权威，Nacos 仅作变更通知通道（写入失败只告警，不回滚）。
+    source: "${PAYROLL_DEFINITIONS_SOURCE:nacos}"
+    # 仅 source=db 且表为空时生效：启动从 Nacos 导入一次，重复执行不产生重复行。
+    import-from-nacos: "${PAYROLL_DEFINITIONS_IMPORT_FROM_NACOS:false}"
   skill:
     # 技能文件包读取缓存：按访问序 LRU，条数与正文总字节双上限，正文变化即失效。
     file-cache:

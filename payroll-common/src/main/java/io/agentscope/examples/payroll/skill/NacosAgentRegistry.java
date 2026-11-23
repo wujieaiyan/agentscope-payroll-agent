@@ -9,6 +9,7 @@ import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
+import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,8 +19,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 专家智能体注册表：整个 Agent 列表作为一个 JSON 配置存储在 Nacos
+ * 专家智能体注册表：默认把整个 Agent 列表作为一个 JSON 配置存储在 Nacos
  * （dataId=payroll-agents.json），读多写少，读路径带 TTL 缓存。
+ *
+ * <p>{@code payroll.definitions.source=db} 时定义落库（M5.1），Nacos 退化为通知通道：
+ * 写路径先提交数据库，再 best-effort 发布快照，失败只告警不回滚。
  *
  * <p>Nacos 未启用或配置缺失时，列表回退到由三个内置角色技能生成的默认智能体；
  * 首次写入会把当前完整列表（含内置默认）持久化到 Nacos。
@@ -28,6 +32,8 @@ public final class NacosAgentRegistry {
 
     public static final String DATA_ID = "payroll-agents.json";
     public static final String DEFAULT_ACTIVE_AGENT = RoleSkills.CALCULATOR;
+    public static final String SOURCE_NACOS = "nacos";
+    public static final String SOURCE_DB = "db";
 
     private static final Logger log = LoggerFactory.getLogger(NacosAgentRegistry.class);
 
@@ -38,6 +44,8 @@ public final class NacosAgentRegistry {
     private final NacosSkillSettings settings;
     private final NacosConfigClient client;
     private final NacosRuntimeSettings runtime;
+    private final AgentDefinitionRepository definitionRepository;
+    private final boolean dbSource;
     // 兼容前置：新增字段（如 model）时旧版本必须能读取新配置，未知字段直接忽略。
     private final ObjectMapper json =
             JsonMapper.builder()
@@ -59,17 +67,39 @@ public final class NacosAgentRegistry {
 
     /** 与流程注册表共享同一份运行时设置缓存，避免两个实例各自读到旧模式。 */
     public NacosAgentRegistry(NacosSkillSettings settings, NacosRuntimeSettings runtime) {
+        this(settings, runtime, null, SOURCE_NACOS);
+    }
+
+    /** M5.1：source=db 时定义读写走数据库，Nacos 只保留运行时设置与变更通知。 */
+    public NacosAgentRegistry(
+            NacosSkillSettings settings,
+            NacosRuntimeSettings runtime,
+            AgentDefinitionRepository definitionRepository,
+            String source) {
         this.settings = settings;
         this.runtime = runtime;
+        this.definitionRepository = definitionRepository;
+        this.dbSource = SOURCE_DB.equalsIgnoreCase(source == null ? "" : source.trim());
+        if (dbSource && definitionRepository == null) {
+            throw new IllegalArgumentException(
+                    "payroll.definitions.source=db 时必须提供 AgentDefinitionRepository");
+        }
         this.client = new NacosConfigClient(settings);
         this.ttlMillis = settings.ttl().toMillis();
+        log.info(
+                "[Agent] 定义来源={}，Nacos {}",
+                dbSource ? SOURCE_DB : SOURCE_NACOS,
+                settings.enabled() ? settings.location() : "未启用");
     }
 
     public boolean writable() {
-        return settings.enabled();
+        return dbSource || settings.enabled();
     }
 
     public String location() {
+        if (dbSource) {
+            return "数据库 agent_definition 表";
+        }
         return settings.enabled() ? settings.server() + "/" + settings.group() : "代码内置";
     }
 
@@ -234,7 +264,7 @@ public final class NacosAgentRegistry {
             String operator,
             String expectedRevision,
             boolean keepModelWhenEmpty) {
-        requireWritable();
+        requireDefinitionsWritable();
         Snapshot<AgentDefinition> current = reloadForWrite();
         requireRevision(current.revision(), expectedRevision, DATA_ID);
         List<AgentDefinition> agents = new ArrayList<>(current.items());
@@ -289,7 +319,13 @@ public final class NacosAgentRegistry {
                     input.model());
             agents.add(saved);
         }
-        persist(agents);
+        if (dbSource) {
+            definitionRepository.save(saved, operator, current.revision());
+            invalidateCache();
+            notifyNacos(agents);
+        } else {
+            persist(agents);
+        }
         return saved;
     }
 
@@ -298,21 +334,36 @@ public final class NacosAgentRegistry {
     }
 
     public synchronized boolean delete(String id, String expectedRevision) {
-        requireWritable();
+        requireDefinitionsWritable();
         Snapshot<AgentDefinition> current = reloadForWrite();
         requireRevision(current.revision(), expectedRevision, DATA_ID);
         List<AgentDefinition> agents = new ArrayList<>(current.items());
         boolean removed = agents.removeIf(agent -> agent.id().equals(id));
         if (removed) {
-            persist(agents);
+            if (dbSource) {
+                if (definitionRepository.delete(id, current.revision())) {
+                    invalidateCache();
+                    notifyNacos(agents);
+                }
+            } else {
+                persist(agents);
+            }
         }
         return removed;
+    }
+
+    /** 定义写权限：DB 模式不依赖 Nacos；运行时设置仍单独要求 Nacos 可用。 */
+    private void requireDefinitionsWritable() {
+        if (!writable()) {
+            throw new PayrollException(
+                    "Nacos 未启用（设置 PAYROLL_NACOS_SERVER），无法保存智能体定义");
+        }
     }
 
     private void requireWritable() {
         if (!settings.enabled()) {
             throw new PayrollException(
-                    "Nacos 未启用（设置 PAYROLL_NACOS_SERVER），无法保存智能体定义");
+                    "Nacos 未启用（设置 PAYROLL_NACOS_SERVER），无法保存运行时设置");
         }
     }
 
@@ -330,8 +381,14 @@ public final class NacosAgentRegistry {
     /**
      * 读取失败时保留上次成功目录：临时网络抖动不能让自定义智能体凭空消失，
      * 否则引用它的默认流程会校验失败并静默回退到薪酬链路。
+     *
+     * <p>DB 模式不做任何 Nacos 回退：读失败直接 503，避免双源打架。
      */
     private Snapshot<AgentDefinition> load(Snapshot<AgentDefinition> previous) {
+        if (dbSource) {
+            AgentDefinitionRepository.Snapshot loaded = definitionRepository.load();
+            return new Snapshot<>(loaded.items(), loaded.revision());
+        }
         if (!settings.enabled()) {
             return new Snapshot<>(builtinAgents(), ConfigRevision.ABSENT);
         }
@@ -382,6 +439,10 @@ public final class NacosAgentRegistry {
 
     /** 写前重读：解析失败或读取失败一律 503，禁止用旧数据写回。 */
     private Snapshot<AgentDefinition> reloadForWrite() {
+        if (dbSource) {
+            AgentDefinitionRepository.Snapshot loaded = definitionRepository.load();
+            return new Snapshot<>(loaded.items(), loaded.revision());
+        }
         NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
         switch (fetched.status()) {
             case OK -> {
@@ -452,6 +513,65 @@ public final class NacosAgentRegistry {
         } catch (Exception e) {
             throw new io.agentscope.examples.payroll.domain.PayrollException(
                     "序列化智能体配置失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * DB 写入后的 best-effort 通知：数据库是权威，Nacos 发布失败只告警不回滚。
+     */
+    private void notifyNacos(List<AgentDefinition> agents) {
+        if (!settings.enabled()) {
+            return;
+        }
+        try {
+            String content = json.writerWithDefaultPrettyPrinter().writeValueAsString(agents);
+            if (!client.publish(DATA_ID, content)) {
+                log.warn("[Agent] 数据库已保存，但同步 Nacos {} 失败（DB 为权威，不回滚）", DATA_ID);
+            }
+        } catch (Exception e) {
+            log.warn(
+                    "[Agent] 数据库已保存，但同步 Nacos {} 异常：{}（DB 为权威，不回滚）",
+                    DATA_ID,
+                    e.getMessage());
+        }
+    }
+
+    private void invalidateCache() {
+        cache = null;
+        fetchedAt = 0L;
+    }
+
+    /**
+     * M5.1 导入器：source=db 且表为空时，从 Nacos 读取一次现有目录。
+     *
+     * @return 导入条数；非 DB 模式、Nacos 未启用/不可用或表非空时返回 0
+     */
+    public synchronized int importFromNacosIfEmpty() {
+        if (!dbSource) {
+            return 0;
+        }
+        if (!settings.enabled()) {
+            log.info("[Agent] Nacos 未启用，跳过智能体定义导入");
+            return 0;
+        }
+        NacosConfigClient.FetchResult fetched = client.fetchResult(DATA_ID);
+        if (fetched.status() != NacosConfigClient.FetchResult.Status.OK) {
+            log.warn("[Agent] 读取 Nacos {} 失败，跳过导入：{}", DATA_ID, fetched.message());
+            return 0;
+        }
+        try {
+            List<AgentDefinition> agents = parseAgents(fetched.entry().content());
+            int imported = definitionRepository.importIfEmpty(agents, "nacos-import");
+            if (imported > 0) {
+                log.info("[Agent] 已从 Nacos 导入 {} 个智能体定义到数据库", imported);
+            } else {
+                log.info("[Agent] agent_definition 表非空，跳过 Nacos 导入（幂等）");
+            }
+            invalidateCache();
+            return imported;
+        } catch (Exception e) {
+            log.warn("[Agent] 从 Nacos 导入智能体定义失败：{}", e.getMessage());
+            return 0;
         }
     }
 
