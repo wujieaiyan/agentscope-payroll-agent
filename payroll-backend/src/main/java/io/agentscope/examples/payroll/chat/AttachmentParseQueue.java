@@ -5,6 +5,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,6 +19,12 @@ public class AttachmentParseQueue {
 
     private final ChatAttachmentStore store;
     private final ThreadPoolExecutor executor;
+
+    /**
+     * 未完成的解析任务数。不用 getActiveCount()+getQueue() 判断空闲：worker 已取走任务、
+     * 尚未重新持锁计入 active 的瞬间两者都为 0，会让 awaitIdle 提前返回。
+     */
+    private final AtomicInteger outstanding = new AtomicInteger();
 
     public AttachmentParseQueue(
             ChatAttachmentStore store,
@@ -42,6 +49,7 @@ public class AttachmentParseQueue {
 
     /** 入队失败时直接把附件置为失败，避免长期停留在 PARSING。 */
     public void submit(long sessionId, long attachmentId, Runnable task) {
+        outstanding.incrementAndGet();
         try {
             executor.execute(
                     () -> {
@@ -53,9 +61,12 @@ public class AttachmentParseQueue {
                                     attachmentId,
                                     e.getMessage());
                             store.markFailed(sessionId, attachmentId, "附件解析异常，请重新识别");
+                        } finally {
+                            outstanding.decrementAndGet();
                         }
                     });
         } catch (RejectedExecutionException e) {
+            outstanding.decrementAndGet();
             log.warn("[附件] 解析队列已满，拒绝 attachmentId={}", attachmentId);
             store.markFailed(sessionId, attachmentId, "解析队列已满，请稍后重新识别");
         }
@@ -65,12 +76,12 @@ public class AttachmentParseQueue {
     public boolean awaitIdle(long timeoutMillis) throws InterruptedException {
         long deadline = System.currentTimeMillis() + Math.max(1, timeoutMillis);
         while (System.currentTimeMillis() < deadline) {
-            if (executor.getActiveCount() == 0 && executor.getQueue().isEmpty()) {
+            if (outstanding.get() == 0) {
                 return true;
             }
             Thread.sleep(20);
         }
-        return executor.getActiveCount() == 0 && executor.getQueue().isEmpty();
+        return outstanding.get() == 0;
     }
 
     public int queued() {
