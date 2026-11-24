@@ -276,8 +276,9 @@ public final class ModelConnectionRegistry {
         if (!normalized.utility().isBlank()) {
             requireEnabledConnection(current, normalized.utility(), "轻量面默认连接");
         }
+        ModelConnection coding = null;
         if (!normalized.coding().isBlank()) {
-            requireEnabledConnection(current, normalized.coding(), "编码面默认连接");
+            coding = requireEnabledConnection(current, normalized.coding(), "编码面默认连接");
         }
         if (envCodingLocked()) {
             if (!normalized.coding().equals(current.defaults().coding())) {
@@ -288,9 +289,7 @@ public final class ModelConnectionRegistry {
             normalized =
                     new ModelDefaults(
                             normalized.control(), current.defaults().coding(), normalized.utility());
-        } else if (!normalized.coding().isBlank()) {
-            ModelConnection coding =
-                    current.connection(normalized.coding()).orElseThrow();
+        } else if (coding != null) {
             if (coding.numCtx(0) < DevModelSettings.MIN_CONTEXT) {
                 throw new ModelConfigException(
                         ModelConfigException.CAPABILITY_UNSUPPORTED,
@@ -455,7 +454,8 @@ public final class ModelConnectionRegistry {
         return Optional.empty();
     }
 
-    private void requireEnabledConnection(ModelCatalog catalog, String id, String label) {
+    private ModelConnection requireEnabledConnection(
+            ModelCatalog catalog, String id, String label) {
         ModelConnection connection =
                 catalog.connection(id)
                         .or(() -> findBuiltin(id))
@@ -468,6 +468,7 @@ public final class ModelConnectionRegistry {
             throw new ModelConfigException(
                     ModelConfigException.CONNECTION_UNAVAILABLE, label + "「" + id + "」已停用");
         }
+        return connection;
     }
 
     private void requireWritable() {
