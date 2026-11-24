@@ -206,11 +206,42 @@ class KbRetrievalFusionTest {
                                 0.1,
                                 3,
                                 3,
-                                2000),
+                                2000,
+                                "local"),
                         5);
 
         assertFalse(result.hits().isEmpty());
         assertEquals(Boolean.FALSE, result.diagnostics().get("fusion"));
+    }
+
+    @Test
+    @DisplayName("BM25 走 ES 时候选不带正文，命中后回表正文并归一化相关度")
+    void bm25EngineEsUsesEsAndHydratesContent() {
+        List<Chunk> stored =
+                List.of(
+                        chunk(200, 90, 1, "年假五天，可分段安排。", "第三章/休假"),
+                        chunk(201, 90, 2, "婚假三天。", "第四章/婚假"));
+        List<Chunk> keys = stored.stream().map(KbRetrievalFusionTest::keysOnly).toList();
+        Map<Long, String> contents = new HashMap<>();
+        for (Chunk chunk : stored) {
+            contents.put(chunk.id(), chunk.content());
+        }
+        // ES 关键词命中只回传 chunkId 与原始相关度，正文需由 findContentByIds 回表。
+        List<KbElasticsearchService.SearchHit> esHits =
+                List.of(
+                        new KbElasticsearchService.SearchHit(200, 6.0, 0, 6.0),
+                        new KbElasticsearchService.SearchHit(201, 1.5, 0, 1.5));
+
+        RetrievalResult result =
+                searchWithEs(keys, contents, esHits, List.of(document(90)), "年假", esSettings(3), 5);
+
+        assertFalse(result.hits().isEmpty());
+        assertEquals("es", result.diagnostics().get("bm25_engine"));
+        assertEquals(Boolean.TRUE, result.diagnostics().get("keysOnly"));
+        assertEquals(200, result.hits().get(0).chunkId());
+        assertTrue(result.hits().get(0).routes().contains("BM25"));
+        assertTrue(result.hits().get(0).content().contains("年假"));
+        assertTrue(result.hits().get(0).keywordScore() > result.hits().get(1).keywordScore());
     }
 
     private static KbRetrievalSettings settings(int maxPerDocument) {
@@ -225,7 +256,8 @@ class KbRetrievalFusionTest {
                 0.1,
                 maxPerDocument,
                 3,
-                2000);
+                2000,
+                "local");
     }
 
     private static RetrievalResult search(
@@ -244,68 +276,7 @@ class KbRetrievalFusionTest {
             KbRetrievalSettings settings,
             int topK,
             float[] queryVector) {
-        KbEmbeddingService embeddings =
-                new KbEmbeddingService(MAPPER, "http://127.0.0.1:1", "test", 64, 800) {
-                    @Override
-                    public Embedding embed(List<String> texts) {
-                        return new Embedding(List.of(queryVector), "HASH", false);
-                    }
-
-                    @Override
-                    public Embedding embedQuery(String text) {
-                        return new Embedding(List.of(queryVector), "HASH", false);
-                    }
-
-                    @Override
-                    public float[] fromJson(String json) {
-                        if (json == null || json.isBlank()) {
-                            return null;
-                        }
-                        try {
-                            return MAPPER.readValue(json, float[].class);
-                        } catch (Exception e) {
-                            return null;
-                        }
-                    }
-                };
-        KbConfigService configService =
-                new KbConfigService(null, null, null, null, MAPPER) {
-                    @Override
-                    public ConfigVersion requireActiveConfig(long seriesId) {
-                        return new ConfigVersion(
-                                1,
-                                seriesId,
-                                1,
-                                IndexStrategy.HYBRID,
-                                "{}",
-                                "{}",
-                                "{}",
-                                null,
-                                0,
-                                Instant.now());
-                    }
-
-                    @Override
-                    public ConfigPayload payload(ConfigVersion version) {
-                        RetrievalConfig retrieval = KbConfigModels.defaultRetrieval();
-                        retrieval.rerankEnabled = false;
-                        retrieval.recallTopK = 20;
-                        retrieval.rerankTopN = 5;
-                        retrieval.similarityThreshold = 0.1;
-                        ConfigPayload payload = new ConfigPayload();
-                        payload.parse = KbConfigModels.defaultParse();
-                        payload.chunk = KbConfigModels.defaultChunk();
-                        payload.retrieval = retrieval;
-                        return payload;
-                    }
-                };
-        KbPermissionService permissions =
-                new KbPermissionService(null, null) {
-                    @Override
-                    public KbRole requireRead(long seriesId, AuthUser user) {
-                        return KbRole.READER;
-                    }
-                };
+        KbEmbeddingService embeddings = embeddings(queryVector);
         KbChunkStore chunkStore =
                 new KbChunkStore(null) {
                     @Override
@@ -316,6 +287,25 @@ class KbRetrievalFusionTest {
                     @Override
                     public List<Chunk> findActiveMetaBySeries(long seriesId, int limit) {
                         return chunks.stream().limit(limit).toList();
+                    }
+
+                    @Override
+                    public List<Chunk> findActiveKeysBySeries(long seriesId, int limit) {
+                        return chunks.stream()
+                                .limit(limit)
+                                .map(KbRetrievalFusionTest::keysOnly)
+                                .toList();
+                    }
+
+                    @Override
+                    public Map<Long, String> findContentByIds(Collection<Long> ids) {
+                        Map<Long, String> contents = new HashMap<>();
+                        for (Chunk chunk : chunks) {
+                            if (ids.contains(chunk.id()) && chunk.content() != null) {
+                                contents.put(chunk.id(), chunk.content());
+                            }
+                        }
+                        return contents;
                     }
 
                     @Override
@@ -334,6 +324,86 @@ class KbRetrievalFusionTest {
                         return chunks.stream().filter(chunk -> ids.contains(chunk.id())).toList();
                     }
                 };
+        KbElasticsearchService elasticsearch =
+                new KbElasticsearchService(
+                        MAPPER, embeddings, false, "http://127.0.0.1:1", "", "", "test-kb", 64, 1500);
+        return runSearch(chunkStore, elasticsearch, embeddings, documents, query, settings, topK);
+    }
+
+    /** ES BM25 分支：候选只给键列，正文由 findContentByIds 回表，关键词命中来自 keywordSearch。 */
+    private static RetrievalResult searchWithEs(
+            List<Chunk> keys,
+            Map<Long, String> contents,
+            List<KbElasticsearchService.SearchHit> esKeywordHits,
+            List<Document> documents,
+            String query,
+            KbRetrievalSettings settings,
+            int topK) {
+        KbEmbeddingService embeddings = embeddings(new float[64]);
+        KbChunkStore chunkStore =
+                new KbChunkStore(null) {
+                    @Override
+                    public List<Chunk> findActiveKeysBySeries(long seriesId, int limit) {
+                        return keys.stream().limit(limit).toList();
+                    }
+
+                    @Override
+                    public Map<Long, String> findContentByIds(Collection<Long> ids) {
+                        Map<Long, String> result = new HashMap<>();
+                        for (Long id : ids) {
+                            if (contents.containsKey(id)) {
+                                result.put(id, contents.get(id));
+                            }
+                        }
+                        return result;
+                    }
+
+                    @Override
+                    public Map<Long, String> findVectorsByIds(Collection<Long> ids) {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public List<Chunk> findByIds(Collection<Long> ids) {
+                        return List.of();
+                    }
+                };
+        KbElasticsearchService elasticsearch =
+                new KbElasticsearchService(
+                        MAPPER, embeddings, true, "http://127.0.0.1:1", "", "", "test-kb", 64, 1500) {
+                    @Override
+                    public boolean available() {
+                        return true;
+                    }
+
+                    @Override
+                    public List<KbElasticsearchService.SearchHit> keywordSearch(
+                            long seriesId, String queryText, int size) {
+                        return esKeywordHits;
+                    }
+
+                    @Override
+                    public List<KbElasticsearchService.SearchHit> search(
+                            long seriesId,
+                            float[] vector,
+                            String queryText,
+                            int topK,
+                            boolean hybrid,
+                            double vectorWeight) {
+                        return List.of();
+                    }
+                };
+        return runSearch(chunkStore, elasticsearch, embeddings, documents, query, settings, topK);
+    }
+
+    private static RetrievalResult runSearch(
+            KbChunkStore chunkStore,
+            KbElasticsearchService elasticsearch,
+            KbEmbeddingService embeddings,
+            List<Document> documents,
+            String query,
+            KbRetrievalSettings settings,
+            int topK) {
         KbDocumentStore documentStore =
                 new KbDocumentStore(null) {
                     @Override
@@ -341,9 +411,6 @@ class KbRetrievalFusionTest {
                         return documents;
                     }
                 };
-        KbElasticsearchService elasticsearch =
-                new KbElasticsearchService(
-                        MAPPER, embeddings, false, "http://127.0.0.1:1", "", "", "test-kb", 64);
         KbAnswerService answers =
                 new KbAnswerService(
                         MAPPER, false, "http://127.0.0.1:1", "test", Duration.ofSeconds(1));
@@ -351,8 +418,8 @@ class KbRetrievalFusionTest {
                 new KbRetrievalService(
                         chunkStore,
                         documentStore,
-                        configService,
-                        permissions,
+                        configService(),
+                        permissions(),
                         embeddings,
                         elasticsearch,
                         answers,
@@ -361,6 +428,95 @@ class KbRetrievalFusionTest {
                 SERIES_ID,
                 new RetrievalTestRequest(query, topK, null, false),
                 AuthUser.system());
+    }
+
+    private static KbEmbeddingService embeddings(float[] queryVector) {
+        return new KbEmbeddingService(MAPPER, "http://127.0.0.1:1", "test", 64, 800) {
+            @Override
+            public Embedding embed(List<String> texts) {
+                return new Embedding(List.of(queryVector), "HASH", false);
+            }
+
+            @Override
+            public Embedding embedQuery(String text) {
+                return new Embedding(List.of(queryVector), "HASH", false);
+            }
+
+            @Override
+            public float[] fromJson(String json) {
+                if (json == null || json.isBlank()) {
+                    return null;
+                }
+                try {
+                    return MAPPER.readValue(json, float[].class);
+                } catch (Exception e) {
+                    return null;
+                }
+            }
+        };
+    }
+
+    private static KbConfigService configService() {
+        return new KbConfigService(null, null, null, null, MAPPER) {
+            @Override
+            public ConfigVersion requireActiveConfig(long seriesId) {
+                return new ConfigVersion(
+                        1, seriesId, 1, IndexStrategy.HYBRID, "{}", "{}", "{}", null, 0, Instant.now());
+            }
+
+            @Override
+            public ConfigPayload payload(ConfigVersion version) {
+                RetrievalConfig retrieval = KbConfigModels.defaultRetrieval();
+                retrieval.rerankEnabled = false;
+                retrieval.recallTopK = 20;
+                retrieval.rerankTopN = 5;
+                retrieval.similarityThreshold = 0.1;
+                ConfigPayload payload = new ConfigPayload();
+                payload.parse = KbConfigModels.defaultParse();
+                payload.chunk = KbConfigModels.defaultChunk();
+                payload.retrieval = retrieval;
+                return payload;
+            }
+        };
+    }
+
+    private static KbPermissionService permissions() {
+        return new KbPermissionService(null, null) {
+            @Override
+            public KbRole requireRead(long seriesId, AuthUser user) {
+                return KbRole.READER;
+            }
+        };
+    }
+
+    private static KbRetrievalSettings esSettings(int maxPerDocument) {
+        return new KbRetrievalSettings(
+                true, "VECTOR,BM25,TITLE_PATH", 60, 1.0, 0.8, 0.5, 0.1, 0.1, maxPerDocument, 3, 2000,
+                "es");
+    }
+
+    /** 模拟 SELECT_KEYS：去掉 content 与 vector。 */
+    private static Chunk keysOnly(Chunk source) {
+        return new Chunk(
+                source.id(),
+                source.seriesId(),
+                source.documentId(),
+                source.parentChunkId(),
+                source.level(),
+                source.seq(),
+                null,
+                source.contentHash(),
+                source.tokenCount(),
+                source.charStart(),
+                source.charEnd(),
+                source.pageNo(),
+                source.bbox(),
+                source.titlePath(),
+                source.metadata(),
+                null,
+                source.vectorSource(),
+                source.status(),
+                source.createdAt());
     }
 
     private static Chunk chunk(

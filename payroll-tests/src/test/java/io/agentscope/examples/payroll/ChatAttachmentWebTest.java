@@ -154,7 +154,7 @@ class ChatAttachmentWebTest {
         long sessionId = createSession(client, "附件校验");
 
         HttpResponse<String> unsupported =
-                upload(client, sessionId, "policy.pdf", "not a real pdf".getBytes(StandardCharsets.UTF_8));
+                upload(client, sessionId, "policy.txt", "plain text".getBytes(StandardCharsets.UTF_8));
         assertEquals(400, unsupported.statusCode(), unsupported.body());
         assertTrue(unsupported.body().contains("暂不支持"), unsupported.body());
 

@@ -393,8 +393,14 @@ public class PayrollAgentConfiguration {
     }
 
     @Bean
-    public TeamLlmClient teamLlmClient() {
-        return new TeamLlmClient();
+    public TeamLlmClient teamLlmClient(
+            @Value("${payroll.team.llm.max-concurrent:8}") int maxConcurrent) {
+        return new TeamLlmClient(
+                PayrollAgentFactory::utilityVersionKey,
+                () ->
+                        PayrollAgentFactory.createUtilityAgent(
+                                TeamLlmClient.AGENT_NAME, TeamLlmClient.SYSTEM_PROMPT, 1),
+                maxConcurrent);
     }
 
     @Bean
@@ -688,7 +694,8 @@ public class PayrollAgentConfiguration {
             @Value("${payroll.chat.kb-policy.follow-up:true}") boolean kbPolicyFollowUp,
             @Value("${payroll.chat.kb-policy.bound-candidate:false}") boolean kbPolicyBoundCandidate,
             @Value("${payroll.chat.kb-policy.action-guard:true}") boolean kbPolicyActionGuard,
-            @Value("${payroll.chat.kb-policy.follow-up-max-chars:20}") int kbPolicyFollowUpMaxChars) {
+            @Value("${payroll.chat.kb-policy.follow-up-max-chars:20}") int kbPolicyFollowUpMaxChars,
+            @Value("${payroll.chat.context-window:40}") int contextWindow) {
         Set<String> alwaysConfirmTools = parseTools(alwaysConfirmToolsCsv);
         KbRoutingPolicy.Options kbPolicy =
                 new KbRoutingPolicy.Options(
@@ -744,7 +751,8 @@ public class PayrollAgentConfiguration {
                         semantic,
                         payrollRouteAdvisor,
                         kbChatSettings,
-                        kbContextPrefetcher);
+                        kbContextPrefetcher,
+                        contextWindow);
     }
 
     /** 逗号分隔的工具名；空值表示不强制，默认值由 application-common.yml 提供。 */

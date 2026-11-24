@@ -33,8 +33,8 @@ public class ApiExceptionHandler {
     private final String maxRequestSize;
 
     public ApiExceptionHandler(
-            @Value("${spring.servlet.multipart.max-file-size:600MB}") String maxFileSize,
-            @Value("${spring.servlet.multipart.max-request-size:1GB}") String maxRequestSize) {
+            @Value("${spring.servlet.multipart.max-file-size:200MB}") String maxFileSize,
+            @Value("${spring.servlet.multipart.max-request-size:512MB}") String maxRequestSize) {
         this.maxFileSize = maxFileSize;
         this.maxRequestSize = maxRequestSize;
     }

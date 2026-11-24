@@ -3,11 +3,12 @@ package io.agentscope.examples.payroll.team;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
-import io.agentscope.examples.payroll.agent.PayrollAgentFactory;
 import io.agentscope.examples.payroll.agent.PromptLibrary;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,35 +25,51 @@ public final class TeamLlmClient {
     private static final Logger log = LoggerFactory.getLogger(TeamLlmClient.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final int PREVIEW_LIMIT = 600;
-    private static final String SYSTEM_PROMPT = PromptLibrary.get("team-planner-system");
 
-    private static final String AGENT_NAME = "PayrollTeamPlanner";
+    /** 轻量调用并发闸门：拿不到许可即规则兜底，避免模型慢时把计划线程串行堆死。 */
+    private static final Duration PERMIT_WAIT = Duration.ofSeconds(2);
+
+    /** 默认计划器标识与系统提示；由编排层的配置类据此构建模型，平台包不直接依赖工厂。 */
+    public static final String AGENT_NAME = "PayrollTeamPlanner";
+
+    public static final String SYSTEM_PROMPT = PromptLibrary.get("team-planner-system");
 
     private volatile HarnessAgent agent;
     private volatile String agentVersion;
     private final Supplier<String> versionSupplier;
     private final Supplier<HarnessAgent> agentSupplier;
-    private final Object lock = new Object();
+    private final Semaphore permits;
+    private final Object rebuildLock = new Object();
 
     public TeamLlmClient() {
-        this(
-                PayrollAgentFactory::utilityVersionKey,
-                () -> PayrollAgentFactory.createUtilityAgent(AGENT_NAME, SYSTEM_PROMPT, 1));
+        this(null, null, 8);
     }
 
     /**
      * 版本与构建器为空表示固定模型（测试或禁用场景），不参与热切换。
      *
      * <p>不在此处构建：Spring 的模型注册表与凭证服务由启动后的 {@code ApplicationRunner}
-     * 注入静态工厂，Bean 构造期解析会拿不到页面密钥。
+     * 注入静态工厂，Bean 构造期解析会拿不到页面密钥。装配在编排层完成，保持平台包不依赖
+     * 薪酬业务工厂（ArchUnit R6）。
      */
-    TeamLlmClient(Supplier<String> versionSupplier, Supplier<HarnessAgent> agentSupplier) {
+    public TeamLlmClient(
+            Supplier<String> versionSupplier, Supplier<HarnessAgent> agentSupplier, int maxConcurrent) {
         this.versionSupplier = versionSupplier;
         this.agentSupplier = agentSupplier;
+        this.permits = new Semaphore(Math.max(1, maxConcurrent));
+    }
+
+    TeamLlmClient(Supplier<String> versionSupplier, Supplier<HarnessAgent> agentSupplier) {
+        this(versionSupplier, agentSupplier, 8);
     }
 
     TeamLlmClient(HarnessAgent agent) {
-        this(null, null);
+        this(agent, 8);
+    }
+
+    /** 固定模型 + 指定并发上限，供并发回归测试使用。 */
+    TeamLlmClient(HarnessAgent agent, int maxConcurrent) {
+        this(null, null, maxConcurrent);
         this.agent = agent;
     }
 
@@ -88,7 +105,10 @@ public final class TeamLlmClient {
                         + "\n\n【用户问题】\n"
                         + (question == null ? "" : question)
                         + "\n\n只输出 JSON。";
-        synchronized (lock) {
+        if (!acquirePermit(sessionKey)) {
+            return null;
+        }
+        try {
             HarnessAgent active = activeAgent();
             if (active == null) {
                 return null;
@@ -131,7 +151,24 @@ public final class TeamLlmClient {
                     log.debug("[动态团队] 清理轻量模型上下文失败", e);
                 }
             }
+        } finally {
+            permits.release();
         }
+    }
+
+    /** 并发闸门：超出等待时间拿不到许可即视为本次轻量调用失败，交回规则兜底。 */
+    private boolean acquirePermit(String sessionKey) {
+        try {
+            if (permits.tryAcquire(PERMIT_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                return true;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("[动态团队] 轻量模型许可等待被中断，使用规则兜底：session={}", sessionKey);
+            return false;
+        }
+        log.warn("[动态团队] 轻量模型并发已满，本轮跳过模型调用：session={}", sessionKey);
+        return false;
     }
 
     /** 轻量面连接版本变化时重建计划器；重建失败沿用旧实例，不中断本轮兜底。 */
@@ -146,23 +183,34 @@ public final class TeamLlmClient {
             log.warn("[动态团队] 读取轻量模型版本失败，沿用当前模型：{}", rootMessage(e));
             return agent;
         }
-        if (version == null || (agent != null && version.equals(agentVersion))) {
+        if (version == null) {
             return agent;
         }
-        try {
-            HarnessAgent rebuilt = agentSupplier.get();
-            boolean first = agentVersion == null;
-            agent = rebuilt;
-            agentVersion = version;
-            if (first) {
-                log.info("[动态团队] 轻量面模型已建立：版本={}", version);
-            } else {
-                log.info("[动态团队] 轻量面模型已随配置切换：版本={}", version);
+        HarnessAgent current = agent;
+        String currentVersion = agentVersion;
+        if (current != null && version.equals(currentVersion)) {
+            return current;
+        }
+        synchronized (rebuildLock) {
+            current = agent;
+            if (current != null && version.equals(agentVersion)) {
+                return current;
             }
-            return rebuilt;
-        } catch (RuntimeException e) {
-            log.warn("[动态团队] 轻量面模型重建失败，沿用当前模型：{}", rootMessage(e));
-            return agent;
+            try {
+                HarnessAgent rebuilt = agentSupplier.get();
+                boolean first = agentVersion == null;
+                agent = rebuilt;
+                agentVersion = version;
+                if (first) {
+                    log.info("[动态团队] 轻量面模型已建立：版本={}", version);
+                } else {
+                    log.info("[动态团队] 轻量面模型已随配置切换：版本={}", version);
+                }
+                return rebuilt;
+            } catch (RuntimeException e) {
+                log.warn("[动态团队] 轻量面模型重建失败，沿用当前模型：{}", rootMessage(e));
+                return current;
+            }
         }
     }
 

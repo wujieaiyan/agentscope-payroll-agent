@@ -6,12 +6,13 @@
 #   docker compose -f docker/docker-compose.yml up -d --build
 #   浏览器访问 http://127.0.0.1:18088
 # 生产形态：叠加 docker/docker-compose.prod.yml（prod profile + 容器内 ES + 必填凭证密钥），
-#   本文件保持默认演示档不启用 TopologyGuard，见 docs/deployment-matrix.md。
+#   本文件保持默认演示档：启动守卫以 warn 运行、只告警不阻断，见 docs/deployment-matrix.md。
 # 说明：
 #   - frontend 镜像托管 Vue3 产物，/api 与 /actuator 反向代理到两个 Web 节点。
 #   - Web 无状态，登录态与轮次状态在 MySQL/Redis，Nginx 轮询且无粘性。
 #   - runtime 只在容器网络内暴露 8100，对外不可达。
 #   - Web/runtime 共享 kb-data（知识库文件）与 output-data（导出文件），避免多实例各写本地。
+#   - parser 独占 PDF/OCR 重活：只读 kb-data，产物写 parsed-data；Web 以 remote 模式调用并只读产物。
 #   - 模型由 compose 内的 Ollama 提供，直接挂载宿主机模型目录（只读），无需宿主机 Ollama。
 #   - sandbox 通过 docker.sock 启动一次性脚本容器；work 目录在宿主机与容器内保持同一绝对路径，
 #     否则宿主机 Docker 看不到脚本 bind 源。脚本容器本身禁网、只读、非 root、限额运行。
@@ -33,6 +34,8 @@ x-app-env: &app-env
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   PAYROLL_MODEL: ${PAYROLL_MODEL:-ollama:qwen2.5:3b-instruct}
   PAYROLL_ADMIN_PASSWORD: ${PAYROLL_ADMIN_PASSWORD:-admin123}
+  # 演示档只告警不阻断；生产形态（compose.prod）显式切 fail。
+  PAYROLL_GUARD_STRICT: ${PAYROLL_GUARD_STRICT:-warn}
   # 容器内不部署 ES：关闭长记忆、语义缓存与知识库索引，避免健康检查与写入失败。
   PAYROLL_MEMORY_ENABLED: "false"
   PAYROLL_MEMORY_ES_URL: ${PAYROLL_MEMORY_ES_URL:-http://host.docker.internal:9200}
@@ -41,6 +44,8 @@ x-app-env: &app-env
   MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED: "false"
   # Web 与 runtime 共用同一 HMAC 密钥。
   PAYROLL_AGENT_RUNTIME_TOKEN: ${PAYROLL_AGENT_RUNTIME_TOKEN:-local-demo-token-change-me}
+  # Web 与 parser 共用的解析内部接口密钥；为空时 parser 启动失败。
+  PAYROLL_PARSE_TOKEN: ${PAYROLL_PARSE_TOKEN:-local-parse-token-change-me}
   # 技能脚本执行：runtime 经内部 HMAC 调用沙箱服务。
   PAYROLL_SANDBOX_URL: ${PAYROLL_SANDBOX_URL:-http://sandbox:8200}
   PAYROLL_SANDBOX_TOKEN: ${PAYROLL_SANDBOX_TOKEN:-local-sandbox-token-change-me}
@@ -58,6 +63,13 @@ x-app: &app
       condition: service_healthy
     ollama:
       condition: service_healthy
+  # liveness 只反映进程自身状态，不含外部依赖；各服务用 PAYROLL_HEALTHCHECK_PORT 指到自己的端口。
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${PAYROLL_HEALTHCHECK_PORT}/actuator/health/liveness"]
+    interval: 15s
+    timeout: 3s
+    retries: 3
+    start_period: 90s
 
 services:
   mysql:
@@ -114,6 +126,41 @@ services:
       timeout: 5s
       retries: 30
 
+  # 独立解析进程：PDF 渲染与扫描页 OCR 在此执行，避免拖垮 Web。
+  # 只读挂载 kb-data 读取源文件，自有 parsed-data 落解析产物；Web 以只读方式读取产物。
+  parser:
+    image: payroll-parser:local
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/parser.Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}
+      PAYROLL_PARSER_PORT: "8300"
+      PAYROLL_PARSE_TOKEN: ${PAYROLL_PARSE_TOKEN:-local-parse-token-change-me}
+      # 源文件目录须与 Web 的 kb.storage-dir 一致（同为 kb-data 卷）。
+      PAYROLL_KB_STORAGE_DIR: /app/data/kb-uploads
+      PAYROLL_KB_PARSE_ARTIFACT_DIR: /app/parsed
+      PAYROLL_KB_PARSE_MAX_PAGES: "200"
+      PAYROLL_PARSER_WORKERS: "2"
+      PAYROLL_KB_OCR_ENABLED: "true"
+      PAYROLL_KB_OCR_LANGUAGES: "chi_sim+eng"
+      # 单文档解析总时长上限：200 页扫描件按 15 分钟给足预算。
+      PAYROLL_KB_PARSE_TIMEOUT_MS: "900000"
+      TZ: Asia/Shanghai
+    expose:
+      - "8300"
+    volumes:
+      - kb-data:/app/data:ro
+      - parsed-data:/app/parsed
+    mem_limit: 2.5g
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8300/actuator/health/liveness"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
   runtime-1:
     <<: *app
     image: payroll-runtime:local
@@ -125,11 +172,13 @@ services:
       PAYROLL_NODE_ROLE: runtime
       PAYROLL_NODE_ID: runtime-1
       PAYROLL_AGENT_PORT: "8100"
+      PAYROLL_HEALTHCHECK_PORT: "8100"
       # 知识库配置工具经签名内部接口由 Web 节点执行，runtime 需要 Web 地址。
       PAYROLL_KB_SKILL_ENABLED: "true"
       PAYROLL_WEB_NODE_URLS: http://web-1:8080,http://web-2:8080
     expose:
       - "8100"
+    mem_limit: 4g
     volumes:
       - kb-data:/app/data
       - output-data:/app/output
@@ -145,10 +194,12 @@ services:
       PAYROLL_NODE_ROLE: runtime
       PAYROLL_NODE_ID: runtime-2
       PAYROLL_AGENT_PORT: "8100"
+      PAYROLL_HEALTHCHECK_PORT: "8100"
       PAYROLL_KB_SKILL_ENABLED: "true"
       PAYROLL_WEB_NODE_URLS: http://web-1:8080,http://web-2:8080
     expose:
       - "8100"
+    mem_limit: 4g
     volumes:
       - kb-data:/app/data
       - output-data:/app/output
@@ -164,11 +215,27 @@ services:
       PAYROLL_NODE_ROLE: web
       PAYROLL_NODE_ID: web-1
       PAYROLL_WEB_PORT: "8080"
+      PAYROLL_HEALTHCHECK_PORT: "8080"
       PAYROLL_AGENT_RUNTIME_URLS: http://runtime-1:8100,http://runtime-2:8100
+      # 解析走独立进程；产物只读挂载，Web 不再做 PDF 渲染/OCR。
+      PAYROLL_KB_PARSE_MODE: remote
+      PAYROLL_KB_PARSE_URL: http://parser:8300
+      PAYROLL_KB_PARSE_ARTIFACT_DIR: /app/parsed
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      parser:
+        condition: service_healthy
     expose:
       - "8080"
+    mem_limit: 2g
     volumes:
       - kb-data:/app/data
+      - parsed-data:/app/parsed:ro
       - output-data:/app/output
 
   web-2:
@@ -182,11 +249,26 @@ services:
       PAYROLL_NODE_ROLE: web
       PAYROLL_NODE_ID: web-2
       PAYROLL_WEB_PORT: "8080"
+      PAYROLL_HEALTHCHECK_PORT: "8080"
       PAYROLL_AGENT_RUNTIME_URLS: http://runtime-1:8100,http://runtime-2:8100
+      PAYROLL_KB_PARSE_MODE: remote
+      PAYROLL_KB_PARSE_URL: http://parser:8300
+      PAYROLL_KB_PARSE_ARTIFACT_DIR: /app/parsed
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      parser:
+        condition: service_healthy
     expose:
       - "8080"
+    mem_limit: 2g
     volumes:
       - kb-data:/app/data
+      - parsed-data:/app/parsed:ro
       - output-data:/app/output
 
   # 脚本沙箱调度器：通过 docker.sock 起一次性容器；脚本目录以同一绝对路径挂载，宿主机可见。
@@ -211,6 +293,7 @@ services:
       - ${PAYROLL_SANDBOX_SKILL_ROOT:-/tmp/payroll-sandbox-work/skills}:${PAYROLL_SANDBOX_SKILL_ROOT:-/tmp/payroll-sandbox-work/skills}
     expose:
       - "8200"
+    mem_limit: 1g
 
   frontend:
     image: payroll-frontend:local
@@ -219,8 +302,10 @@ services:
       dockerfile: docker/frontend.Dockerfile
     restart: unless-stopped
     depends_on:
-      - web-1
-      - web-2
+      web-1:
+        condition: service_healthy
+      web-2:
+        condition: service_healthy
     ports:
       - "18088:80"
 
@@ -228,4 +313,5 @@ volumes:
   mysql-data:
   redis-data:
   kb-data:
+  parsed-data:
   output-data:

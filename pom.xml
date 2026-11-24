@@ -22,6 +22,7 @@
     <modules>
         <module>payroll-protocol</module>
         <module>payroll-common</module>
+        <module>payroll-parser</module>
         <module>payroll-agent</module>
         <module>payroll-backend</module>
         <module>payroll-sandbox</module>

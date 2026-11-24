@@ -27,7 +27,7 @@
         <el-option label="已停用" value="DISABLED" />
       </el-select>
       <div class="toolbar-right">
-        <span class="count">共 {{ total }} 个文档</span>
+        <span class="count">已加载 {{ documents.length }} 个文档</span>
         <el-button :icon="Refresh" circle plain :loading="loading" @click="reload" />
         <el-button v-if="canMaintain" type="primary" :icon="UploadFilled" @click="uploadVisible = true">
           上传文档
@@ -142,21 +142,14 @@
       </el-table-column>
     </el-table>
 
-    <div v-if="total > pageSize" class="pager">
-      <el-pagination
-        v-model:current-page="page"
-        :page-size="pageSize"
-        :total="total"
-        layout="total, prev, pager, next"
-        background
-        @current-change="loadDocuments"
-      />
+    <div v-if="hasMore" class="pager">
+      <el-button :loading="loadingMore" @click="loadMore">加载更多</el-button>
     </div>
 
     <!-- Upload -->
     <el-dialog v-model="uploadVisible" title="上传文档" width="580px" @closed="resetUpload">
       <div class="upload-tip">
-        支持 PDF、Word(docx)、Excel(xlsx/xls)、Markdown(md / markdown)，单文件不超过 100 MB，单次最多 50 个。
+        支持 PDF、Word(docx)、Excel(xlsx/xls)、Markdown(md / markdown)，单文件不超过 200 MB，单次最多 50 个；PDF 最多 200 页。
       </div>
       <el-form label-position="top">
         <el-form-item label="目标目录">
@@ -317,10 +310,11 @@ const emit = defineEmits(['changed', 'jump-tasks'])
 const canMaintain = computed(() => ['EDITOR', 'ADMIN', 'OWNER'].includes(props.role))
 
 const loading = ref(false)
+const loadingMore = ref(false)
 const documents = ref([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = 10
+const nextCursor = ref(null)
+const hasMore = computed(() => Boolean(nextCursor.value))
+const DOCUMENT_PAGE_SIZE = 100
 const selectedRows = ref([])
 const directories = ref([])
 const tags = ref([])
@@ -407,29 +401,28 @@ async function loadTags() {
   }
 }
 
-async function fetchDocuments() {
+async function fetchDocuments(cursor = null) {
   const params = {
     keyword: filters.keyword || undefined,
     directoryId: filters.directoryId || undefined,
-    page: page.value,
-    size: pageSize
+    limit: DOCUMENT_PAGE_SIZE
   }
   if (filters.status === 'PROCESSING') {
+    // 处理中是多状态合并视图，数据量小且每 3 秒刷新，不做游标翻页。
     const statuses = ['PENDING', 'PARSING', 'CHUNKING', 'INDEXING']
     const results = await Promise.all(
-      statuses.map((status) =>
-        documentApi.list(props.series.id, { ...params, status, page: 1, size: 100 })
-      )
+      statuses.map((status) => documentApi.list(props.series.id, { ...params, status }))
     )
     const merged = results
       .flatMap((result) => result.items || [])
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    return {
-      items: merged.slice((page.value - 1) * pageSize, page.value * pageSize),
-      total: merged.length
-    }
+    return { items: merged, nextCursor: null }
   }
-  return documentApi.list(props.series.id, { ...params, status: filters.status || undefined })
+  return documentApi.list(props.series.id, {
+    ...params,
+    status: filters.status || undefined,
+    cursor
+  })
 }
 
 async function loadDocuments() {
@@ -437,15 +430,28 @@ async function loadDocuments() {
   try {
     const data = await fetchDocuments()
     documents.value = data.items || []
-    total.value = data.total || 0
+    nextCursor.value = data.nextCursor || null
     schedulePolling()
   } finally {
     loading.value = false
   }
 }
 
+async function loadMore() {
+  if (!nextCursor.value || loadingMore.value) return
+  loadingMore.value = true
+  try {
+    const data = await fetchDocuments(nextCursor.value)
+    const known = new Set(documents.value.map((doc) => doc.id))
+    documents.value.push(...(data.items || []).filter((doc) => !known.has(doc.id)))
+    nextCursor.value = data.nextCursor || null
+  } finally {
+    loadingMore.value = false
+  }
+}
+
 function reload() {
-  page.value = 1
+  nextCursor.value = null
   loadDocuments()
 }
 
@@ -455,8 +461,11 @@ function schedulePolling() {
     pollTimer = window.setInterval(async () => {
       if (loading.value) return
       const data = await fetchDocuments()
-      documents.value = data.items || []
-      total.value = data.total || 0
+      const fresh = data.items || []
+      const freshById = new Map(fresh.map((doc) => [doc.id, doc]))
+      const known = new Set(documents.value.map((doc) => doc.id))
+      const added = fresh.filter((doc) => !known.has(doc.id))
+      documents.value = [...added, ...documents.value.map((doc) => freshById.get(doc.id) || doc)]
       if (!documents.value.some((doc) => isProcessing(doc))) {
         stopPolling()
         emit('changed')
@@ -692,7 +701,7 @@ async function runBatch(action) {
 watch(
   () => props.series.id,
   () => {
-    page.value = 1
+    nextCursor.value = null
     loadDirectories()
     loadTags()
     loadDocuments()

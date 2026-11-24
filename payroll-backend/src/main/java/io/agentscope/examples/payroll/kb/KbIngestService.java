@@ -10,7 +10,12 @@ import io.agentscope.examples.payroll.kb.KbModels.Chunk;
 import io.agentscope.examples.payroll.kb.KbModels.ConfigVersion;
 import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbModels.IngestTask;
-import io.agentscope.examples.payroll.kb.ocr.OcrCanceled;
+import io.agentscope.examples.payroll.kb.parse.KbAbortSignal;
+import io.agentscope.examples.payroll.kb.parse.KbParseCanceled;
+import io.agentscope.examples.payroll.kb.parse.KbParseRequest;
+import io.agentscope.examples.payroll.kb.parse.KbParsedDocument;
+import io.agentscope.examples.payroll.kb.parse.KbParserPort;
+import io.agentscope.payroll.parser.ocr.OcrCanceled;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -33,7 +38,7 @@ public class KbIngestService {
     private final KbChunkStore chunkStore;
     private final KbSeriesService seriesService;
     private final KbConfigService configService;
-    private final KbParserService parserService;
+    private final KbParserPort parserService;
     private final KbChunkingService chunkingService;
     private final KbEmbeddingService embeddingService;
     private final KbElasticsearchService elasticsearchService;
@@ -45,7 +50,7 @@ public class KbIngestService {
             KbChunkStore chunkStore,
             KbSeriesService seriesService,
             KbConfigService configService,
-            KbParserService parserService,
+            KbParserPort parserService,
             KbChunkingService chunkingService,
             KbEmbeddingService embeddingService,
             KbElasticsearchService elasticsearchService,
@@ -96,9 +101,13 @@ public class KbIngestService {
             long stage = System.currentTimeMillis();
             KbParsedDocument parsed =
                     parserService.parse(
-                            file,
-                            document.ext(),
-                            payload.parse,
+                            new KbParseRequest(
+                                    document.id(),
+                                    file,
+                                    document.storageKey(),
+                                    document.ext(),
+                                    document.mimeType(),
+                                    payload.parse),
                             (pageNo, totalPages, ocrPages) -> {
                                 ensureNotCanceled(taskId);
                                 if (pageNo % 20 != 0 && pageNo != totalPages) {
@@ -207,7 +216,7 @@ public class KbIngestService {
                     "DONE",
                     "入库成功：" + indexed.size() + " 个检索块",
                     (int) (System.currentTimeMillis() - started));
-        } catch (IngestCanceled | OcrCanceled canceled) {
+        } catch (IngestCanceled | KbParseCanceled | OcrCanceled canceled) {
             cleanup(document);
             if (document != null) {
                 documentStore.updateStatus(document.id(), DocStatus.PENDING, null, "入库任务已取消");
@@ -378,7 +387,7 @@ public class KbIngestService {
     }
 
     private static final class IngestCanceled extends RuntimeException
-            implements KbParserService.AbortSignal {
+            implements KbAbortSignal {
         private IngestCanceled() {
             super(null, null, false, false);
         }

@@ -2,46 +2,17 @@ package io.agentscope.examples.payroll.kb;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import io.agentscope.examples.payroll.kb.parse.ParseConfig;
 
 /**
- * 知识库解析/分块/检索配置。使用 public 字段承载 JSON，缺省值即默认配置；
+ * 知识库分块/检索配置。使用 public 字段承载 JSON，缺省值即默认配置；
  * 全局 SNAKE_CASE 会改写字段名，这里显式保持 camelCase 与前端一致。
+ *
+ * <p>解析配置由 {@link ParseConfig} 提供，Web 与独立解析进程共用同一套结构。
  */
 public final class KbConfigModels {
 
     private KbConfigModels() {
-    }
-
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public static class ParseConfig {
-        public List<String> docTypes = new ArrayList<>(List.of("PDF", "DOCX", "XLSX", "MD"));
-        public Map<String, TypeParseConfig> perType = new LinkedHashMap<>();
-        public OcrConfig ocr = new OcrConfig();
-        public ParseOptions options = new ParseOptions();
-    }
-
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public static class TypeParseConfig {
-        public boolean enabled = true;
-        public String strategy = "NATIVE";
-    }
-
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public static class OcrConfig {
-        public List<String> languages = new ArrayList<>(List.of("zh", "en"));
-        public double minConfidence = 0.6;
-        public boolean keepLayout = true;
-    }
-
-    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
-    public static class ParseOptions {
-        public boolean tableStructure = true;
-        public boolean filterHeaderFooter = true;
-        public boolean ocrEmbeddedImages = false;
     }
 
     @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
@@ -117,12 +88,7 @@ public final class KbConfigModels {
     }
 
     public static ParseConfig defaultParse() {
-        ParseConfig config = new ParseConfig();
-        config.perType.put("PDF", type(true, "AUTO"));
-        config.perType.put("DOCX", type(true, "NATIVE"));
-        config.perType.put("XLSX", type(true, "NATIVE"));
-        config.perType.put("MD", type(true, "NATIVE"));
-        return config;
+        return ParseConfig.defaults();
     }
 
     public static ChunkConfig defaultChunk() {
@@ -131,12 +97,5 @@ public final class KbConfigModels {
 
     public static RetrievalConfig defaultRetrieval() {
         return new RetrievalConfig();
-    }
-
-    private static TypeParseConfig type(boolean enabled, String strategy) {
-        TypeParseConfig config = new TypeParseConfig();
-        config.enabled = enabled;
-        config.strategy = strategy;
-        return config;
     }
 }

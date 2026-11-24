@@ -221,12 +221,22 @@ export const tagApi = {
 }
 
 export const documentApi = {
+  // 游标分页：返回 { items, nextCursor }，nextCursor 为空表示已到最后一页。
   list: async (seriesId, params = {}) => {
-    const { directoryId, page, size, ...rest } = params
-    const list = await http.get(`/kb/series/${seriesId}/documents`, {
-      params: { ...rest, directory_id: directoryId }
+    const { directoryId, cursor, limit, ...rest } = params
+    const data = await http.get(`/kb/series/${seriesId}/documents`, {
+      params: {
+        ...rest,
+        directory_id: directoryId,
+        cursor: cursor || undefined,
+        limit
+      }
     })
-    return paginate((list || []).map(mapDocument), page, size)
+    const items = Array.isArray(data) ? data : data?.items
+    return {
+      items: (items || []).map(mapDocument),
+      nextCursor: Array.isArray(data) ? null : data?.next_cursor || null
+    }
   },
   upload: (seriesId, formData) => {
     const body = new FormData()

@@ -325,6 +325,8 @@ public class PayrollWebController {
         long userId = authService.currentUser(http).id();
         tokenBudgetService.check(userId);
         if (!chatQuotaService.tryAcquire(userId)) {
+            // 准入失败时 emitter 不会交给容器，主动 complete 才能释放连接计数。
+            channel.complete();
             throw new TooManyRequestsException("当前用户的对话并发达上限，请等待上一轮回答完成");
         }
         try {
@@ -332,9 +334,11 @@ public class PayrollWebController {
         } catch (RejectedExecutionException e) {
             chatQuotaService.release(userId);
             ChatStreamRejection.record(chatStreamExecutor, "executor");
+            channel.complete();
             throw new TooManyRequestsException("当前对话请求过多，请稍后重试");
         } catch (RuntimeException e) {
             chatQuotaService.release(userId);
+            channel.complete();
             throw e;
         }
         return emitter;

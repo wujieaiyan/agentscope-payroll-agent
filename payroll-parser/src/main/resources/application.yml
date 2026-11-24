@@ -1,0 +1,53 @@
+spring:
+  application:
+    name: payroll-parser
+  config:
+    import: classpath:application-common.yml
+  main:
+    banner-mode: off
+  autoconfigure:
+    # 解析进程不连数据库、Redis 与 ES：显式关闭相关自动配置，避免无谓连接与启动失败。
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchRestClientAutoConfiguration
+
+server:
+  port: "${PAYROLL_PARSER_PORT:8300}"
+  shutdown: graceful
+
+payroll:
+  node-role: "${PAYROLL_NODE_ROLE:parser}"
+  kb:
+    storage-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
+    parse:
+      # 解析进程没有内联/远程之分，mode 仅被 Web 读取。
+      artifact-dir: "${PAYROLL_KB_PARSE_ARTIFACT_DIR:/app/parsed}"
+      kb-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
+      token: "${PAYROLL_PARSE_TOKEN:}"
+      worker-threads: "${PAYROLL_PARSER_WORKERS:2}"
+      timeout-ms: "${PAYROLL_KB_PARSE_TIMEOUT_MS:900000}"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    redis:
+      enabled: false
+    db:
+      enabled: false
+    elasticsearch:
+      enabled: false

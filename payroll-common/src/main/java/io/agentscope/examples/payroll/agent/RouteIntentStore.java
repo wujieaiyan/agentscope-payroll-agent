@@ -10,6 +10,7 @@ import co.elastic.clients.json.JsonData;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
 import co.elastic.clients.transport.rest_client.RestClientTransport;
+import io.agentscope.examples.payroll.service.EsMetrics;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.ArrayList;
@@ -81,6 +82,7 @@ final class RouteIntentStore implements AutoCloseable {
     }
 
     long count(String version, String model) {
+        long startedAt = EsMetrics.start();
         try {
             return client.count(
                             c ->
@@ -94,6 +96,8 @@ final class RouteIntentStore implements AutoCloseable {
                     .count();
         } catch (IOException e) {
             throw new IllegalStateException("统计意图索引失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("search", startedAt);
         }
     }
 
@@ -107,6 +111,7 @@ final class RouteIntentStore implements AutoCloseable {
         }
         deleteStale(version, model);
         BulkResponse response;
+        long startedAt = EsMetrics.start();
         try {
             response =
                     client.bulk(
@@ -133,20 +138,26 @@ final class RouteIntentStore implements AutoCloseable {
                             });
         } catch (IOException e) {
             throw new IllegalStateException("写入意图索引失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("index", startedAt);
         }
         if (response.errors()) {
             throw new IllegalStateException("写入意图索引存在失败条目");
         }
+        long refreshStartedAt = EsMetrics.start();
         try {
             client.indices().refresh(r -> r.index(index));
         } catch (IOException e) {
             throw new IllegalStateException("刷新意图索引失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("refresh", refreshStartedAt);
         }
     }
 
     List<SemanticRouteClassifier.Hit> top(
             String version, String model, float[] vector, int limit) {
         SearchResponse<Map> response;
+        long startedAt = EsMetrics.start();
         try {
             response =
                     client.search(
@@ -176,6 +187,8 @@ final class RouteIntentStore implements AutoCloseable {
                             Map.class);
         } catch (IOException e) {
             throw new IllegalStateException("语义意图检索失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("search", startedAt);
         }
         List<SemanticRouteClassifier.Hit> hits = new ArrayList<>();
         for (Hit<Map> hit : response.hits().hits()) {
@@ -197,11 +210,14 @@ final class RouteIntentStore implements AutoCloseable {
                                         b ->
                                                 b.filter(term("label_version", version))
                                                         .filter(term("model", model))));
+        long startedAt = EsMetrics.start();
         try {
             client.deleteByQuery(
                     d -> d.index(index).refresh(true).query(q -> q.bool(b -> b.mustNot(keep))));
         } catch (IOException e) {
             throw new IllegalStateException("清理旧意图索引失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("delete", startedAt);
         }
     }
 

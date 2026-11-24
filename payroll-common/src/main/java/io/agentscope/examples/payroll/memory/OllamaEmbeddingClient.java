@@ -121,6 +121,11 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
                 }
                 result.add(vector);
             }
+            // HTTP 在锁外执行；回填前再查一次，同题并发时以先写入的缓存为准。
+            List<float[]> racing = cachedVectors(texts);
+            if (racing != null) {
+                return racing;
+            }
             cacheVectors(texts, result);
             return result;
         } catch (IOException e) {

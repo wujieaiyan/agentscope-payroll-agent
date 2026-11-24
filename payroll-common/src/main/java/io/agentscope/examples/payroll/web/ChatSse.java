@@ -8,6 +8,7 @@ import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.ChatStreamListener;
 import io.agentscope.examples.payroll.service.PayrollChat;
 import io.agentscope.examples.payroll.service.TurnEventBus;
+import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -383,14 +384,28 @@ public final class ChatSse {
     public static final class Channel {
 
         private final SseEmitter emitter;
+        private final boolean counted;
+        private boolean countedReleased;
         private volatile boolean closed;
 
         Channel(SseEmitter emitter) {
             this.emitter = emitter;
+            this.counted = emitter != null;
+            if (counted) {
+                TurnMetrics.sseConnectionOpened();
+            }
         }
 
         void close() {
             closed = true;
+            releaseConnection();
+        }
+
+        private synchronized void releaseConnection() {
+            if (counted && !countedReleased) {
+                countedReleased = true;
+                TurnMetrics.sseConnectionClosed();
+            }
         }
 
         /**
@@ -412,6 +427,8 @@ public final class ChatSse {
                 emitter.complete();
             } catch (RuntimeException e) {
                 log.debug("SSE 完成时连接已不可用，忽略：{}", e.getMessage());
+            } finally {
+                releaseConnection();
             }
         }
 
@@ -436,6 +453,7 @@ public final class ChatSse {
                 emitter.send(builder.data(JsonSupport.toJson(payload)));
             } catch (IOException | IllegalStateException e) {
                 closed = true;
+                releaseConnection();
                 log.debug("SSE 连接已关闭，停止推送 {} 事件", event);
             }
         }

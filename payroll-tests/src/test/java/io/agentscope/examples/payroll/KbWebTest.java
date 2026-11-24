@@ -202,6 +202,10 @@ class KbWebTest {
         assertTrue(documents.contains("年假制度.md"), documents);
         long documentId = firstDocumentId(documents);
 
+        String paged = get(admin, "/api/kb/series/" + seriesId + "/documents?limit=1");
+        assertTrue(paged.contains("\"items\":["), paged);
+        assertTrue(paged.contains("年假制度.md"), paged);
+
         String chunks =
                 get(admin, "/api/kb/series/" + seriesId + "/documents/" + documentId + "/chunks?page=1&size=20");
         assertTrue(chunks.contains("年假"), chunks);

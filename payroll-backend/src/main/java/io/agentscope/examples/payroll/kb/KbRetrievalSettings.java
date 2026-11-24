@@ -32,6 +32,7 @@ public class KbRetrievalSettings {
     private final int maxPerDocument;
     private final int maxMergeChunks;
     private final int maxCandidates;
+    private final boolean bm25EngineEs;
 
     public KbRetrievalSettings(
             @Value("${payroll.kb.retrieval.fusion-enabled:true}") boolean fusionEnabled,
@@ -44,7 +45,8 @@ public class KbRetrievalSettings {
             @Value("${payroll.kb.retrieval.title-threshold:0.3}") double titleThreshold,
             @Value("${payroll.kb.retrieval.max-per-document:3}") int maxPerDocument,
             @Value("${payroll.kb.retrieval.max-merge-chunks:3}") int maxMergeChunks,
-            @Value("${payroll.kb.retrieval.max-candidates:2000}") int maxCandidates) {
+            @Value("${payroll.kb.retrieval.max-candidates:2000}") int maxCandidates,
+            @Value("${payroll.kb.retrieval.bm25.engine:es}") String bm25Engine) {
         this.fusionEnabled = fusionEnabled;
         this.recallRoutes = parseRoutes(recallRoutes);
         this.rrfK = Math.max(1, rrfK);
@@ -56,6 +58,7 @@ public class KbRetrievalSettings {
         this.maxPerDocument = Math.max(1, maxPerDocument);
         this.maxMergeChunks = Math.max(1, maxMergeChunks);
         this.maxCandidates = Math.max(1, maxCandidates);
+        this.bm25EngineEs = bm25Engine == null || !"local".equalsIgnoreCase(bm25Engine.trim());
     }
 
     public boolean fusionEnabled() {
@@ -101,6 +104,11 @@ public class KbRetrievalSettings {
     /** 本地兜底时一次最多加载的候选分块数，避免大库把全部向量读入堆。 */
     public int maxCandidates() {
         return maxCandidates;
+    }
+
+    /** BM25 走 ES（候选可不带正文）还是进程内实现（需要候选正文）。 */
+    public boolean bm25EngineEs() {
+        return bm25EngineEs;
     }
 
     private static List<Route> parseRoutes(String csv) {

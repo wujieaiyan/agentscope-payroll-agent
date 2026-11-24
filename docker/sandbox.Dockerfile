@@ -4,7 +4,7 @@ FROM eclipse-temurin:17-jre
 
 ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
-    JAVA_OPTS="-XX:MaxRAMPercentage=75 -Dfile.encoding=UTF-8"
+    JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
 
 COPY --from=cli /usr/local/bin/docker /usr/local/bin/docker
 

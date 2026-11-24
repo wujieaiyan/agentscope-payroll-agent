@@ -18,10 +18,33 @@ class TopologyGuardTest {
     }
 
     @Test
-    void rejectsSingleDeploymentMode() {
-        MockEnvironment env = validEnv();
-        env.setProperty("payroll.deployment.mode", "single");
-        assertFailsWith(env, validEnvVars(), "payroll.deployment.mode");
+    void warnsButDoesNotBlockByDefault() {
+        MockEnvironment env = new MockEnvironment();
+        env.setProperty("payroll.guard.strict", "warn");
+        assertThatCode(() -> guard(env, new HashMap<>()).run(null))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void failModeBlocksAndAggregatesAllViolations() {
+        MockEnvironment env = new MockEnvironment();
+        env.setProperty("payroll.guard.strict", "fail");
+        env.setProperty("payroll.deployment.mode", "cluster");
+        env.setProperty("payroll.db.url", "jdbc:h2:mem:test");
+        Map<String, String> vars = new HashMap<>();
+        vars.put("PAYROLL_NACOS_ENABLED", "false");
+        assertThatThrownBy(() -> guard(env, vars).run(null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("payroll.guard.strict=fail")
+                .hasMessageContaining("启动拓扑校验发现 10 项问题")
+                .hasMessageContaining("禁止 H2")
+                .hasMessageContaining("spring.data.redis.host")
+                .hasMessageContaining("PAYROLL_NACOS")
+                .hasMessageContaining("知识库 ES 地址")
+                .hasMessageContaining("PAYROLL_SECRET_KEY")
+                .hasMessageContaining("payroll.auth.admin-password")
+                .hasMessageContaining("payroll.internal.token")
+                .hasMessageContaining("payroll.node-role");
     }
 
     @Test
@@ -60,21 +83,71 @@ class TopologyGuardTest {
     }
 
     @Test
-    void aggregatesAllViolations() {
-        MockEnvironment env = new MockEnvironment();
-        env.setProperty("payroll.deployment.mode", "single");
-        env.setProperty("payroll.db.url", "jdbc:h2:mem:test");
-        Map<String, String> vars = new HashMap<>();
-        vars.put("PAYROLL_NACOS_ENABLED", "false");
-        assertThatThrownBy(() -> guard(env, vars).run(null))
+    void rejectsDefaultAdminPasswordWithoutEchoingIt() {
+        MockEnvironment env = validEnv();
+        env.setProperty("payroll.auth.admin-password", "admin123");
+        assertThatThrownBy(() -> guard(env, validEnvVars()).run(null))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("（8 项）")
-                .hasMessageContaining("payroll.deployment.mode")
-                .hasMessageContaining("禁止 H2")
-                .hasMessageContaining("spring.data.redis.host")
-                .hasMessageContaining("PAYROLL_NACOS")
-                .hasMessageContaining("知识库 ES 地址")
-                .hasMessageContaining("PAYROLL_SECRET_KEY");
+                .hasMessageContaining("payroll.auth.admin-password")
+                .hasMessageNotContaining("admin123");
+    }
+
+    @Test
+    void rejectsMissingInternalTokenOnWebNode() {
+        Map<String, String> vars = validEnvVars();
+        vars.remove("PAYROLL_AGENT_RUNTIME_TOKEN");
+        assertFailsWith(validEnv(), vars, "payroll.internal.token");
+    }
+
+    @Test
+    void runtimeNodeDoesNotNeedInternalToken() {
+        MockEnvironment env = validEnv();
+        env.setProperty("payroll.node-role", "runtime");
+        Map<String, String> vars = validEnvVars();
+        vars.remove("PAYROLL_AGENT_RUNTIME_TOKEN");
+        assertThatCode(() -> guard(env, vars).run(null)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsMissingParseTokenWhenRemoteParsing() {
+        MockEnvironment env = validEnv();
+        env.setProperty("payroll.kb.parse.mode", "remote");
+        Map<String, String> vars = validEnvVars();
+        vars.remove("PAYROLL_PARSE_TOKEN");
+        assertFailsWith(env, vars, "payroll.kb.parse.token");
+    }
+
+    @Test
+    void remoteParsingTokenNotRequiredWhenInline() {
+        MockEnvironment env = validEnv();
+        env.setProperty("payroll.kb.parse.mode", "inline");
+        assertThatCode(() -> guard(env, validEnvVars()).run(null)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void clusterForbidsNodeRoleAll() {
+        MockEnvironment env = validEnv();
+        env.setProperty("payroll.node-role", "all");
+        assertFailsWith(env, validEnvVars(), "集群部署禁止 node-role=all");
+    }
+
+    @Test
+    void singleNodeRoleAllOnlyWarnsEvenInFailMode() {
+        MockEnvironment env = new MockEnvironment();
+        env.setProperty("payroll.guard.strict", "fail");
+        env.setProperty("payroll.auth.admin-password", "Prod-Admin-Pass-1");
+        env.setProperty("payroll.internal.token", "runtime-token");
+        assertThatCode(() -> guard(env, new HashMap<>()).run(null))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void prodProfileRequiresCluster() {
+        MockEnvironment env = new MockEnvironment();
+        env.setActiveProfiles("prod");
+        env.setProperty("payroll.auth.admin-password", "Prod-Admin-Pass-1");
+        env.setProperty("payroll.internal.token", "runtime-token");
+        assertFailsWith(env, new HashMap<>(), "payroll.deployment.mode");
     }
 
     private void assertFailsWith(MockEnvironment env, Map<String, String> vars, String expected) {
@@ -84,18 +157,23 @@ class TopologyGuardTest {
     }
 
     private TopologyGuard guard(MockEnvironment env, Map<String, String> vars) {
+        if (env.getProperty("payroll.guard.strict") == null) {
+            env.setProperty("payroll.guard.strict", "fail");
+        }
         return new TopologyGuard(env, vars::get);
     }
 
     private MockEnvironment validEnv() {
         MockEnvironment env = new MockEnvironment();
         env.setProperty("payroll.deployment.mode", "cluster");
+        env.setProperty("payroll.node-role", "web");
         env.setProperty("payroll.db.url", "jdbc:mysql://db:3306/payroll");
         env.setProperty("spring.data.redis.host", "redis");
         env.setProperty("payroll.kb.es-enabled", "true");
         env.setProperty("payroll.kb.es-url", "http://es:9200");
         env.setProperty("payroll.memory.es-url", "http://es:9200");
         env.setProperty("payroll.kb.embedding-base-url", "http://ollama:11434");
+        env.setProperty("payroll.auth.admin-password", "Prod-Admin-Pass-1");
         return env;
     }
 
@@ -104,6 +182,8 @@ class TopologyGuardTest {
         vars.put("PAYROLL_NACOS_SERVER", "http://nacos:8848");
         vars.put("PAYROLL_NACOS_ENABLED", "true");
         vars.put("PAYROLL_SECRET_KEY", Base64.getEncoder().encodeToString(new byte[32]));
+        vars.put("PAYROLL_AGENT_RUNTIME_TOKEN", "runtime-token");
+        vars.put("PAYROLL_PARSE_TOKEN", "parse-token");
         return vars;
     }
 }

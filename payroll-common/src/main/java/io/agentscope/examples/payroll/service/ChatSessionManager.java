@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -51,6 +52,9 @@ public final class ChatSessionManager implements AutoCloseable {
     private static final int DEFAULT_TURN_DEADLINE_MINUTES = 30;
     private static final int DEFAULT_PROGRESS_TIMEOUT_SECONDS = 300;
     private static final int DEFAULT_EVENT_POLLER_THREADS = 4;
+    private static final int DEFAULT_EVICT_INTERVAL_SECONDS = 5;
+    /** 超额淘汰多留几个候选，避免 busy 会话占位导致一轮淘汰不足额。 */
+    private static final int EVICT_CANDIDATE_SLACK = 8;
     /** 单事件负载上限：超限事件会截断文本增量，避免撑爆 Stream 与 SSE 连接。 */
     private static final int MAX_EVENT_BYTES = 64 * 1024;
 
@@ -62,6 +66,8 @@ public final class ChatSessionManager implements AutoCloseable {
     private final ActiveTeamCoordinator activeTeams;
     private final int maxCachedChats;
     private final long cacheIdleMillis;
+    private final long evictIntervalMillis;
+    private volatile long lastEvictAt;
     private final AuditService audit;
     private final H2ChatTurnStore turnStore;
     private final TurnLeaseService leases;
@@ -303,6 +309,97 @@ public final class ChatSessionManager implements AutoCloseable {
             int turnRetentionDays,
             int turnCleanupIntervalMinutes,
             int eventPollerThreads) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                maxCachedChats,
+                cacheIdleMinutes,
+                audit,
+                turnStore,
+                leases,
+                events,
+                nodeId,
+                heartbeatSeconds,
+                turnDeadlineMinutes,
+                progressTimeoutSeconds,
+                turnRetentionDays,
+                turnCleanupIntervalMinutes,
+                eventPollerThreads,
+                null);
+    }
+
+    /** 带上推送订阅写池与看门狗参数；sseSettings 为 null 时只保留阻塞尾随（回滚路径）。 */
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowEvaluator shadow,
+            ActiveTeamCoordinator activeTeams,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit,
+            H2ChatTurnStore turnStore,
+            TurnLeaseService leases,
+            TurnEventBus events,
+            String nodeId,
+            int heartbeatSeconds,
+            int turnDeadlineMinutes,
+            int progressTimeoutSeconds,
+            int turnRetentionDays,
+            int turnCleanupIntervalMinutes,
+            int eventPollerThreads,
+            SseFanoutSettings sseSettings) {
+        this(
+                store,
+                chatFactory,
+                memory,
+                runs,
+                shadow,
+                activeTeams,
+                maxCachedChats,
+                cacheIdleMinutes,
+                audit,
+                turnStore,
+                leases,
+                events,
+                nodeId,
+                heartbeatSeconds,
+                turnDeadlineMinutes,
+                progressTimeoutSeconds,
+                turnRetentionDays,
+                turnCleanupIntervalMinutes,
+                eventPollerThreads,
+                sseSettings,
+                DEFAULT_EVICT_INTERVAL_SECONDS);
+    }
+
+    public ChatSessionManager(
+            H2ChatStore store,
+            PayrollChatFactory chatFactory,
+            VectorMemoryService memory,
+            StaticRunRecorder runs,
+            ShadowEvaluator shadow,
+            ActiveTeamCoordinator activeTeams,
+            int maxCachedChats,
+            int cacheIdleMinutes,
+            AuditService audit,
+            H2ChatTurnStore turnStore,
+            TurnLeaseService leases,
+            TurnEventBus events,
+            String nodeId,
+            int heartbeatSeconds,
+            int turnDeadlineMinutes,
+            int progressTimeoutSeconds,
+            int turnRetentionDays,
+            int turnCleanupIntervalMinutes,
+            int eventPollerThreads,
+            SseFanoutSettings sseSettings,
+            int evictIntervalSeconds) {
         this.store = store;
         this.chatFactory = chatFactory;
         this.memory = memory == null ? VectorMemoryService.disabled() : memory;
@@ -314,11 +411,12 @@ public final class ChatSessionManager implements AutoCloseable {
                 cacheIdleMinutes <= 0
                         ? Long.MAX_VALUE
                         : Duration.ofMinutes(cacheIdleMinutes).toMillis();
+        this.evictIntervalMillis = Math.max(0, evictIntervalSeconds) * 1000L;
         this.audit = audit;
         this.turnStore = turnStore;
         this.leases = leases == null ? TurnLeaseService.disabled() : leases;
         this.events = events == null ? new InMemoryTurnEventBus() : events;
-        this.fanout = new TurnEventFanout(this.events, 60_000L, eventPollerThreads);
+        this.fanout = new TurnEventFanout(this.events, 60_000L, eventPollerThreads, sseSettings);
         this.nodeId = nodeId == null || nodeId.isBlank() ? "node" : nodeId;
         long heartbeatMillis = Math.max(1L, heartbeatSeconds) * 1000L;
         this.staleMillis = Math.max(30_000L, heartbeatMillis * 3L);
@@ -386,6 +484,23 @@ public final class ChatSessionManager implements AutoCloseable {
     public List<ChatMessage> messages(long userId, long sessionId) {
         store.requireOwned(sessionId, userId);
         return store.messages(sessionId);
+    }
+
+    /** 窗口之后的消息，供上下文加载按水位读取而不是全量回放。 */
+    public List<ChatMessage> messagesRecent(long userId, long sessionId, long afterMessageId, int limit) {
+        store.requireOwned(sessionId, userId);
+        return store.messagesRecent(sessionId, afterMessageId, limit);
+    }
+
+    /** 游标翻页：返回 {@code beforeId} 之前（不含）的最近一页，按消息 id 升序。 */
+    public List<ChatMessage> messagesBefore(long userId, long sessionId, long beforeId, int limit) {
+        store.requireOwned(sessionId, userId);
+        return store.messagesBefore(sessionId, beforeId, limit);
+    }
+
+    public ChatMessage message(long userId, long sessionId, long messageId) {
+        store.requireOwned(sessionId, userId);
+        return store.message(sessionId, messageId).orElse(null);
     }
 
     /** 校验会话归属并返回会话；附件的上传与删除都先走这一步。 */
@@ -850,6 +965,10 @@ public final class ChatSessionManager implements AutoCloseable {
             }
         }
         Long messageId = saveReply(turn.userId(), turn.sessionId(), reply, turn.turnId());
+        if (messageId != null && turn.chat() != null) {
+            // 让内存中的会话记录本轮助手消息 id，压缩时才能把水位推进到精确位置。
+            turn.chat().markAssistantMessage(messageId);
+        }
         finishTurn(
                 turn,
                 messageId == null ? ChatTurn.FAILED : ChatTurn.SUCCEEDED,
@@ -1072,6 +1191,18 @@ public final class ChatSessionManager implements AutoCloseable {
         store.requireOwned(sessionId, userId);
         // 同一轮次的多个订阅者共享一个节点内读取循环，Redis 读取次数不再随连接数放大。
         return fanout.await(turnId, afterSeq, block, max);
+    }
+
+    /** 推送模式订阅：回调在 SSE 写线程执行，调用方不得阻塞或反向调用本类。 */
+    public ChatSseSubscription subscribe(
+            long userId,
+            long sessionId,
+            String turnId,
+            long afterSeq,
+            long deadlineMillis,
+            SseCallbacks callbacks) {
+        store.requireOwned(sessionId, userId);
+        return fanout.subscribe(turnId, Math.max(0L, afterSeq), deadlineMillis, callbacks);
     }
 
     /**
@@ -1388,20 +1519,45 @@ public final class ChatSessionManager implements AutoCloseable {
 
     /**
      * 只淘汰空闲或超额的会话，且跳过正在生成的会话；淘汰后下次访问会按数据库上下文重建。
+     *
+     * <p>淘汰按 {@code evict-interval-seconds} 限频，并为超额淘汰只挑选最旧的一小批候选，避免每次
+     * {@link #chatFor} 都做全表排序。
      */
     private void evictChats(long now) {
         int excess = chats.size() - maxCachedChats;
-        if (excess <= 0 && cacheIdleMillis == Long.MAX_VALUE) {
+        if (excess <= 0
+                && (cacheIdleMillis == Long.MAX_VALUE
+                        || now - lastEvictAt < evictIntervalMillis)) {
+            // 未超额时只在空闲淘汰节拍到来时扫描；超额立即处理，避免缓存持续膨胀。
             return;
         }
-        List<Map.Entry<Long, CachedChat>> snapshot = new ArrayList<>(chats.entrySet());
-        snapshot.sort(Comparator.comparingLong(entry -> entry.getValue().lastAccess()));
-        for (Map.Entry<Long, CachedChat> entry : snapshot) {
-            boolean idle = now - entry.getValue().lastAccess() > cacheIdleMillis;
-            if (!idle && excess <= 0) {
+        lastEvictAt = now;
+        int limit = Math.max(0, excess) + EVICT_CANDIDATE_SLACK;
+        // 大顶堆按 lastAccess 保留最旧的 limit 个非 busy 候选。
+        PriorityQueue<Map.Entry<Long, CachedChat>> oldest =
+                new PriorityQueue<>(
+                        limit,
+                        Comparator.comparingLong(
+                                        (Map.Entry<Long, CachedChat> entry) ->
+                                                entry.getValue().lastAccess())
+                                .reversed());
+        for (Map.Entry<Long, CachedChat> entry : chats.entrySet()) {
+            if (busy.contains(entry.getKey())) {
                 continue;
             }
-            if (busy.contains(entry.getKey())) {
+            if (oldest.size() < limit) {
+                oldest.offer(entry);
+            } else if (entry.getValue().lastAccess() < oldest.peek().getValue().lastAccess()) {
+                oldest.poll();
+                oldest.offer(entry);
+            }
+        }
+        List<Map.Entry<Long, CachedChat>> candidates = new ArrayList<>(oldest);
+        candidates.sort(Comparator.comparingLong(entry -> entry.getValue().lastAccess()));
+        boolean idleEnabled = cacheIdleMillis != Long.MAX_VALUE;
+        for (Map.Entry<Long, CachedChat> entry : candidates) {
+            boolean idle = idleEnabled && now - entry.getValue().lastAccess() > cacheIdleMillis;
+            if (!idle && excess <= 0) {
                 continue;
             }
             if (chats.remove(entry.getKey(), entry.getValue())) {
