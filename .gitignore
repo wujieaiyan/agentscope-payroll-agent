@@ -13,3 +13,7 @@ work/
 frontend/node_modules/
 frontend/dist/
 frontend/reference/
+__pycache__/
+*.pyc
+frontend/test-results/
+*.stackdump
