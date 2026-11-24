@@ -673,33 +673,37 @@ public class ChatSessionController {
                                     .atZone(ZoneId.systemDefault())
                                     .toInstant()
                                     .toEpochMilli();
-            // 冷恢复优先下发已合并的快照，避免把整段历史逐帧重放。
-            TurnEventBus.TurnSnapshot snapshot =
-                    manager.turnSnapshot(userId, sessionId, turnId);
-            if (snapshot != null && snapshot.seq() > lastSeq) {
-                channel.send(
-                        "snapshot",
-                        ChatSse.payload(
-                                "seq", snapshot.seq(),
-                                "text", snapshot.text(),
-                                "tools",
-                                        snapshot.tools().isEmpty() ? null : snapshot.tools(),
-                                "agents",
-                                        snapshot.agents().isEmpty() ? null : snapshot.agents(),
-                                "phase", snapshot.phase(),
-                                "citations",
-                                        snapshot.citations().isEmpty()
-                                                ? null
-                                                : snapshot.citations()));
-                lastSeq = snapshot.seq();
-                replayed++;
-            }
             long earliest = manager.earliestTurnSeq(userId, sessionId, turnId);
             if (earliest > 0 && lastSeq + 1 < earliest) {
-                // 客户端游标早于仍保留的事件：明示缺口，前端停止拼接、以落库消息收尾。
-                sendGap(channel, lastSeq, earliest);
-                lastSeq = earliest - 1;
-                gapWarned = true;
+                // 游标之前的事件已被裁剪，逐帧重放必然缺失，先用合并快照补足可见进度。
+                // 事件仍在保留窗口内时必须按序重放：快照只保留展示状态，会吞掉
+                // tool_result、action_proposal 与 done，而前端要靠它们渲染工具与提案卡片。
+                TurnEventBus.TurnSnapshot snapshot =
+                        manager.turnSnapshot(userId, sessionId, turnId);
+                if (snapshot != null && snapshot.seq() > lastSeq) {
+                    channel.send(
+                            "snapshot",
+                            ChatSse.payload(
+                                    "seq", snapshot.seq(),
+                                    "text", snapshot.text(),
+                                    "tools",
+                                            snapshot.tools().isEmpty() ? null : snapshot.tools(),
+                                    "agents",
+                                            snapshot.agents().isEmpty() ? null : snapshot.agents(),
+                                    "phase", snapshot.phase(),
+                                    "citations",
+                                            snapshot.citations().isEmpty()
+                                                    ? null
+                                                    : snapshot.citations()));
+                    lastSeq = snapshot.seq();
+                    replayed++;
+                }
+                if (lastSeq + 1 < earliest) {
+                    // 快照没能覆盖到保留窗口：明示缺口，前端停止拼接、以落库消息收尾。
+                    sendGap(channel, lastSeq, earliest);
+                    lastSeq = earliest - 1;
+                    gapWarned = true;
+                }
             }
             while (!channel.closed()) {
                 if (System.currentTimeMillis() >= deadlineMillis) {
