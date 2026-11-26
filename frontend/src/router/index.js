@@ -50,7 +50,62 @@ const routes = [
       { path: 'chat', name: 'chat', component: () => import('../views/ChatView.vue'), meta: { title: '对话' } },
       workspacePage('platform/agents', 'agents', 'AgentsView', '智能体', 'platform', { label: '智能体', icon: 'agents', order: 10 }, { permission: 'agent:manage' }),
       workspacePage('platform/flows', 'flows', 'FlowsView', '流程编排', 'platform', { label: '流程编排', icon: 'flows', order: 20 }, { permission: 'flow:manage' }),
-      workspacePage('platform/skills', 'skills', 'SkillsView', '技能', 'platform', { label: '技能', icon: 'skills', order: 30 }, { permission: 'skill:manage' }),
+      {
+        path: 'platform/skills',
+        name: 'skills-root',
+        component: () => import('../views/admin/SkillsView.vue'),
+        meta: {
+          title: '技能',
+          workspace: 'platform',
+          menu: { label: '技能', icon: ICONS.skills, order: 30, workspace: 'platform', permission: 'skill:manage' },
+        },
+        children: [
+          {
+            path: '',
+            name: 'skills',
+            component: () => import('../views/admin/skills/SkillsListView.vue'),
+            meta: { title: '技能', workspace: 'platform' },
+          },
+          {
+            path: 'new',
+            name: 'skill-create',
+            component: () => import('../views/admin/skills/SkillCreatePage.vue'),
+            meta: { title: '新建技能', workspace: 'platform' },
+          },
+          {
+            path: 'new/editor',
+            name: 'skill-create-editor',
+            component: () => import('../views/admin/skills/SkillEditorPage.vue'),
+            meta: { title: '新建技能', workspace: 'platform' },
+          },
+          {
+            path: 'import',
+            name: 'skill-import',
+            component: () => import('../views/admin/skills/SkillImportPage.vue'),
+            meta: { title: '导入技能', workspace: 'platform' },
+          },
+          {
+            path: ':id/edit',
+            name: 'skill-editor',
+            component: () => import('../views/admin/skills/SkillEditorPage.vue'),
+            meta: { title: '编辑技能', workspace: 'platform' },
+          },
+          {
+            path: ':id/references',
+            redirect: (to) => ({ name: 'skill-workbench', params: { id: to.params.id, tab: 'files' } }),
+          },
+          {
+            path: ':id/scripts',
+            redirect: (to) => ({ name: 'skill-workbench', params: { id: to.params.id, tab: 'files' } }),
+          },
+          {
+            path: ':id/:tab?',
+            name: 'skill-workbench',
+            component: () => import('../views/admin/skills/SkillWorkbench.vue'),
+            meta: { title: '技能', workspace: 'platform' },
+          },
+        ],
+      },
       workspacePage('platform/team', 'team', 'TeamView', '团队运行', 'platform', { label: '团队运行', icon: 'team', order: 40 }),
       { path: 'platform/kb', name: 'kb', component: () => import('../kb/views/SeriesListView.vue'), meta: { title: '知识库', workspace: 'platform', menu: { label: '知识库', icon: ICONS.kb, order: 50, workspace: 'platform', permission: 'kb:read' } } },
       { path: 'platform/kb/create', name: 'kb-create', component: () => import('../kb/views/SeriesCreateView.vue'), meta: { title: '新建知识库', workspace: 'platform' } },
