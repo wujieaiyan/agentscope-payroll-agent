@@ -613,6 +613,26 @@ class JdbcSkillStoreTest {
     }
 
     @Test
+    @DisplayName("列表摘要能带着文件跑完整条 SQL：LIKE 里的百分号不能被当成格式符")
+    void summariesFormatsSetupQueryWithLiteralPercent() {
+        store.importProject(
+                project("setup-helper", body("需要初始化"), pack("scripts/setup.sh", "echo init"), META),
+                true);
+        store.importProject(
+                project("plain-helper", body("无需初始化"), pack("references/a.md", "甲"), META), true);
+
+        // 只要库里有行，summaries 就走拼接过的 setup 查询；模板里的 '%' 漏转义会在这里抛
+        // UnknownFormatConversionException，列表接口整页 400。
+        Map<String, SkillSummary> byId = new LinkedHashMap<>();
+        store.summaries().forEach(item -> byId.put(item.id(), item));
+
+        assertEquals(Boolean.TRUE, byId.get("setup-helper").needsData(), "scripts/setup.sh 应被判为需要数据");
+        assertEquals(Boolean.FALSE, byId.get("plain-helper").needsData());
+        assertEquals(1, byId.get("setup-helper").versionNo());
+        assertEquals(1, byId.get("setup-helper").fileCount());
+    }
+
+    @Test
     @DisplayName("目录那次查询的行数进 gauge；读失败保留上一次的好值不写 0")
     void catalogReportsQueryRowsAndKeepsLastGoodValue() throws Exception {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

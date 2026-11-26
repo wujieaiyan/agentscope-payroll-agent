@@ -109,12 +109,15 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
     private static final String SELECT_PROVENANCE =
             "SELECT created_by, created_at, updated_by FROM skill_definition WHERE skill_id = ?";
 
-    /** 只取可能成为 setup 的路径：根目录 {@code setup.sh} 与 {@code scripts/**}，与解析规则同一口径。 */
+    /**
+     * 只取可能成为 setup 的路径：根目录 {@code setup.sh} 与 {@code scripts/**}，与解析规则同一口径。
+     * 这个模板会走 {@link String#formatted}，LIKE 里的百分号必须写成 {@code %%}，否则 {@code %'} 会被当成格式符。
+     */
     private static final String SELECT_SETUP_PATHS =
             """
             SELECT r.skill_id, r.path FROM skill_resource r
             JOIN skill_definition d ON d.current_version_id = r.version_id
-            WHERE r.skill_id IN %s AND (r.path = ? OR r.path LIKE 'scripts/%')
+            WHERE r.skill_id IN %s AND (r.path = ? OR r.path LIKE 'scripts/%%')
             """;
 
     /** 历史版本只读视图：清单与正文同版本，不用当前版本冒充。 */
