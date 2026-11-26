@@ -56,7 +56,13 @@ public final class SkillImportService {
         this.settings = settings == null ? SkillImportSettings.defaults() : settings;
     }
 
-    /** 导入预览/结果；dryRun 时不写存储，只返回解析结果与冲突状态。 */
+    /**
+     * 导入预览/结果；dryRun 时不写存储，只返回解析结果与冲突状态。
+     *
+     * @param source 导入来源（{@code git}/{@code zip}），预览响应要标注来源卡片
+     * @param hashes 逐文件 sha256（与 {@code skill_resource.sha256} 同算法）；预览拿它和当前版本比对出
+     *     新增/覆盖/不变，避免让控制器重新读一遍正文
+     */
     public record ImportResult(
             String id,
             String commitSha,
@@ -67,7 +73,36 @@ public final class SkillImportService {
             long dataMaxBytes,
             List<String> warnings,
             boolean existing,
-            boolean dryRun) {
+            boolean dryRun,
+            String source,
+            Map<String, String> hashes) {
+
+        /** 加来源与指纹之前的构造点（测试与内部调用）。 */
+        public ImportResult(
+                String id,
+                String commitSha,
+                String description,
+                Map<String, Object> metadata,
+                List<SkillFilePackage.Summary> files,
+                String setupCommand,
+                long dataMaxBytes,
+                List<String> warnings,
+                boolean existing,
+                boolean dryRun) {
+            this(
+                    id,
+                    commitSha,
+                    description,
+                    metadata,
+                    files,
+                    setupCommand,
+                    dataMaxBytes,
+                    warnings,
+                    existing,
+                    dryRun,
+                    "",
+                    Map.of());
+        }
     }
 
     public ImportResult importGit(
@@ -96,7 +131,7 @@ public final class SkillImportService {
             String commitSha = clone(uri, ref, cloneDir);
             SkillProjectParser.ParsedProject project =
                     SkillProjectParser.parse(projectRoot(cloneDir), fileSettings, id);
-            return commit(project, commitSha, overwrite, dryRun, expectedRevision, operator);
+            return commit(project, commitSha, "git", overwrite, dryRun, expectedRevision, operator);
         } finally {
             deleteRecursively(temp);
         }
@@ -132,7 +167,7 @@ public final class SkillImportService {
             extract(archive, root);
             SkillProjectParser.ParsedProject project =
                     SkillProjectParser.parse(projectRoot(root), fileSettings, id);
-            return commit(project, null, overwrite, dryRun, expectedRevision, operator);
+            return commit(project, null, "zip", overwrite, dryRun, expectedRevision, operator);
         } finally {
             deleteRecursively(temp);
         }
@@ -141,6 +176,7 @@ public final class SkillImportService {
     private ImportResult commit(
             SkillProjectParser.ParsedProject project,
             String commitSha,
+            String source,
             boolean overwrite,
             boolean dryRun,
             String expectedRevision,
@@ -156,6 +192,10 @@ public final class SkillImportService {
         }
         List<SkillFilePackage.Summary> files =
                 project.files().stream().map(SkillFilePackage::summary).toList();
+        Map<String, String> hashes = new java.util.LinkedHashMap<>();
+        for (SkillFilePackage.SkillFile file : project.files()) {
+            hashes.put(file.path(), SkillManifests.contentHash(file.content()));
+        }
         return new ImportResult(
                 project.id(),
                 commitSha,
@@ -166,7 +206,9 @@ public final class SkillImportService {
                 project.dataMaxBytes(),
                 project.warnings(),
                 existing,
-                dryRun);
+                dryRun,
+                source,
+                Map.copyOf(hashes));
     }
 
     private URI validateGitUrl(String url) {

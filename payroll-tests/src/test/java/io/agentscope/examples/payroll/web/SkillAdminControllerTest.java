@@ -6,27 +6,38 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.agentscope.examples.payroll.db.H2AdminRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.RoleSkills;
+import io.agentscope.examples.payroll.skill.SkillCreationOriginStore;
+import io.agentscope.examples.payroll.skill.SkillDataState;
+import io.agentscope.examples.payroll.skill.SkillDataStateStore;
 import io.agentscope.examples.payroll.skill.SkillDetail;
 import io.agentscope.examples.payroll.skill.SkillFilePackage;
 import io.agentscope.examples.payroll.skill.SkillImportService;
 import io.agentscope.examples.payroll.skill.SkillManifests;
+import io.agentscope.examples.payroll.skill.SkillProjectParser;
 import io.agentscope.examples.payroll.skill.SkillStore;
 import io.agentscope.examples.payroll.skill.SkillSummary;
+import io.agentscope.examples.payroll.skill.SkillTemplates;
 import io.agentscope.examples.payroll.skill.SkillVersion;
+import io.agentscope.examples.payroll.skill.SkillVersionContent;
 import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
 import java.lang.reflect.Method;
@@ -35,9 +46,11 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
 import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -63,7 +76,7 @@ class SkillAdminControllerTest {
     @Test
     @DisplayName("列表返回存储状态并按关键字过滤")
     void listReturnsStorageAndFilters() {
-        when(registry.list())
+        when(registry.summaries())
                 .thenReturn(
                         List.of(
                                 summary(RoleSkills.CALCULATOR, "计算", "builtin", true),
@@ -72,7 +85,7 @@ class SkillAdminControllerTest {
         when(registry.location()).thenReturn("http://nacos/payroll-agent");
         when(agentRegistry.list()).thenReturn(List.of());
 
-        Map<?, ?> all = (Map<?, ?>) controller.list(null, null, null, null, null).data();
+        Map<?, ?> all = (Map<?, ?>) controller.list(null, null, null, null, null, null).data();
         assertEquals(true, all.get("writable"));
         assertEquals("http://nacos/payroll-agent", all.get("location"));
         assertEquals(2, all.get("total"));
@@ -80,14 +93,45 @@ class SkillAdminControllerTest {
         assertEquals(SkillAdminController.DEFAULT_PAGE_SIZE, all.get("size"));
         assertEquals(2, ((List<?>) all.get("skills")).size());
 
-        Map<?, ?> filtered = (Map<?, ?>) controller.list("audit", null, null, null, null).data();
+        Map<?, ?> filtered = (Map<?, ?>) controller.list("audit", null, null, null, null, null).data();
         assertEquals(1, ((List<?>) filtered.get("skills")).size());
+    }
+
+    @Test
+    @DisplayName("列表视图筛选区分自定义、内置、覆盖与绑定，并拒绝未知视图")
+    void listFiltersByView() {
+        when(registry.summaries())
+                .thenReturn(
+                        List.of(
+                                summary(RoleSkills.CALCULATOR, "计算", "builtin", true),
+                                summary("payroll-auditor", "薪酬审计", "db", false),
+                                summary("poetry-skills", "诗词", "db", false)));
+        when(agentRegistry.list()).thenReturn(List.of(agent("审计智能体", "payroll-auditor")));
+
+        assertEquals(
+                2,
+                skillsOf(controller.list(null, null, null, null, "custom", null)).size());
+        assertEquals(
+                1,
+                skillsOf(controller.list(null, null, null, null, "builtin", null)).size());
+        assertEquals(
+                1,
+                skillsOf(controller.list(null, null, null, null, "overridden", null)).size());
+        assertEquals(
+                1,
+                skillsOf(controller.list(null, null, null, null, "bound", null)).size());
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.list(null, null, null, null, "unknown-view", null));
+        assertTrue(error.getMessage().contains("unknown-view"), error.getMessage());
     }
 
     @Test
     @DisplayName("列表分页按 size 截断并返回规模指标")
     void listPaginatesAndReportsScale() {
-        when(registry.list())
+        when(registry.summaries())
                 .thenReturn(
                         List.of(
                                 summary("skill-a", "甲", "nacos", false),
@@ -96,7 +140,7 @@ class SkillAdminControllerTest {
         when(agentRegistry.list())
                 .thenReturn(List.of(agent("甲智能体", "skill-a"), agent("乙智能体", "skill-b")));
 
-        Map<?, ?> second = (Map<?, ?>) controller.list(null, 2, 2, null, null).data();
+        Map<?, ?> second = (Map<?, ?>) controller.list(null, 2, 2, null, null, null).data();
 
         assertEquals(3, second.get("total"));
         assertEquals(2, second.get("page"));
@@ -115,7 +159,7 @@ class SkillAdminControllerTest {
     @Test
     @DisplayName("列表支持来源过滤与按大小倒序")
     void listFiltersBySourceAndSorts() {
-        when(registry.list())
+        when(registry.summaries())
                 .thenReturn(
                         List.of(
                                 new SkillSummary("small", "小", "nacos", false, false, 1L, 10, 0, ""),
@@ -126,7 +170,7 @@ class SkillAdminControllerTest {
 
         List<?> nacos =
                 (List<?>)
-                        ((Map<?, ?>) controller.list(null, null, null, "nacos", "size").data())
+                        ((Map<?, ?>) controller.list(null, null, null, "nacos", null, "size").data())
                                 .get("skills");
 
         assertEquals(2, nacos.size());
@@ -137,12 +181,12 @@ class SkillAdminControllerTest {
     @Test
     @DisplayName("不支持的排序字段返回明确错误")
     void listRejectsUnknownSort() {
-        when(registry.list()).thenReturn(List.of());
+        when(registry.summaries()).thenReturn(List.of());
 
         PayrollException error =
                 assertThrows(
                         PayrollException.class,
-                        () -> controller.list(null, null, null, null, "unknown"));
+                        () -> controller.list(null, null, null, null, null, "unknown"));
 
         assertTrue(error.getMessage().contains("unknown"), error.getMessage());
     }
@@ -733,7 +777,18 @@ class SkillAdminControllerTest {
                                 false),
                         null);
 
-        assertSame(result, response.data());
+        Map<?, ?> data = (Map<?, ?>) response.data();
+        assertEquals("poetry", data.get("id"));
+        assertEquals("abc123", data.get("commitSha"));
+        assertEquals(false, data.get("dryRun"));
+        Map<?, ?> source = (Map<?, ?>) data.get("source");
+        assertEquals("git", source.get("kind"));
+        assertEquals("main", source.get("ref"));
+        assertEquals("abc123", source.get("resolvedSha"));
+        assertEquals(1, ((Map<?, ?>) data.get("totals")).get("files"));
+        assertEquals(
+                "ADDED",
+                ((Map<?, ?>) ((List<?>) data.get("files")).get(0)).get("status"));
         verify(auditService).record(eq("skill.import"), eq("skill"), eq("poetry"), eq(null), any());
     }
 
@@ -772,8 +827,464 @@ class SkillAdminControllerTest {
                                 true),
                         null);
 
-        assertSame(preview, response.data());
+        Map<?, ?> data = (Map<?, ?>) response.data();
+        assertEquals(true, data.get("dryRun"));
+        assertEquals(List.of("activation 首期只展示，不参与技能路由"), data.get("warnings"));
+        assertEquals(0, ((Map<?, ?>) data.get("totals")).get("files"));
+        assertEquals(null, data.get("currentVersionNo"));
         verify(auditService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("列表批量装配绑定、数据状态与显示名，无需数据的技能不出现")
+    void listAssemblesBindingsDataStatesAndUsers() {
+        SkillDataStateStore states = mock(SkillDataStateStore.class);
+        H2AdminRepository users = mock(H2AdminRepository.class);
+        SkillAdminController rich =
+                richController(states, SkillCreationOriginStore.none(), users);
+        when(registry.summaries())
+                .thenReturn(
+                        List.of(
+                                new SkillSummary(
+                                        "payroll-auditor", "薪酬审计", "db", false, false, 5L,
+                                        10, 0, "3", 2, "hr01", true, 2048L),
+                                new SkillSummary(
+                                        RoleSkills.CALCULATOR, "计算", "builtin", true, true, 6L,
+                                        20, 0, "", null, null, false, null)));
+        when(states.findAll())
+                .thenReturn(
+                        Map.of(
+                                "payroll-auditor",
+                                new SkillDataState(
+                                        "payroll-auditor", SkillDataState.READY, 512L, 0,
+                                        10L, 20L, "done", 30L)));
+        when(agentRegistry.list())
+                .thenReturn(
+                        List.of(
+                                agent("个税顾问", "payroll-auditor"),
+                                agent("薪酬计算专家", RoleSkills.CALCULATOR)));
+        when(users.users())
+                .thenReturn(
+                        List.of(
+                                new AppUser(11L, "hr01", "人事专员", "HR", "人事", null, null, true, null, null, null),
+                                new AppUser(12L, "other", "其他人", "HR", "人事", null, null, true, null, null, null)));
+        when(gateway.enabled()).thenReturn(true);
+
+        Map<?, ?> data = (Map<?, ?>) rich.list(null, null, null, null, null, null, null).data();
+
+        Map<?, ?> bindings = (Map<?, ?>) data.get("bindings");
+        List<?> auditorBindings = (List<?>) bindings.get("payroll-auditor");
+        assertEquals(1, auditorBindings.size());
+        assertEquals("个税顾问", ((Map<?, ?>) auditorBindings.get(0)).get("name"));
+
+        Map<?, ?> dataStates = (Map<?, ?>) data.get("dataStates");
+        Map<?, ?> auditorState = (Map<?, ?>) dataStates.get("payroll-auditor");
+        assertEquals(SkillDataState.READY, auditorState.get("status"));
+        assertEquals(512L, auditorState.get("sizeBytes"));
+        assertEquals(2048L, auditorState.get("declaredMaxBytes"));
+        assertNull(dataStates.get(RoleSkills.CALCULATOR), "无需数据的技能不应出现在数据状态里");
+
+        assertEquals(Map.of("hr01", "人事专员"), data.get("users"));
+    }
+
+    @Test
+    @DisplayName("数据状态过滤与规模指标共用一个分桶，沙箱关闭时全部降级为未知")
+    void listFiltersByDataStatusAndCountsBuckets() {
+        SkillDataStateStore states = mock(SkillDataStateStore.class);
+        SkillAdminController rich =
+                richController(states, SkillCreationOriginStore.none(), null);
+        when(registry.summaries())
+                .thenReturn(
+                        List.of(
+                                new SkillSummary(
+                                        "ready-skill", "就绪", "db", false, false, 1L, 10, 0, "",
+                                        1, "hr01", true, 1024L),
+                                new SkillSummary(
+                                        "failed-skill", "失败", "db", false, false, 1L, 10, 0, "",
+                                        1, "hr01", true, 1024L),
+                                new SkillSummary(
+                                        "none-skill", "无需数据", "db", false, false, 1L, 10, 0,
+                                        "", 1, "hr01", false, null),
+                                new SkillSummary(
+                                        "unknown-skill", "来源未知", "nacos", false, false, 1L,
+                                        10, 0, "", null, null, null, null)));
+        when(states.findAll())
+                .thenReturn(
+                        Map.of(
+                                "ready-skill",
+                                new SkillDataState(
+                                        "ready-skill", SkillDataState.READY, 1L, 0, 0, 0, "", 0),
+                                "failed-skill",
+                                new SkillDataState(
+                                        "failed-skill", SkillDataState.FAILED, 0L, 1, 0, 0, "boom", 0)));
+        when(agentRegistry.list()).thenReturn(List.of());
+        when(gateway.enabled()).thenReturn(true);
+
+        List<?> attention =
+                (List<?>)
+                        ((Map<?, ?>) rich.list(null, null, null, null, null, "attention", null).data())
+                                .get("skills");
+        assertEquals(1, attention.size());
+        assertEquals("failed-skill", ((SkillSummary) attention.get(0)).id());
+
+        Map<?, ?> stats =
+                (Map<?, ?>) ((Map<?, ?>) rich.list(null, null, null, null, null, null, null).data())
+                        .get("stats");
+        assertEquals(2L, stats.get("usable"));
+        assertEquals(1L, stats.get("needsAttention"));
+        assertEquals(1L, stats.get("unknownData"));
+        assertEquals(0L, stats.get("initializing"));
+        assertEquals(1L, ((Map<?, ?>) stats.get("views")).get("attention"));
+
+        // 沙箱关闭时无法判定数据需求：有 setup 的技能降级为未知，「无需数据」仍算可用。
+        when(gateway.enabled()).thenReturn(false);
+        List<?> readyOnly =
+                (List<?>)
+                        ((Map<?, ?>) rich.list(null, null, null, null, null, "ready", null).data())
+                                .get("skills");
+        assertEquals(1, readyOnly.size());
+        assertEquals("none-skill", ((SkillSummary) readyOnly.get(0)).id());
+        Map<?, ?> offline =
+                (Map<?, ?>) ((Map<?, ?>) rich.list(null, null, null, null, null, null, null).data())
+                        .get("stats");
+        assertEquals(1L, offline.get("usable"));
+        assertEquals(3L, offline.get("unknownData"));
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> rich.list(null, null, null, null, null, "broken", null));
+        assertTrue(error.getMessage().contains("broken"), error.getMessage());
+    }
+
+    @Test
+    @DisplayName("概览一次返回身份、健康、清单与时间线，并解析显示名")
+    void overviewAssemblesIdentityHealthChecklistAndTimeline() {
+        SkillDataStateStore states = mock(SkillDataStateStore.class);
+        H2AdminRepository users = mock(H2AdminRepository.class);
+        SkillAdminController rich =
+                richController(states, SkillCreationOriginStore.none(), users);
+        String content =
+                "## 角色\n"
+                        + "你是薪酬审计助手，负责核对工资明细、考勤数据与城市政策口径，发现异常时给出可复核的结论。\n"
+                        + "## 规则\n"
+                        + "先核对员工档案与考勤记录，再按参保城市的政策复核个税、社保与公积金，最后逐项输出差异金额与依据。\n"
+                        + "## 步骤\n"
+                        + "一、读取批次明细；二、复核政策版本；三、标记异常；四、输出复核建议与需要补充的材料清单。\n"
+                        + "## 输出要求\n"
+                        + "用表格列出异常项、差异金额、依据条款与修订建议，不要跳步，也不要在缺少依据时自行补全数字。";
+        SkillDetail detail =
+                new SkillDetail(
+                        "payroll-auditor", "薪酬审计", content, "db", false, false,
+                        1_600_000_000_000L, 1_700_000_000_000L,
+                        List.of(
+                                new SkillFilePackage.Summary(
+                                        "scripts/run.py", 9, SkillFilePackage.KIND_SCRIPT),
+                                new SkillFilePackage.Summary("setup.sh", 10, "reference")),
+                        true, Map.of("setup", "bash setup.sh"), "5", 4, "hr01", "hr02", true);
+        when(registry.detail("payroll-auditor")).thenReturn(detail);
+        when(registry.writable()).thenReturn(true);
+        when(states.find("payroll-auditor"))
+                .thenReturn(
+                        Optional.of(
+                                new SkillDataState(
+                                        "payroll-auditor", SkillDataState.READY, 4096L, 0,
+                                        10L, 20L, "done", 30L)));
+        when(agentRegistry.list()).thenReturn(List.of(agent("个税顾问", "payroll-auditor")));
+        when(registry.versions("payroll-auditor"))
+                .thenReturn(
+                        List.of(
+                                new SkillVersion(
+                                        4, "改口径", content.length(), "hr01",
+                                        1_700_000_000_000L, true),
+                                new SkillVersion(
+                                        3, "", 100, "hr02", 1_690_000_000_000L, false)));
+        when(users.users())
+                .thenReturn(
+                        List.of(
+                                new AppUser(11L, "hr01", "人事专员", "HR", "人事", null, null, true, null, null, null),
+                                new AppUser(12L, "hr02", "薪酬主管", "HR", "人事", null, null, true, null, null, null)));
+
+        Map<?, ?> data = (Map<?, ?>) rich.overview("payroll-auditor").data();
+
+        Map<?, ?> identity = (Map<?, ?>) data.get("identity");
+        assertEquals(SkillManifests.contentHash(content), identity.get("contentHash"));
+        assertEquals(4, identity.get("versionNo"));
+        assertEquals("hr01", identity.get("createdBy"));
+        assertEquals(true, identity.get("writable"));
+
+        Map<?, ?> health = (Map<?, ?>) data.get("health");
+        Map<?, ?> dataHealth = (Map<?, ?>) health.get("data");
+        assertEquals(SkillDataState.READY, dataHealth.get("status"));
+        assertEquals(4096L, dataHealth.get("sizeBytes"));
+        assertEquals(SkillProjectParser.DEFAULT_DATA_MAX_BYTES, dataHealth.get("declaredMaxBytes"));
+        Map<?, ?> scripts = (Map<?, ?>) health.get("scripts");
+        assertEquals(1L, scripts.get("count"));
+        assertEquals("setup.sh", scripts.get("setupCommand"));
+        assertEquals(1, ((Map<?, ?>) health.get("bindings")).get("count"));
+
+        List<?> checklist = (List<?>) data.get("checklist");
+        assertEquals(4, checklist.size());
+        assertEquals(
+                List.of("body", "files", "data", "binding"),
+                checklist.stream().map(item -> ((Map<?, ?>) item).get("key")).toList());
+        assertTrue(
+                checklist.stream()
+                        .allMatch(item -> Boolean.TRUE.equals(((Map<?, ?>) item).get("ok"))),
+                String.valueOf(checklist));
+
+        List<?> timeline = (List<?>) data.get("timeline");
+        assertEquals(2, timeline.size());
+        assertEquals(true, ((Map<?, ?>) timeline.get(0)).get("current"));
+
+        assertEquals(Map.of("hr01", "人事专员", "hr02", "薪酬主管"), data.get("users"));
+        assertNull(data.get("warnings"));
+    }
+
+    @Test
+    @DisplayName("版本时间线读取失败只降级为警告，概览照常返回")
+    void overviewDegradesOnVersionFailure() {
+        when(registry.detail("payroll-auditor"))
+                .thenReturn(detail("payroll-auditor", "薪酬审计", "正文", List.of(), "5", 4));
+        when(registry.versions("payroll-auditor")).thenThrow(new PayrollException("数据库不可用"));
+        when(agentRegistry.list()).thenReturn(List.of());
+
+        Map<?, ?> data = (Map<?, ?>) controller.overview("payroll-auditor").data();
+
+        assertEquals(List.of("版本时间线读取失败"), data.get("warnings"));
+        assertEquals(List.of(), data.get("timeline"));
+        assertEquals("payroll-auditor", data.get("id"));
+    }
+
+    @Test
+    @DisplayName("概览把技能的 404 原样抛出，不吞成空概览")
+    void overviewPropagatesNotFound() {
+        when(registry.detail("missing"))
+                .thenThrow(new PayrollNotFoundException("技能不存在：missing"));
+
+        assertThrows(PayrollNotFoundException.class, () -> controller.overview("missing"));
+    }
+
+    @Test
+    @DisplayName("模板列表统计使用次数与最近使用，仅取当前操作者的三条")
+    void templatesReportUsageAndRecent() {
+        SkillCreationOriginStore origins = mock(SkillCreationOriginStore.class);
+        SkillAdminController rich =
+                richController(SkillDataStateStore.none(), origins, null);
+        when(origins.origins())
+                .thenReturn(
+                        Map.of(
+                                "s1", new SkillCreationOriginStore.Origin("policy-note", "hr01", 1_000L),
+                                "s2", new SkillCreationOriginStore.Origin("policy-note", "hr01", 3_000L),
+                                "s3", new SkillCreationOriginStore.Origin("kb-qa-assistant", "hr01", 2_000L),
+                                "s4", new SkillCreationOriginStore.Origin("kb-qa-assistant", "hr02", 4_000L),
+                                "s5", new SkillCreationOriginStore.Origin("", "hr01", 5_000L)));
+
+        AuditContext.begin(HR, "127.0.0.1", "junit");
+        try {
+            Map<?, ?> data = (Map<?, ?>) rich.templates().data();
+            List<?> list = (List<?>) data.get("templates");
+            assertEquals(4, list.size());
+            Map<?, ?> policy =
+                    list.stream()
+                            .map(item -> (Map<?, ?>) item)
+                            .filter(item -> "policy-note".equals(item.get("id")))
+                            .findFirst()
+                            .orElseThrow();
+            assertEquals("政策口径说明", policy.get("title"));
+            assertEquals(2, policy.get("usedCount"));
+            assertEquals(3_000L, policy.get("lastUsedAt"));
+
+            List<?> recent = (List<?>) data.get("recent");
+            assertEquals(
+                    List.of("policy-note", "kb-qa-assistant"),
+                    recent.stream().map(item -> ((Map<?, ?>) item).get("id")).toList());
+        } finally {
+            AuditContext.clear();
+        }
+    }
+
+    @Test
+    @DisplayName("从模板创建记录来源并在审计里带 templateId，保留字与未知模板被拒绝")
+    void createFromTemplateRecordsOriginAndAudit() {
+        SkillCreationOriginStore origins = mock(SkillCreationOriginStore.class);
+        SkillAdminController rich =
+                richController(SkillDataStateStore.none(), origins, null);
+        SkillTemplates.Template template = new SkillTemplates().require("policy-note");
+        SkillSummary saved =
+                summary("policy-check", template.description(), "db", false, "1");
+        when(registry.create(
+                        "policy-check", template.description(), template.body(), false, "hr01"))
+                .thenReturn(saved);
+        when(registry.detail("policy-check"))
+                .thenReturn(
+                        detail(
+                                "policy-check",
+                                template.description(),
+                                template.body(),
+                                List.of(),
+                                "1",
+                                1));
+
+        AuditContext.begin(HR, "127.0.0.1", "junit");
+        try {
+            ApiResponse response =
+                    rich.createFromTemplate(
+                            new SkillAdminController.FromTemplateInput(
+                                    "policy-note", " policy-check ", null, null));
+            assertSame(saved, response.data());
+            verify(origins).record("policy-check", "policy-note", "hr01");
+
+            ArgumentCaptor<Object> captured = ArgumentCaptor.forClass(Object.class);
+            verify(auditService)
+                    .record(
+                            eq("skill.create"),
+                            eq("skill"),
+                            eq("policy-check"),
+                            eq(null),
+                            captured.capture());
+            Map<?, ?> after = (Map<?, ?>) captured.getValue();
+            assertEquals("policy-note", after.get("templateId"));
+            assertEquals(1, after.get("versionNo"));
+
+            assertThrows(
+                    PayrollException.class,
+                    () ->
+                            rich.createFromTemplate(
+                                    new SkillAdminController.FromTemplateInput(
+                                            "policy-note", "new", null, null)));
+            assertThrows(
+                    PayrollException.class,
+                    () ->
+                            rich.createFromTemplate(
+                                    new SkillAdminController.FromTemplateInput(
+                                            "unknown-template", "fresh-skill", null, null)));
+        } finally {
+            AuditContext.clear();
+        }
+
+        // 保留字与未知模板都停在参数校验：全程只有成功那一次 create。
+        verify(registry, times(1)).create(any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    @DisplayName("单版本正文透传正文、变更说明、文件清单与当前标记")
+    void versionContentPassesThrough() {
+        when(registry.versionContent(" payroll-auditor ", 2))
+                .thenReturn(
+                        new SkillVersionContent(
+                                2,
+                                "旧正文",
+                                "改口径",
+                                "hr01",
+                                1_700_000_000_000L,
+                                3,
+                                false,
+                                List.of(
+                                        new SkillFilePackage.Summary(
+                                                "scripts/run.py", 9, SkillFilePackage.KIND_SCRIPT))));
+
+        Map<?, ?> data =
+                (Map<?, ?>) controller.versionContent(" payroll-auditor ", 2).data();
+
+        assertEquals("payroll-auditor", data.get("id"));
+        assertEquals(2, data.get("versionNo"));
+        assertEquals("旧正文", data.get("content"));
+        assertEquals("改口径", data.get("changeNote"));
+        assertEquals("hr01", data.get("createdBy"));
+        assertEquals(1_700_000_000_000L, data.get("createdAt"));
+        assertEquals(3, data.get("contentLength"));
+        assertEquals(false, data.get("current"));
+        assertEquals(1, ((List<?>) data.get("files")).size());
+    }
+
+    @Test
+    @DisplayName("没有版本行的来源取历史版本时按 404 语义拒绝")
+    void versionContentWithoutHistoryRejects() {
+        SkillStore nacosLike = mock(SkillStore.class, Answers.CALLS_REAL_METHODS);
+        SkillAdminController local =
+                new SkillAdminController(
+                        nacosLike, agentRegistry, auditService, importService, gateway);
+
+        assertThrows(
+                PayrollNotFoundException.class, () -> local.versionContent("poetry", 3));
+    }
+
+    @Test
+    @DisplayName("SkillStore 默认实现把 summaries 退回 list，旧实现不改也能编译")
+    void summariesFallsBackToList() {
+        SkillStore legacy = mock(SkillStore.class, Answers.CALLS_REAL_METHODS);
+        when(legacy.list())
+                .thenReturn(List.of(summary("poetry", "诗词", "nacos", false)));
+
+        assertEquals(1, legacy.summaries().size());
+        assertEquals(0, legacy.resourceHashes("poetry").size());
+    }
+
+    @Test
+    @DisplayName("导入预览逐文件比对指纹，已有技能读不到指纹时全部记为未知")
+    void importPreviewMarksFileStatuses() {
+        SkillImportService.ImportResult result =
+                new SkillImportService.ImportResult(
+                        "poetry",
+                        "abc123",
+                        "诗词技能",
+                        Map.of(),
+                        List.of(
+                                new SkillFilePackage.Summary("references/a.md", 10, "reference"),
+                                new SkillFilePackage.Summary("scripts/run.py", 12, "script"),
+                                new SkillFilePackage.Summary("references/new.md", 5, "reference")),
+                        null,
+                        1024L,
+                        List.of(),
+                        true,
+                        true,
+                        "git",
+                        Map.of(
+                                "references/a.md", "h1",
+                                "scripts/run.py", "h2",
+                                "references/new.md", "h3"));
+        when(importService.importGit(
+                        "https://example.com/repo.git", null, "poetry", true, true, null, ""))
+                .thenReturn(result);
+        when(registry.resourceHashes("poetry"))
+                .thenReturn(Map.of("references/a.md", "h1", "scripts/run.py", "old"));
+        when(registry.detail("poetry"))
+                .thenReturn(detail("poetry", "诗词技能", "正文", List.of(), "3", 3));
+
+        Map<?, ?> data =
+                (Map<?, ?>) controller.importGit(
+                                new SkillAdminController.GitImportInput(
+                                        "https://example.com/repo.git", null, "poetry", true,
+                                        true),
+                                null)
+                        .data();
+
+        List<?> files = (List<?>) data.get("files");
+        assertEquals(
+                List.of("UNCHANGED", "REPLACED", "ADDED"),
+                files.stream().map(file -> ((Map<?, ?>) file).get("status")).toList());
+        Map<?, ?> totals = (Map<?, ?>) data.get("totals");
+        assertEquals(1, totals.get("unchanged"));
+        assertEquals(1, totals.get("replaced"));
+        assertEquals(1, totals.get("added"));
+        assertNull(totals.get("unknown"));
+        assertEquals(3, data.get("currentVersionNo"));
+
+        when(registry.resourceHashes("poetry")).thenReturn(Map.of());
+        Map<?, ?> unknownData =
+                (Map<?, ?>) controller.importGit(
+                                new SkillAdminController.GitImportInput(
+                                        "https://example.com/repo.git", null, "poetry", true,
+                                        true),
+                                null)
+                        .data();
+        List<?> unknownFiles = (List<?>) unknownData.get("files");
+        assertTrue(
+                unknownFiles.stream()
+                        .allMatch(file -> "UNKNOWN".equals(((Map<?, ?>) file).get("status"))),
+                String.valueOf(unknownFiles));
+        assertEquals(3, ((Map<?, ?>) unknownData.get("totals")).get("unknown"));
     }
 
     @Test
@@ -947,6 +1458,20 @@ class SkillAdminControllerTest {
                 4);
     }
 
+    private SkillAdminController richController(
+            SkillDataStateStore states, SkillCreationOriginStore origins, H2AdminRepository users) {
+        return new SkillAdminController(
+                registry,
+                agentRegistry,
+                auditService,
+                importService,
+                states,
+                origins,
+                new SkillTemplates(),
+                users,
+                gateway);
+    }
+
     private static AgentDefinition agent(String name, String skillId) {
         return new AgentDefinition(
                 "agent-1",
@@ -960,6 +1485,10 @@ class SkillAdminControllerTest {
                 "system",
                 null,
                 null);
+    }
+
+    private static List<?> skillsOf(ApiResponse response) {
+        return (List<?>) ((Map<?, ?>) response.data()).get("skills");
     }
 
     private static SkillSummary summary(String id, String description, String source, boolean builtin) {

@@ -86,6 +86,7 @@ class MigrationRecoveryTest {
             assertTrue(tableExists(connection, "job_lease"), "job_lease 应由重跑建出");
             assertEquals(1, columnCount(connection, "chat_sessions", "context_through_message_id"));
             assertEquals(1, historyRows(connection, "23"), "V23 应记录为成功");
+            assertEquals(1, historyRows(connection, "24"), "V24 应随重跑补记");
         }
     }
 
@@ -96,7 +97,10 @@ class MigrationRecoveryTest {
             statement.execute("DROP TABLE job_lease");
             statement.execute("DROP INDEX idx_chat_messages_created");
             statement.execute("ALTER TABLE chat_sessions DROP COLUMN context_through_message_id");
-            statement.execute("DELETE FROM " + HISTORY + " WHERE \"version\" = '23'");
+            // V24 排在 V23 之后：半成品现场必须连同后续版本记录一起回退，
+            // 否则 Flyway 会先报「23 未应用但 24 已应用」的 out-of-order，测不到重跑。
+            // V24 的表保留不删，正好顺带验证它的 IF NOT EXISTS 可重放。
+            statement.execute("DELETE FROM " + HISTORY + " WHERE \"version\" IN ('23', '24')");
         }
     }
 

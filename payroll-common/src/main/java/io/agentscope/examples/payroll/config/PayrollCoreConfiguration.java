@@ -61,6 +61,8 @@ import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.RedisTurnEventBus;
+import io.agentscope.examples.payroll.service.SandboxClient;
+import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.service.SseFanoutSettings;
 import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
@@ -73,9 +75,15 @@ import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosRuntimeSettings;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.SkillStore;
+import io.agentscope.examples.payroll.skill.SkillCreationOriginStore;
+import io.agentscope.examples.payroll.skill.SkillDataStateRefresher;
+import io.agentscope.examples.payroll.skill.SkillDataStateStore;
 import io.agentscope.examples.payroll.skill.SkillFileSettings;
 import io.agentscope.examples.payroll.skill.SkillImportService;
 import io.agentscope.examples.payroll.skill.SkillImportSettings;
+import io.agentscope.examples.payroll.skill.SkillTemplates;
+import io.agentscope.examples.payroll.skill.JdbcSkillCreationOriginStore;
+import io.agentscope.examples.payroll.skill.JdbcSkillDataStateStore;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.skill.BuiltInSkillRepository;
 import io.agentscope.examples.payroll.skill.CompositeSkillRepository;
@@ -571,6 +579,40 @@ public class PayrollCoreConfiguration {
                 skillStore,
                 SkillFileSettings.fromEnvironment(),
                 SkillImportSettings.fromEnvironment());
+    }
+
+    /** 技能数据工作区的最近观测状态：列表页要按状态过滤，正文与文件页也要显示它。 */
+    @Bean
+    public SkillDataStateStore skillDataStateStore(PayrollDatabase database) {
+        return new JdbcSkillDataStateStore(database);
+    }
+
+    /** 技能创建来源（模板/空白/导入）：只在「从模板新建」写，概览页读取。 */
+    @Bean
+    public SkillCreationOriginStore skillCreationOriginStore(PayrollDatabase database) {
+        return new JdbcSkillCreationOriginStore(database);
+    }
+
+    /** 新建技能的内置模板：从 classpath 读取，不落库、不可编辑。 */
+    @Bean
+    public SkillTemplates skillTemplates() {
+        return new SkillTemplates();
+    }
+
+    /** 沙箱网关：管理台数据页与刷新器共用同一个实例，未配置时是禁用态。 */
+    @Bean
+    public SandboxGateway skillSandboxGateway() {
+        return SandboxClient.fromEnvironment();
+    }
+
+    /**
+     * 数据状态后台刷新：初始化往往在页面关闭后才完成，只靠「打开时回写」会让列表停在初始化中。
+     * 沙箱未启用时 {@link SkillDataStateRefresher#start()} 直接返回，不起线程。
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public SkillDataStateRefresher skillDataStateRefresher(
+            SkillDataStateStore skillDataStateStore, SandboxGateway skillSandboxGateway) {
+        return new SkillDataStateRefresher(skillDataStateStore, skillSandboxGateway);
     }
 
     @Bean(destroyMethod = "close")

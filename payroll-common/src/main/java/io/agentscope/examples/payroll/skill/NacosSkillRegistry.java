@@ -253,6 +253,23 @@ public final class NacosSkillRegistry implements SkillStore {
         return remote == null ? List.of() : summaries(filesOf(remote));
     }
 
+    /**
+     * 当前文件包逐路径 sha256：导入预检用它与待导入内容比对，判定「新增 / 覆盖 / 不变」。
+     * 走 {@link #filesOf} 的同一份缓存，不额外请求 Nacos；无文件包时为空映射。
+     */
+    @Override
+    public java.util.Map<String, String> resourceHashes(String id) {
+        RemoteSkill remote = snapshot().byId().get(normalizeId(id));
+        if (remote == null) {
+            return java.util.Map.of();
+        }
+        java.util.Map<String, String> hashes = new java.util.LinkedHashMap<>();
+        for (SkillFilePackage.SkillFile file : filesOf(remote)) {
+            hashes.put(file.path(), SkillManifests.contentHash(file.content()));
+        }
+        return java.util.Collections.unmodifiableMap(hashes);
+    }
+
     /** 读取单个文件内容；路径越界与不存在分别报错。 */
     @Override
     public String fileContent(String id, String path) {

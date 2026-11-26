@@ -36,7 +36,33 @@ public interface SkillStore {
      */
     List<SkillSummary> list();
 
+    /**
+     * 带版本号、写入者与数据需求判定的列表：管理台一屏要显示这四列，逐条调 {@link #detail(String)}
+     * 会退化成 N+1。默认实现退回 {@link #list()}，三个新字段为 {@code null}——第三方/测试实现
+     * 不改也能编译，界面把它们显示成「—」。
+     */
+    default List<SkillSummary> summaries() {
+        return list();
+    }
+
     SkillDetail detail(String id);
+
+    /**
+     * 当前版本的文件路径 → sha256。导入预览要按文件判断「新增 / 覆盖 / 不变」，只能逐路径比哈希；
+     * 默认空映射表示「来源无法给出文件指纹」，调用方应把状态降级为「未知」而不是「全部新增」。
+     */
+    default java.util.Map<String, String> resourceHashes(String id) {
+        return java.util.Map.of();
+    }
+
+    /**
+     * 历史版本正文与清单（只读）。默认拒绝：Nacos 源整包发布、没有版本行，按序号取历史在语义上
+     * 不成立；控制器把它翻译成 404，前端据此隐藏「对比」。
+     */
+    default SkillVersionContent versionContent(String id, int versionNo) {
+        throw new io.agentscope.examples.payroll.domain.PayrollNotFoundException(
+                "当前技能来源没有版本历史：v" + versionNo);
+    }
 
     /** 文件列表；技能不存在或后端不可用时为空。 */
     List<SkillFilePackage.Summary> files(String id);
@@ -81,6 +107,27 @@ public interface SkillStore {
     default boolean deleteFile(
             String id, String path, String expectedRevision, String operator) {
         return deleteFile(id, path, expectedRevision);
+    }
+
+    /**
+     * 写单个文件（管理台编辑器的一次保存）。路径已存在则覆盖，不存在则新增；文件包仍受
+     * {@link SkillFilePackage} 的目录/后缀/大小约束。
+     *
+     * <p>默认实现退回整包替换：先读出未改动的文件再原样写回，所以只能用 {@code expectedRevision}
+     * 兜住并发，不能承诺「并发改不同文件互不冲突」。db 源覆写为单行 upsert，代价与
+     * {@link #deleteFile} 相同，管理台因此只需发一次写请求、不读回整包。
+     */
+    default List<SkillFilePackage.Summary> writeFile(
+            String id, String path, String content, String expectedRevision, String operator) {
+        List<SkillFilePackage.SkillFile> all = new java.util.ArrayList<>();
+        for (SkillFilePackage.Summary file : detail(id).files()) {
+            if (file.path().equals(path)) {
+                continue;
+            }
+            all.add(new SkillFilePackage.SkillFile(file.path(), fileContent(id, file.path())));
+        }
+        all.add(new SkillFilePackage.SkillFile(path, content));
+        return replaceFiles(id, all, expectedRevision, operator);
     }
 
     SkillSummary create(String id, String description, String content, boolean executionEnabled);
