@@ -10,9 +10,11 @@ import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.NoHandlerFoundException;
 
 class ApiExceptionHandlerTest {
 
@@ -90,5 +92,15 @@ class ApiExceptionHandlerTest {
         assertEquals("配置中心暂时不可用，请稍后重试", message);
         assertFalse(message.contains("127.0.0.1"), message);
         assertFalse(message.contains("Nacos"), message);
+    }
+
+    @Test
+    @DisplayName("未映射路由返回 404 而非 500")
+    void reportsUnmappedRouteAsNotFound() {
+        ResponseEntity<ApiResponse> response =
+                handler.handleNotFound(new NoHandlerFoundException("GET", "/nope", new HttpHeaders()));
+
+        assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+        assertTrue(response.getBody().message().contains("/nope"), response.getBody().message());
     }
 }

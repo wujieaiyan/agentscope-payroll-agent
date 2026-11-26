@@ -10,6 +10,8 @@ import io.agentscope.examples.payroll.db.ChatAttachmentStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.H2ChatTurnStore;
 import io.agentscope.examples.payroll.db.H2LlmUsageStore;
+import io.agentscope.examples.payroll.db.JobLeaseStore;
+import io.agentscope.examples.payroll.jobs.JobLeases;
 import io.agentscope.examples.payroll.db.H2UserProfileStore;
 import io.agentscope.examples.payroll.db.H2PayrollRepository;
 import io.agentscope.examples.payroll.db.H2PayrollRunStore;
@@ -51,6 +53,7 @@ import io.agentscope.examples.payroll.service.DefaultActionExecutor;
 import io.agentscope.examples.payroll.service.DryRunEmailGateway;
 import io.agentscope.examples.payroll.service.ExcelExporter;
 import io.agentscope.examples.payroll.service.ExcelImportService;
+import io.agentscope.examples.payroll.service.ExecutorMetrics;
 import io.agentscope.examples.payroll.service.InMemoryTurnEventBus;
 import io.agentscope.examples.payroll.service.LlmUsageService;
 import io.agentscope.examples.payroll.service.LoginRateLimiter;
@@ -58,6 +61,9 @@ import io.agentscope.examples.payroll.service.PayrollChatFactory;
 import io.agentscope.examples.payroll.service.PayrollEngine;
 import io.agentscope.examples.payroll.service.PayrollRunService;
 import io.agentscope.examples.payroll.service.RedisTurnEventBus;
+import io.agentscope.examples.payroll.service.SandboxClient;
+import io.agentscope.examples.payroll.service.SandboxGateway;
+import io.agentscope.examples.payroll.service.SseFanoutSettings;
 import io.agentscope.examples.payroll.service.StaticRunRecorder;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.service.TokenBudgetService;
@@ -69,9 +75,15 @@ import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.skill.NacosRuntimeSettings;
 import io.agentscope.examples.payroll.skill.NacosSkillRegistry;
 import io.agentscope.examples.payroll.skill.SkillStore;
+import io.agentscope.examples.payroll.skill.SkillCreationOriginStore;
+import io.agentscope.examples.payroll.skill.SkillDataStateRefresher;
+import io.agentscope.examples.payroll.skill.SkillDataStateStore;
 import io.agentscope.examples.payroll.skill.SkillFileSettings;
 import io.agentscope.examples.payroll.skill.SkillImportService;
 import io.agentscope.examples.payroll.skill.SkillImportSettings;
+import io.agentscope.examples.payroll.skill.SkillTemplates;
+import io.agentscope.examples.payroll.skill.JdbcSkillCreationOriginStore;
+import io.agentscope.examples.payroll.skill.JdbcSkillDataStateStore;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.skill.BuiltInSkillRepository;
 import io.agentscope.examples.payroll.skill.CompositeSkillRepository;
@@ -138,6 +150,21 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.db.password}") String password,
             @Value("${payroll.db.pool-size:16}") int poolSize) {
         return PayrollDatabase.open(url, user, password, poolSize);
+    }
+
+    /** 启动/周期任务的数据库租约；多副本只允许持约节点执行。 */
+    @Bean
+    public JobLeaseStore jobLeaseStore(PayrollDatabase database) {
+        return new JobLeaseStore(database);
+    }
+
+    @Bean
+    public JobLeases jobLeases(
+            JobLeaseStore jobLeaseStore,
+            @Value("${payroll.jobs.lease-enabled:true}") boolean enabled,
+            @Value("${payroll.node-id:local}") String nodeId,
+            @Value("${payroll.jobs.lease-seconds:120}") int leaseSeconds) {
+        return new JobLeases(jobLeaseStore, enabled, nodeId, leaseSeconds);
     }
 
     /** redis profile 下注入 StringRedisTemplate；未启用 Redis 时为 null，限流/配额自动回退内存。 */
@@ -400,14 +427,17 @@ public class PayrollCoreConfiguration {
                 definitionsSource);
     }
 
-    /** M5.1 一次性导入：空表且显式开启时，把 Nacos 现有目录迁入数据库（幂等）。 */
+    /** M5.1 一次性导入：空表且显式开启时，把 Nacos 现有目录迁入数据库（幂等，多副本由租约互斥）。 */
     @Bean
     @ConditionalOnProperty(
             prefix = "payroll.definitions",
             name = "import-from-nacos",
             havingValue = "true")
-    public ApplicationRunner agentDefinitionImportRunner(NacosAgentRegistry agentRegistry) {
-        return args -> agentRegistry.importFromNacosIfEmpty();
+    public ApplicationRunner agentDefinitionImportRunner(
+            NacosAgentRegistry agentRegistry, JobLeases jobLeases) {
+        return args ->
+                jobLeases.runIfAcquired(
+                        "import.agents", lease -> agentRegistry.importFromNacosIfEmpty());
     }
 
     /** 流程定义与全局默认流程同样存储于 Nacos，管理台与对话运行时共享同一实例。 */
@@ -530,7 +560,7 @@ public class PayrollCoreConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "payroll.skills", name = "import-from-nacos", havingValue = "true")
     public ApplicationRunner skillNacosImportRunner(
-            SkillNacosImporter importer, SkillsSource skillsSource) {
+            SkillNacosImporter importer, SkillsSource skillsSource, JobLeases jobLeases) {
         return args -> {
             if (skillsSource != SkillsSource.DB) {
                 log.info(
@@ -538,7 +568,7 @@ public class PayrollCoreConfiguration {
                         skillsSource.value());
                 return;
             }
-            importer.importAllIfEmpty();
+            jobLeases.runIfAcquired("import.skills", lease -> importer.importAllIfEmpty());
         };
     }
 
@@ -549,6 +579,40 @@ public class PayrollCoreConfiguration {
                 skillStore,
                 SkillFileSettings.fromEnvironment(),
                 SkillImportSettings.fromEnvironment());
+    }
+
+    /** 技能数据工作区的最近观测状态：列表页要按状态过滤，正文与文件页也要显示它。 */
+    @Bean
+    public SkillDataStateStore skillDataStateStore(PayrollDatabase database) {
+        return new JdbcSkillDataStateStore(database);
+    }
+
+    /** 技能创建来源（模板/空白/导入）：只在「从模板新建」写，概览页读取。 */
+    @Bean
+    public SkillCreationOriginStore skillCreationOriginStore(PayrollDatabase database) {
+        return new JdbcSkillCreationOriginStore(database);
+    }
+
+    /** 新建技能的内置模板：从 classpath 读取，不落库、不可编辑。 */
+    @Bean
+    public SkillTemplates skillTemplates() {
+        return new SkillTemplates();
+    }
+
+    /** 沙箱网关：管理台数据页与刷新器共用同一个实例，未配置时是禁用态。 */
+    @Bean
+    public SandboxGateway skillSandboxGateway() {
+        return SandboxClient.fromEnvironment();
+    }
+
+    /**
+     * 数据状态后台刷新：初始化往往在页面关闭后才完成，只靠「打开时回写」会让列表停在初始化中。
+     * 沙箱未启用时 {@link SkillDataStateRefresher#start()} 直接返回，不起线程。
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public SkillDataStateRefresher skillDataStateRefresher(
+            SkillDataStateStore skillDataStateStore, SandboxGateway skillSandboxGateway) {
+        return new SkillDataStateRefresher(skillDataStateStore, skillSandboxGateway);
     }
 
     @Bean(destroyMethod = "close")
@@ -615,6 +679,31 @@ public class PayrollCoreConfiguration {
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
+    /**
+     * 多库并行检索线程池：每个库一次召回，队列满直接拒绝，由调用方降级为空结果。
+     *
+     * <p>与入库（{@code kbIngestExecutor}）、历史记忆召回（{@code memoryRecallExecutor}）
+     * 职责不同，不能复用：入库是长任务，召回是短超时任务，混池会互相拖死。
+     */
+    @Bean(name = "kbSearchExecutor", destroyMethod = "shutdown")
+    public ExecutorService kbSearchExecutor(
+            @Value("${payroll.kb.search.threads:8}") int threads,
+            @Value("${payroll.kb.search.queue-capacity:64}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
+        ThreadPoolExecutor executor =
+                new ThreadPoolExecutor(
+                        poolSize,
+                        poolSize,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(capacity),
+                        payrollThreadFactory("payroll-kb-search"),
+                        new ThreadPoolExecutor.AbortPolicy());
+        ExecutorMetrics.bind("kbSearch", executor);
+        return executor;
+    }
+
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
@@ -668,10 +757,11 @@ public class PayrollCoreConfiguration {
         };
     }
 
-    /** 抽取凭证随 chat_turns 同周期清理；只有 web/all 节点执行，runtime 不重复扫库。 */
+    /** 抽取凭证随 chat_turns 同周期清理；只有 web/all 节点执行，runtime 不重复扫库，多副本由租约互斥。 */
     @Bean(destroyMethod = "close")
     public UserProfileMaintenance userProfileMaintenance(
             UserProfileStore userProfileStore,
+            JobLeases jobLeases,
             @Value("${payroll.memory.profile.enabled:false}") boolean enabled,
             @Value("${payroll.chat.turn-retention-days:90}") int retentionDays,
             @Value("${payroll.chat.turn-cleanup-interval-minutes:360}") int intervalMinutes,
@@ -680,7 +770,8 @@ public class PayrollCoreConfiguration {
                 userProfileStore,
                 retentionDays,
                 intervalMinutes,
-                enabled && !"runtime".equals(nodeRole));
+                enabled && !"runtime".equals(nodeRole),
+                jobLeases);
     }
 
     /** 自助接口服务：写操作按用户失效注入缓存，审计只落值哈希。 */
@@ -853,6 +944,8 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.chat.turn-cleanup-interval-minutes:360}")
                     int turnCleanupIntervalMinutes,
             @Value("${payroll.chat.event-poller-threads:4}") int eventPollerThreads,
+            SseFanoutSettings sseFanoutSettings,
+            @Value("${payroll.chat.evict-interval-seconds:5}") int evictIntervalSeconds,
             @Value("${payroll.node-role:all}") String nodeRole) {
         return new ChatSessionManager(
                 chatStore,
@@ -874,7 +967,9 @@ public class PayrollCoreConfiguration {
                 // 清理只由 Web/all 节点执行，runtime 节点不重复扫库。
                 "runtime".equals(nodeRole) ? 0 : turnRetentionDays,
                 turnCleanupIntervalMinutes,
-                eventPollerThreads);
+                eventPollerThreads,
+                sseFanoutSettings,
+                evictIntervalSeconds);
     }
 
     @Bean
@@ -959,85 +1054,103 @@ public class PayrollCoreConfiguration {
                                         reason));
     }
 
-    /** 启动时按「凭证存在但连接不存在」清理孤儿并告警；Nacos 未启用时跳过，避免误删。 */
+    /** 启动时按「凭证存在但连接不存在」清理孤儿并告警；Nacos 未启用时跳过，多副本由租约互斥。 */
     @Bean
     public ApplicationRunner modelCredentialCleanupRunner(
-            ModelConnectionRegistry registry, ModelCredentialService credentials) {
+            ModelConnectionRegistry registry,
+            ModelCredentialService credentials,
+            JobLeases jobLeases) {
         return args -> {
             if (!registry.writable()) {
                 return;
             }
-            try {
-                Set<String> valid = new LinkedHashSet<>();
-                registry.connections().stream()
-                        .filter(connection -> !connection.envDerived())
-                        .map(connection -> connection.id())
-                        .forEach(valid::add);
-                int removed = credentials.cleanupOrphans(valid);
-                if (removed > 0) {
-                    log.info("[Model] 启动时清理孤儿模型凭证 {} 条", removed);
-                }
-            } catch (RuntimeException e) {
-                log.warn("[Model] 清理孤儿模型凭证失败：{}", e.getMessage());
-            }
+            jobLeases.runIfAcquired(
+                    "cleanup.model-credentials",
+                    lease -> {
+                        try {
+                            Set<String> valid = new LinkedHashSet<>();
+                            registry.connections().stream()
+                                    .filter(connection -> !connection.envDerived())
+                                    .map(connection -> connection.id())
+                                    .forEach(valid::add);
+                            int removed = credentials.cleanupOrphans(valid);
+                            if (removed > 0) {
+                                log.info("[Model] 启动时清理孤儿模型凭证 {} 条", removed);
+                            }
+                        } catch (RuntimeException e) {
+                            log.warn("[Model] 清理孤儿模型凭证失败：{}", e.getMessage());
+                        }
+                    });
         };
     }
 
-    /** 启动时清理超过保留期的审计日志，避免数据库无限增长。 */
+    /** 启动时清理超过保留期的审计日志，避免数据库无限增长；多副本由租约互斥。 */
     @Bean
-    public ApplicationRunner auditRetentionRunner(AuditService auditService) {
-        return args -> {
-            try {
-                int removed = auditService.purgeExpired();
-                if (removed > 0) {
-                    log.info(
-                            "[审计] 清理过期日志 {} 条（保留 {} 天）",
-                            removed,
-                            auditService.retentionDays());
-                }
-            } catch (RuntimeException e) {
-                log.warn("[审计] 清理过期日志失败：{}", e.getMessage());
-            }
-        };
+    public ApplicationRunner auditRetentionRunner(AuditService auditService, JobLeases jobLeases) {
+        return args ->
+                jobLeases.runIfAcquired(
+                        "retention.audit",
+                        lease -> {
+                            try {
+                                int removed = auditService.purgeExpired();
+                                if (removed > 0) {
+                                    log.info(
+                                            "[审计] 清理过期日志 {} 条（保留 {} 天）",
+                                            removed,
+                                            auditService.retentionDays());
+                                }
+                            } catch (RuntimeException e) {
+                                log.warn("[审计] 清理过期日志失败：{}", e.getMessage());
+                            }
+                        });
     }
 
     /** 启动时清理孤儿与失联轮次；运行期由会话管理器的 60s 扫描继续兜底。 */
     @Bean
     public ApplicationRunner turnRecoveryRunner(
             ChatSessionManager chatSessionManager,
+            JobLeases jobLeases,
             @Value("${payroll.chat.turn-heartbeat-seconds:10}") int heartbeatSeconds) {
-        return args -> {
-            try {
-                int expired =
-                        chatSessionManager.expireStaleTurns(
-                                Duration.ofSeconds(Math.max(30L, heartbeatSeconds * 3L)),
-                                "节点重启后清理失联轮次");
-                if (expired > 0) {
-                    log.info("[轮次] 启动时标记失联轮次 {} 条", expired);
-                }
-            } catch (RuntimeException e) {
-                log.warn("[轮次] 清理失联轮次失败：{}", e.getMessage());
-            }
-        };
+        return args ->
+                jobLeases.runIfAcquired(
+                        "recovery.turns",
+                        lease -> {
+                            try {
+                                int expired =
+                                        chatSessionManager.expireStaleTurns(
+                                                Duration.ofSeconds(
+                                                        Math.max(30L, heartbeatSeconds * 3L)),
+                                                "节点重启后清理失联轮次");
+                                if (expired > 0) {
+                                    log.info("[轮次] 启动时标记失联轮次 {} 条", expired);
+                                }
+                            } catch (RuntimeException e) {
+                                log.warn("[轮次] 清理失联轮次失败：{}", e.getMessage());
+                            }
+                        });
     }
 
     /** 启动时软归档超过保留期的团队运行；节点与 trace 保留，供审计按 run_id 追溯。 */
     @Bean
     public ApplicationRunner teamRetentionRunner(
-            H2AgentTeamStore teamStore, TeamSettings teamSettings) {
-        return args -> {
-            try {
-                int archived = teamStore.archiveExpired(teamSettings.retentionDays());
-                if (archived > 0) {
-                    log.info(
-                            "[动态团队] 归档过期运行 {} 条（保留 {} 天）",
-                            archived,
-                            teamSettings.retentionDays());
-                }
-            } catch (RuntimeException e) {
-                log.warn("[动态团队] 归档过期运行失败：{}", e.getMessage());
-            }
-        };
+            H2AgentTeamStore teamStore, TeamSettings teamSettings, JobLeases jobLeases) {
+        return args ->
+                jobLeases.runIfAcquired(
+                        "retention.team",
+                        lease -> {
+                            try {
+                                int archived =
+                                        teamStore.archiveExpired(teamSettings.retentionDays());
+                                if (archived > 0) {
+                                    log.info(
+                                            "[动态团队] 归档过期运行 {} 条（保留 {} 天）",
+                                            archived,
+                                            teamSettings.retentionDays());
+                                }
+                            } catch (RuntimeException e) {
+                                log.warn("[动态团队] 归档过期运行失败：{}", e.getMessage());
+                            }
+                        });
     }
 
     @Bean
@@ -1057,14 +1170,17 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.chat.stream-queue-capacity:32}") int queueCapacity) {
         int poolSize = Math.max(1, threads);
         int capacity = Math.max(1, queueCapacity);
-        return new ThreadPoolExecutor(
-                poolSize,
-                poolSize,
-                0L,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(capacity),
-                payrollThreadFactory("payroll-chat-stream"),
-                new ThreadPoolExecutor.AbortPolicy());
+        ThreadPoolExecutor executor =
+                new ThreadPoolExecutor(
+                        poolSize,
+                        poolSize,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(capacity),
+                        payrollThreadFactory("payroll-chat-stream"),
+                        new ThreadPoolExecutor.AbortPolicy());
+        ExecutorMetrics.bind("chat", executor);
+        return executor;
     }
 
     private static ThreadFactory payrollThreadFactory(String name) {
@@ -1086,13 +1202,79 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.chat.sse-tail-queue-capacity:64}") int queueCapacity) {
         int poolSize = Math.max(1, threads);
         int capacity = Math.max(1, queueCapacity);
+        ThreadPoolExecutor executor =
+                new ThreadPoolExecutor(
+                        poolSize,
+                        poolSize,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(capacity),
+                        payrollThreadFactory("payroll-sse-tail"),
+                        new ThreadPoolExecutor.AbortPolicy());
+        ExecutorMetrics.bind("tail", executor);
+        return executor;
+    }
+
+    /**
+     * SSE 写线程池：推送模式每条订阅串行排空，慢客户端不能占住 Tomcat 线程。
+     *
+     * <p>队列满直接拒绝；订阅侧把拒绝降级为 gap 并关闭通道，不重试。
+     */
+    @Bean(name = "sseWriterExecutor", destroyMethod = "shutdown")
+    public ExecutorService sseWriterExecutor(
+            @Value("${payroll.chat.sse.writer-threads:16}") int threads,
+            @Value("${payroll.chat.sse.writer-queue:4096}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
         return new ThreadPoolExecutor(
                 poolSize,
                 poolSize,
                 0L,
                 TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(capacity),
-                payrollThreadFactory("payroll-sse-tail"),
+                payrollThreadFactory("payroll-sse-writer"),
                 new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    /** 推送模式的订阅参数；写池与心跳/空闲/看门狗节拍集中在一处配置。 */
+    @Bean
+    public SseFanoutSettings sseFanoutSettings(
+            @Qualifier("sseWriterExecutor") Executor sseWriterExecutor,
+            @Value("${payroll.chat.sse.ping-seconds:15}") long pingSeconds,
+            @Value("${payroll.chat.sse.idle-check-ms:10000}") long idleCheckMillis,
+            @Value("${payroll.chat.sse.write-timeout-ms:5000}") long writeTimeoutMillis,
+            @Value("${payroll.chat.sse.watchdog-tick-ms:1000}") long watchdogTickMillis,
+            @Value("${payroll.chat.sse.subscriber-buffer:512}") int subscriberBuffer) {
+        return new SseFanoutSettings(
+                sseWriterExecutor,
+                Math.max(1_000L, pingSeconds * 1_000L),
+                Math.max(1_000L, idleCheckMillis),
+                Math.max(1_000L, writeTimeoutMillis),
+                Math.max(100L, watchdogTickMillis),
+                subscriberBuffer);
+    }
+
+    /**
+     * runtime 内部轮次执行池：与 Web 的对话执行隔离，避免同步接口排队挤占 SSE 提交。
+     *
+     * <p>队列满返回 429，由 runtime 内部接口回传 busy，失败语义与 Web 端一致。
+     */
+    @Bean(name = "runtimeTurnExecutor", destroyMethod = "shutdown")
+    public ExecutorService runtimeTurnExecutor(
+            @Value("${payroll.runtime.turn-threads:8}") int threads,
+            @Value("${payroll.runtime.turn-queue-capacity:64}") int queueCapacity) {
+        int poolSize = Math.max(1, threads);
+        int capacity = Math.max(1, queueCapacity);
+        ThreadPoolExecutor executor =
+                new ThreadPoolExecutor(
+                        poolSize,
+                        poolSize,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(capacity),
+                        payrollThreadFactory("payroll-runtime-turn"),
+                        new ThreadPoolExecutor.AbortPolicy());
+        ExecutorMetrics.bind("runtime", executor);
+        return executor;
     }
 }

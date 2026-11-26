@@ -91,6 +91,21 @@ public class KbDocumentStore {
 
     public List<Document> findBySeries(
             long seriesId, Long directoryId, DocStatus status, String keyword) {
+        return findBySeries(seriesId, directoryId, status, keyword, null, null, Integer.MAX_VALUE);
+    }
+
+    /**
+     * 游标分页：与 {@code ORDER BY updated_at DESC, document_id DESC} 同序，
+     * 游标取上一页最后一条的 {@code (updated_at, document_id)}，避免翻页重复或漏项。
+     */
+    public List<Document> findBySeries(
+            long seriesId,
+            Long directoryId,
+            DocStatus status,
+            String keyword,
+            Instant cursorUpdatedAt,
+            Long cursorDocumentId,
+            int limit) {
         StringBuilder sql = new StringBuilder(SELECT).append(" WHERE series_id = ? AND deleted_at IS NULL");
         List<Object> params = new ArrayList<>();
         params.add(seriesId);
@@ -106,7 +121,14 @@ public class KbDocumentStore {
             sql.append(" AND LOWER(name) LIKE ?");
             params.add("%" + keyword.trim().toLowerCase(java.util.Locale.ROOT) + "%");
         }
-        sql.append(" ORDER BY updated_at DESC, document_id DESC");
+        if (cursorUpdatedAt != null && cursorDocumentId != null) {
+            sql.append(" AND (updated_at < ? OR (updated_at = ? AND document_id < ?))");
+            params.add(Timestamp.from(cursorUpdatedAt));
+            params.add(Timestamp.from(cursorUpdatedAt));
+            params.add(cursorDocumentId);
+        }
+        sql.append(" ORDER BY updated_at DESC, document_id DESC LIMIT ?");
+        params.add(Math.max(1, limit));
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql.toString())) {
             for (int i = 0; i < params.size(); i++) {

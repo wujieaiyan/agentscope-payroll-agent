@@ -42,6 +42,8 @@ public class KbRetrievalService {
     private static final int MAX_PARENT_CONTENT = 1200;
     /** 主题词在语料中至少出现这么多次才视为“收录”，避免书单页/命令列表里的一次顺带提及。 */
     private static final int MIN_TOPIC_MENTIONS = 3;
+    /** ES 关键词一次预取的样本下限：足够主题门禁统计提及次数，BM25 路由再按召回上限截断。 */
+    private static final int MIN_KEYWORD_GATE_SIZE = 50;
     /** 仅用于并行的非嵌入召回阶段；嵌入本身在进入并行前已完成。 */
     private static final ExecutorService RECALL_POOL =
             Executors.newFixedThreadPool(
@@ -112,6 +114,13 @@ public class KbRetrievalService {
 
         static RouteHits local(List<RouteHit> hits) {
             return new RouteHits(hits, false, false);
+        }
+    }
+
+    /** ES 关键词命中（原始相关度）与是否降级，供主题门禁与 BM25-ES 路由共用一次请求。 */
+    private record KeywordHits(List<KbElasticsearchService.SearchHit> hits, boolean degraded) {
+        static KeywordHits none() {
+            return new KeywordHits(List.of(), false);
         }
     }
 
@@ -255,11 +264,17 @@ public class KbRetrievalService {
                 diagnostics);
     }
 
-    /** 检索候选只取元数据并按上限截断，向量在评分阶段再按需批量回取。 */
-    private List<Chunk> loadCandidates(long seriesId, Map<Long, Document> readyDocuments) {
+    /**
+     * 检索候选只取元数据并按上限截断；ES BM25 可用时只取键列（无 content/vector），正文后续按命中回表。
+     */
+    private List<Chunk> loadCandidates(
+            long seriesId, Map<Long, Document> readyDocuments, boolean withContent) {
+        List<Chunk> loaded =
+                withContent
+                        ? chunkStore.findActiveMetaBySeries(seriesId, settings.maxCandidates())
+                        : chunkStore.findActiveKeysBySeries(seriesId, settings.maxCandidates());
         List<Chunk> candidates = new ArrayList<>();
-        for (Chunk chunk :
-                chunkStore.findActiveMetaBySeries(seriesId, settings.maxCandidates())) {
+        for (Chunk chunk : loaded) {
             if (valid(chunk, readyDocuments)) {
                 candidates.add(chunk);
             }
@@ -294,7 +309,7 @@ public class KbRetrievalService {
             int recallLimit,
             Map<String, List<String>> tokenCache) {
         String engine = "LOCAL";
-        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments);
+        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments, true);
         List<String> topics = LexicalTokens.asciiTerms(query);
         if (!topics.isEmpty()) {
             if (!mentionsAnyTopic(topics, candidates, readyDocuments)) {
@@ -336,33 +351,66 @@ public class KbRetrievalService {
             double threshold,
             int recallLimit,
             Map<String, List<String>> tokenCache) {
-        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments);
         List<Route> routes = new ArrayList<>(settings.recallRoutes());
         if (!hybrid) {
             routes.removeIf(route -> route != Route.VECTOR);
         }
-        if (candidates.isEmpty() || routes.isEmpty()) {
-            Map<String, Object> emptyDiagnostics = diagnostics(true, 0, 0, Map.of());
-            return new FusionOutcome(List.of(), "LOCAL", emptyDiagnostics);
+        if (routes.isEmpty()) {
+            return new FusionOutcome(List.of(), "LOCAL", diagnostics(true, 0, 0, Map.of()));
         }
-        // 问题点名了具体主题（如 Kafka）但库内语料完全没有该词时，任何命中都只是字面噪声。
-        List<String> topics = LexicalTokens.asciiTerms(query);
-        if (!topics.isEmpty() && !mentionsAnyTopic(topics, candidates, readyDocuments)) {
-            Map<String, Object> emptyDiagnostics = diagnostics(true, 0, 0, Map.of());
-            emptyDiagnostics.put("reason", "QUERY_TERM_NOT_IN_CORPUS");
-            emptyDiagnostics.put("topicTerms", topics);
-            log.info("[知识库] 检索主题不在库内：series={}，terms={}", seriesId, topics);
-            return new FusionOutcome(List.of(), "LOCAL", emptyDiagnostics);
+        // ES BM25 可用时候选只取键列（无 content/vector），正文在召回后再按命中回表。
+        boolean esBm25 = settings.bm25EngineEs() && elasticsearchService.available();
+        List<Chunk> candidates = loadCandidates(seriesId, readyDocuments, !esBm25);
+        if (candidates.isEmpty()) {
+            return new FusionOutcome(List.of(), "LOCAL", diagnostics(true, 0, 0, Map.of()));
         }
-
         Map<Long, Chunk> byId = new HashMap<>();
         for (Chunk chunk : candidates) {
             byId.put(chunk.id(), chunk);
         }
+
+        List<String> topics = LexicalTokens.asciiTerms(query);
+        // ES 关键词命中供主题门禁与 BM25-ES 路由共用，一次请求避免重复打分。
+        KeywordHits keywords = KeywordHits.none();
+        if (esBm25 && (!topics.isEmpty() || routes.contains(Route.BM25))) {
+            keywords = fetchKeywordHits(seriesId, query, Math.max(recallLimit, MIN_KEYWORD_GATE_SIZE));
+        }
+        Map<Long, String> keywordContents = Map.of();
+        if (!keywords.hits().isEmpty()) {
+            List<Long> keywordIds =
+                    keywords.hits().stream()
+                            .map(KbElasticsearchService.SearchHit::chunkId)
+                            .distinct()
+                            .toList();
+            keywordContents = chunkStore.findContentByIds(keywordIds);
+        }
+
+        // 问题点名了具体主题（如 Kafka）但库内语料完全没有该词时，任何命中都只是字面噪声。
+        if (!topics.isEmpty()) {
+            boolean covered;
+            if (esBm25) {
+                // 键列候选无正文：标题/文档名直接判定；正文侧只看 ES 关键词命中的回表内容。
+                covered =
+                        mentionsTopicInTitles(topics, candidates, readyDocuments)
+                                || keywords.degraded()
+                                || mentionsTopicInContents(topics, keywordContents);
+            } else {
+                covered = mentionsAnyTopic(topics, candidates, readyDocuments);
+            }
+            if (!covered) {
+                Map<String, Object> emptyDiagnostics = diagnostics(true, 0, 0, Map.of());
+                emptyDiagnostics.put("reason", "QUERY_TERM_NOT_IN_CORPUS");
+                emptyDiagnostics.put("topicTerms", topics);
+                log.info("[知识库] 检索主题不在库内：series={}，terms={}", seriesId, topics);
+                return new FusionOutcome(List.of(), "LOCAL", emptyDiagnostics);
+            }
+        }
+
         Map<String, Object> routeStats = new LinkedHashMap<>();
         Map<Route, Long> routeTook = new ConcurrentHashMap<>();
         // 查询向量已在进入融合前算好，这里并行的是纯召回/评分阶段，不会并发压嵌入服务。
         boolean concurrent = routes.size() > 1;
+        KeywordHits keywordHits = keywords;
         CompletableFuture<RouteHits> vectorFuture =
                 routes.contains(Route.VECTOR)
                         ? submitRoute(
@@ -389,7 +437,15 @@ public class KbRetrievalService {
                                         timed(
                                                 Route.BM25,
                                                 routeTook,
-                                                () -> bm25Route(query, candidates, recallLimit, tokenCache)))
+                                                () ->
+                                                        bm25Route(
+                                                                query,
+                                                                candidates,
+                                                                byId,
+                                                                keywordHits,
+                                                                esBm25,
+                                                                recallLimit,
+                                                                tokenCache)))
                         : CompletableFuture.completedFuture(RouteHits.empty());
         CompletableFuture<RouteHits> titleFuture =
                 routes.contains(Route.TITLE_PATH)
@@ -426,13 +482,16 @@ public class KbRetrievalService {
         addRoute(accumulated, Route.BM25, bm25.hits(), settings.weight(Route.BM25));
         addRoute(accumulated, Route.TITLE_PATH, title.hits(), settings.weight(Route.TITLE_PATH));
 
+        // 正文只在融合命中集合上回表，禁止全候选装载内容。
+        Map<Long, String> contents = collectContents(accumulated, keywordContents);
+
         double maxScore = 0;
         for (AccumulatedHit hit : accumulated.values()) {
             maxScore = Math.max(maxScore, hit.fused);
         }
         List<ScoredHit> fused = new ArrayList<>(accumulated.size());
         for (AccumulatedHit hit : accumulated.values()) {
-            fused.add(hit.toScoredHit(maxScore));
+            fused.add(hit.toScoredHit(maxScore, contents));
         }
         fused.sort(Comparator.comparingDouble(ScoredHit::score).reversed());
         int fusedCount = fused.size();
@@ -443,11 +502,47 @@ public class KbRetrievalService {
         int removed = deduped.removed() + merged.removed();
         String engine = vector.elasticsearch() ? "ELASTICSEARCH" : "LOCAL";
         Map<String, Object> diagnostics = diagnostics(true, fusedCount, removed, routeStats);
+        diagnostics.put("bm25_engine", esBm25 ? "es" : "local");
+        if (esBm25) {
+            diagnostics.put("keysOnly", true);
+        }
         if (vector.degraded()) {
             diagnostics.put("vectorFallback", "LOCAL");
             diagnostics.put("esDegraded", true);
         }
+        if (bm25.degraded()) {
+            diagnostics.put("bm25Degraded", true);
+            diagnostics.put("esDegraded", true);
+        }
         return new FusionOutcome(capped, engine, diagnostics);
+    }
+
+    private KeywordHits fetchKeywordHits(long seriesId, String query, int size) {
+        try {
+            return new KeywordHits(elasticsearchService.keywordSearch(seriesId, query, size), false);
+        } catch (RuntimeException e) {
+            log.warn("[知识库] ES 关键词召回失败，BM25 路由本次降级：{}", e.getMessage());
+            return new KeywordHits(List.of(), true);
+        }
+    }
+
+    /** 为融合命中的分块批量回表正文；标题/键列候选本身不带正文。 */
+    private Map<Long, String> collectContents(
+            Map<Long, AccumulatedHit> accumulated, Map<Long, String> preloaded) {
+        Map<Long, String> contents = new HashMap<>(preloaded);
+        List<Long> missing = new ArrayList<>();
+        for (AccumulatedHit hit : accumulated.values()) {
+            Chunk chunk = hit.chunk;
+            if (chunk.content() != null) {
+                contents.put(chunk.id(), chunk.content());
+            } else if (!contents.containsKey(chunk.id())) {
+                missing.add(chunk.id());
+            }
+        }
+        if (!missing.isEmpty()) {
+            contents.putAll(chunkStore.findContentByIds(missing));
+        }
+        return contents;
     }
 
     private static CompletableFuture<RouteHits> submitRoute(
@@ -500,6 +595,43 @@ public class KbRetrievalService {
             from += term.length();
         }
         return count;
+    }
+
+    /** 键列候选只看标题路径/文档名是否点名主题，避免为门禁加载全部正文。 */
+    private static boolean mentionsTopicInTitles(
+            List<String> topics, List<Chunk> candidates, Map<Long, Document> documents) {
+        for (Chunk chunk : candidates) {
+            Document document = documents.get(chunk.documentId());
+            String title =
+                    ((chunk.titlePath() == null ? "" : chunk.titlePath())
+                                    + "\n"
+                                    + (document == null || document.name() == null
+                                            ? ""
+                                            : document.name()))
+                            .toLowerCase(Locale.ROOT);
+            for (String topic : topics) {
+                if (title.contains(topic)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 正文侧门禁：主题词在已回表命中中累计出现 ≥3 次才算收录。 */
+    private static boolean mentionsTopicInContents(
+            List<String> topics, Map<Long, String> contents) {
+        if (contents.isEmpty()) {
+            return false;
+        }
+        Map<String, Integer> mentions = new HashMap<>();
+        for (String content : contents.values()) {
+            String lower = (content == null ? "" : content).toLowerCase(Locale.ROOT);
+            for (String topic : topics) {
+                mentions.merge(topic, countOccurrences(lower, topic), Integer::sum);
+            }
+        }
+        return mentions.values().stream().anyMatch(count -> count >= MIN_TOPIC_MENTIONS);
     }
 
     private Map<String, Object> diagnostics(
@@ -575,6 +707,52 @@ public class KbRetrievalService {
     }
 
     private RouteHits bm25Route(
+            String query,
+            List<Chunk> candidates,
+            Map<Long, Chunk> byId,
+            KeywordHits keywords,
+            boolean esBm25,
+            int limit,
+            Map<String, List<String>> tokenCache) {
+        if (esBm25) {
+            return bm25RouteEs(keywords, byId, limit);
+        }
+        return bm25RouteLocal(query, candidates, limit, tokenCache);
+    }
+
+    /** ES 关键词召回复用 multi_match（content^2 + titlePath），按原始最高分归一到 [0,1]。 */
+    private RouteHits bm25RouteEs(KeywordHits keywords, Map<Long, Chunk> byId, int limit) {
+        if (keywords.degraded()) {
+            return new RouteHits(List.of(), false, true);
+        }
+        List<KbElasticsearchService.SearchHit> raw = keywords.hits();
+        if (raw.isEmpty()) {
+            return RouteHits.empty();
+        }
+        double max =
+                raw.stream()
+                        .mapToDouble(KbElasticsearchService.SearchHit::keywordScore)
+                        .max()
+                        .orElse(0);
+        if (max <= 0) {
+            return RouteHits.empty();
+        }
+        List<RouteHit> hits = new ArrayList<>();
+        for (KbElasticsearchService.SearchHit hit : raw) {
+            Chunk chunk = byId.get(hit.chunkId());
+            if (chunk == null) {
+                continue;
+            }
+            double score = hit.keywordScore() / max;
+            if (score >= settings.keywordThreshold()) {
+                hits.add(new RouteHit(chunk, score));
+            }
+        }
+        hits.sort(Comparator.comparingDouble(RouteHit::score).reversed());
+        return new RouteHits(limit(hits, limit), false, false);
+    }
+
+    private RouteHits bm25RouteLocal(
             String query, List<Chunk> candidates, int limit, Map<String, List<String>> tokenCache) {
         List<String> queryTokens = tokensCached(query, tokenCache);
         if (queryTokens.isEmpty()) {
@@ -1102,14 +1280,18 @@ public class KbRetrievalService {
             }
         }
 
-        private ScoredHit toScoredHit(double maxScore) {
+        private ScoredHit toScoredHit(double maxScore, Map<Long, String> contents) {
             double normalized = maxScore > 0 ? fused / maxScore : 0;
+            String content = contents.get(chunk.id());
+            if (content == null) {
+                content = chunk.content();
+            }
             return new ScoredHit(
                     chunk,
                     normalized,
                     vectorScore,
                     keywordScore,
-                    chunk.content(),
+                    content == null ? "" : content,
                     List.copyOf(ranks.keySet()),
                     ranks,
                     1);

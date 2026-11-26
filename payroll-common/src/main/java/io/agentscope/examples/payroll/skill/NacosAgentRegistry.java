@@ -562,10 +562,16 @@ public final class NacosAgentRegistry {
         try {
             List<AgentDefinition> agents = parseAgents(fetched.entry().content());
             int imported = definitionRepository.importIfEmpty(agents, "nacos-import");
+            int skipped = Math.max(0, agents.size() - imported);
             if (imported > 0) {
-                log.info("[Agent] 已从 Nacos 导入 {} 个智能体定义到数据库", imported);
+                log.info(
+                        "[Agent] 已从 Nacos 导入 {} 个智能体定义到数据库（跳过 {} 个）",
+                        imported,
+                        skipped);
             } else {
-                log.info("[Agent] agent_definition 表非空，跳过 Nacos 导入（幂等）");
+                log.info(
+                        "[Agent] agent_definition 表非空或已被其他节点导入，跳过 {} 个 Nacos 定义（幂等）",
+                        agents.size());
             }
             invalidateCache();
             return imported;

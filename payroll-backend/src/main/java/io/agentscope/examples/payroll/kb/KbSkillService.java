@@ -89,8 +89,11 @@ public class KbSkillService {
     private final KbRetrievalService retrievalService;
     private final KbEmbeddingService embeddingService;
     private final H2AdminRepository adminRepository;
+    private final java.util.concurrent.ExecutorService kbSearchExecutor;
 
     private final int autoMaxSeries;
+    private final boolean parallelSearch;
+    private final long perSeriesBudgetMs;
 
     public KbSkillService(
             KbSeriesService seriesService,
@@ -103,7 +106,11 @@ public class KbSkillService {
             KbRetrievalService retrievalService,
             KbEmbeddingService embeddingService,
             H2AdminRepository adminRepository,
-            @Value("${payroll.kb.chat.auto-max-series:5}") int autoMaxSeries) {
+            @org.springframework.beans.factory.annotation.Qualifier("kbSearchExecutor")
+                    java.util.concurrent.ExecutorService kbSearchExecutor,
+            @Value("${payroll.kb.chat.auto-max-series:5}") int autoMaxSeries,
+            @Value("${payroll.kb.search.parallel:true}") boolean parallelSearch,
+            @Value("${payroll.kb.search.budget-ms:1500}") long perSeriesBudgetMs) {
         this.seriesService = seriesService;
         this.configService = configService;
         this.directoryService = directoryService;
@@ -114,7 +121,10 @@ public class KbSkillService {
         this.retrievalService = retrievalService;
         this.embeddingService = embeddingService;
         this.adminRepository = adminRepository;
+        this.kbSearchExecutor = kbSearchExecutor;
         this.autoMaxSeries = Math.max(1, Math.min(autoMaxSeries, MAX_SEARCH_SERIES));
+        this.parallelSearch = parallelSearch;
+        this.perSeriesBudgetMs = Math.max(200L, perSeriesBudgetMs);
     }
 
     public static List<String> toolNames() {
@@ -226,6 +236,9 @@ public class KbSkillService {
      * 多库检索：未指定库时自动检索当前用户可读的全部 ACTIVE 库；指定时逐库校验 READER。
      * 单库独立召回后按分数合并、按 chunkId 去重，再截断到 topK。
      * 无权库只回数字 ID，不返回名称与正文；全部无权时直接拒绝。
+     *
+     * <p>各库在 {@code kbSearchExecutor} 中并行召回，单库预算默认 1.5s；超时、池满或单库异常
+     * 只把该库记为降级并返回空结果，问答轮次继续执行，不能因检索把对话打挂。
      */
     private Map<String, Object> search(AuthUser user, Map<String, Object> args) {
         long started = System.currentTimeMillis();
@@ -249,33 +262,58 @@ public class KbSkillService {
                                 intArg(args, "top_k", KbQueryTools.DEFAULT_TOP_K)));
         int perSeriesLimit = (int) Math.ceil((double) topK / seriesIds.size()) + 2;
 
+        // 一次成员关系 + 一次库查询完成权限与状态判定，替掉逐库 get。
+        Map<Long, KbModels.Series> readable = seriesService.getAll(seriesIds, user);
         List<Long> denied = new ArrayList<>();
-        List<LibraryResult> libraries = new ArrayList<>();
-        boolean readyDocument = false;
-        // 多库检索共用同一次查询嵌入，避免按库重复调用嵌入服务。
-        KbEmbeddingService.Embedding queryEmbedding = embeddingService.embedQuery(query);
+        List<KbModels.Series> targets = new ArrayList<>();
         for (Long seriesId : seriesIds) {
-            SeriesView series;
-            try {
-                series = seriesService.get(seriesId, user);
-            } catch (PayrollForbiddenException | PayrollException e) {
+            KbModels.Series series = readable.get(seriesId);
+            if (series == null) {
                 // 不存在与无权同样处理，避免借检索探测库是否存在。
                 denied.add(seriesId);
+            } else {
+                targets.add(series);
+            }
+        }
+        if (targets.isEmpty()) {
+            throw new PayrollForbiddenException("无权检索所选知识库");
+        }
+
+        // 多库检索共用同一次查询嵌入，避免按库重复调用嵌入服务。
+        KbEmbeddingService.Embedding queryEmbedding = embeddingService.embedQuery(query);
+        List<SeriesOutcome> outcomes =
+                parallelSearch
+                        ? searchParallel(targets, query, perSeriesLimit, user, queryEmbedding)
+                        : targets.stream()
+                                .map(
+                                        series ->
+                                                searchOne(
+                                                        series,
+                                                        query,
+                                                        perSeriesLimit,
+                                                        user,
+                                                        queryEmbedding))
+                                .toList();
+
+        boolean degraded = false;
+        boolean readyDocument = false;
+        List<LibraryResult> libraries = new ArrayList<>();
+        List<Long> degradedSeries = new ArrayList<>();
+        for (SeriesOutcome outcome : outcomes) {
+            if (outcome.denied()) {
+                denied.add(outcome.series().id());
                 continue;
             }
-            RetrievalResult result =
-                    retrievalService.search(
-                            seriesId,
-                            new RetrievalTestRequest(query, perSeriesLimit, null, false),
-                            user,
-                            queryEmbedding);
-            if (!"NONE".equals(engineOf(result))) {
+            if (outcome.degraded()) {
+                degraded = true;
+                degradedSeries.add(outcome.series().id());
+                continue;
+            }
+            if (!"NONE".equals(engineOf(outcome.result()))) {
                 readyDocument = true;
             }
-            libraries.add(new LibraryResult(seriesId, series.name(), result));
-        }
-        if (libraries.isEmpty() && !denied.isEmpty()) {
-            throw new PayrollForbiddenException("无权检索所选知识库");
+            libraries.add(
+                    new LibraryResult(outcome.series().id(), outcome.series().name(), outcome.result()));
         }
 
         List<RankedHit> merged = new ArrayList<>();
@@ -284,7 +322,12 @@ public class KbSkillService {
                 merged.add(new RankedHit(library.seriesId(), hit));
             }
         }
-        merged.sort(Comparator.comparingDouble((RankedHit hit) -> hit.hit().score()).reversed());
+        // 同分按 seriesId、chunkId 升序，合并结果与各库完成顺序无关，保证可回归对比。
+        merged.sort(
+                Comparator.comparingDouble((RankedHit hit) -> hit.hit().score())
+                        .reversed()
+                        .thenComparingLong(RankedHit::seriesId)
+                        .thenComparingLong(hit -> hit.hit().chunkId()));
         List<RankedHit> selected = new ArrayList<>();
         Set<Long> chunkIds = new LinkedHashSet<>();
         for (RankedHit hit : merged) {
@@ -346,6 +389,7 @@ public class KbSkillService {
         data.put("results", results);
         data.put("denied_series", denied);
         data.put("truncated", truncated);
+        data.put("degraded", degraded);
         if (results.isEmpty()) {
             boolean topicMissing =
                     libraries.stream()
@@ -358,17 +402,100 @@ public class KbSkillService {
                                                                     .get("reason")));
             data.put(
                     "reason",
-                    topicMissing
-                            ? "TOPIC_NOT_COVERED"
-                            : readyDocument ? "BELOW_THRESHOLD" : "NO_READY_DOCUMENT");
+                    degraded
+                            ? "RETRIEVAL_DEGRADED"
+                            : topicMissing
+                                    ? "TOPIC_NOT_COVERED"
+                                    : readyDocument ? "BELOW_THRESHOLD" : "NO_READY_DOCUMENT");
         }
         Map<String, Object> diagnostics = new LinkedHashMap<>();
         diagnostics.put("engine", engines(libraries));
         diagnostics.put("took_ms", System.currentTimeMillis() - started);
         diagnostics.put("scope", narrowed ? "SELECTED" : "ALL");
         diagnostics.put("series_count", seriesIds.size());
+        diagnostics.put("parallel", parallelSearch);
+        if (degraded) {
+            diagnostics.put("degraded_series", degradedSeries);
+        }
         data.put("diagnostics", diagnostics);
         return data;
+    }
+
+    /** 并行召回：各库独立 future，超时或异常只降级该库；池满则整轮降级为空结果。 */
+    private List<SeriesOutcome> searchParallel(
+            List<KbModels.Series> targets,
+            String query,
+            int perSeriesLimit,
+            AuthUser user,
+            KbEmbeddingService.Embedding queryEmbedding) {
+        List<java.util.concurrent.CompletableFuture<SeriesOutcome>> futures = new ArrayList<>();
+        try {
+            for (KbModels.Series series : targets) {
+                futures.add(
+                        java.util.concurrent.CompletableFuture.supplyAsync(
+                                        () ->
+                                                searchOne(
+                                                        series,
+                                                        query,
+                                                        perSeriesLimit,
+                                                        user,
+                                                        queryEmbedding),
+                                        kbSearchExecutor)
+                                .orTimeout(perSeriesBudgetMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                .exceptionally(
+                                        error -> {
+                                            log.warn(
+                                                    "[知识库] 单库检索超时或失败，按降级跳过：series={}，原因={}",
+                                                    series.id(),
+                                                    rootMessage(error));
+                                            return SeriesOutcome.degraded(series);
+                                        }));
+            }
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("[知识库] 检索池已满，本轮全部库降级：count={}", targets.size());
+            return targets.stream().map(SeriesOutcome::degraded).toList();
+        }
+        List<SeriesOutcome> outcomes = new ArrayList<>(futures.size());
+        for (java.util.concurrent.CompletableFuture<SeriesOutcome> future : futures) {
+            outcomes.add(future.join());
+        }
+        return outcomes;
+    }
+
+    private SeriesOutcome searchOne(
+            KbModels.Series series,
+            String query,
+            int perSeriesLimit,
+            AuthUser user,
+            KbEmbeddingService.Embedding queryEmbedding) {
+        try {
+            RetrievalResult result =
+                    retrievalService.search(
+                            series.id(),
+                            new RetrievalTestRequest(query, perSeriesLimit, null, false),
+                            user,
+                            queryEmbedding);
+            return SeriesOutcome.of(series, result);
+        } catch (PayrollForbiddenException e) {
+            return SeriesOutcome.denied(series);
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[知识库] 单库检索失败，按降级跳过：series={}，原因={}",
+                    series.id(),
+                    rootMessage(e));
+            return SeriesOutcome.degraded(series);
+        }
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        String message = current.getMessage();
+        return message == null || message.isBlank()
+                ? current.getClass().getSimpleName()
+                : message;
     }
 
     private static boolean hasRequestedSeries(Map<String, Object> args) {
@@ -438,6 +565,21 @@ public class KbSkillService {
     }
 
     private record LibraryResult(long seriesId, String seriesName, RetrievalResult result) {
+    }
+
+    private record SeriesOutcome(
+            KbModels.Series series, RetrievalResult result, boolean denied, boolean degraded) {
+        static SeriesOutcome of(KbModels.Series series, RetrievalResult result) {
+            return new SeriesOutcome(series, result, false, false);
+        }
+
+        static SeriesOutcome denied(KbModels.Series series) {
+            return new SeriesOutcome(series, null, true, false);
+        }
+
+        static SeriesOutcome degraded(KbModels.Series series) {
+            return new SeriesOutcome(series, null, false, true);
+        }
     }
 
     private record RankedHit(long seriesId, RetrievalHit hit) {

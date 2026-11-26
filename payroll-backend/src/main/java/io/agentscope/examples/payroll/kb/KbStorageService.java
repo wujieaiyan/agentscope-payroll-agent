@@ -1,6 +1,7 @@
 package io.agentscope.examples.payroll.kb;
 
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.kb.parse.KbParseFormats;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -44,7 +45,7 @@ public class KbStorageService {
     public StoredFile store(long seriesId, MultipartFile file) {
         String original = file.getOriginalFilename() == null ? "file" : file.getOriginalFilename();
         String ext = extension(original);
-        if (!KbParserService.SUPPORTED.contains(ext)) {
+        if (!KbParseFormats.SUPPORTED.contains(ext)) {
             throw new PayrollException("暂不支持的文档类型：" + (ext.isEmpty() ? original : ext));
         }
         String key = seriesId + "/" + UUID.randomUUID().toString().replace("-", "") + "." + ext;

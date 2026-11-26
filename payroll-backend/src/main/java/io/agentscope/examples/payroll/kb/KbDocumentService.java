@@ -4,7 +4,6 @@ import io.agentscope.examples.payroll.db.H2AdminRepository;
 import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbDtos.BatchDocumentRequest;
 import io.agentscope.examples.payroll.kb.KbDtos.BatchDocumentResult;
 import io.agentscope.examples.payroll.kb.KbDtos.ChunkView;
@@ -15,6 +14,9 @@ import io.agentscope.examples.payroll.kb.KbDtos.UpdateDocumentRequest;
 import io.agentscope.examples.payroll.kb.KbDtos.UploadResult;
 import io.agentscope.examples.payroll.kb.KbEnums.ChunkLevel;
 import io.agentscope.examples.payroll.kb.KbEnums.DocStatus;
+import io.agentscope.examples.payroll.kb.parse.KbParseFormats;
+import io.agentscope.examples.payroll.kb.parse.ParseConfig;
+import io.agentscope.examples.payroll.kb.parse.TypeParseConfig;
 import io.agentscope.examples.payroll.kb.KbEnums.TaskType;
 import io.agentscope.examples.payroll.kb.KbModels.Chunk;
 import io.agentscope.examples.payroll.kb.KbModels.ConfigVersion;
@@ -23,6 +25,7 @@ import io.agentscope.examples.payroll.kb.KbModels.Document;
 import io.agentscope.examples.payroll.kb.KbModels.Tag;
 import io.agentscope.examples.payroll.service.AuditService;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -69,7 +72,7 @@ public class KbDocumentService {
             KbPermissionService permissionService,
             H2AdminRepository adminRepository,
             AuditService auditService,
-            @Value("${payroll.kb.max-file-size:104857600}") long maxFileSize,
+            @Value("${payroll.kb.max-file-size:209715200}") long maxFileSize,
             @Value("${payroll.kb.max-batch-size:50}") int maxBatch) {
         this.documentStore = documentStore;
         this.chunkStore = chunkStore;
@@ -127,18 +130,22 @@ public class KbDocumentService {
                 }
                 if (file.getSize() > maxFileSize) {
                     failed++;
-                    messages.add(filename + "：超过单文件大小限制");
+                    messages.add(
+                            filename
+                                    + "：超过单文件 "
+                                    + (maxFileSize / 1024 / 1024)
+                                    + "MB 上限，请压缩或拆分后上传");
                     continue;
                 }
                 String ext = KbStorageService.extension(filename);
-                if (!KbParserService.SUPPORTED.contains(ext)) {
+                if (!KbParseFormats.SUPPORTED.contains(ext)) {
                     failed++;
                     messages.add(filename + "：不支持的文档类型");
                     continue;
                 }
                 String configType = toConfigType(ext);
                 if (!allowedTypes.contains(configType)
-                        || !parseConfig.perType.getOrDefault(configType, new KbConfigModels.TypeParseConfig()).enabled) {
+                        || !parseConfig.perType.getOrDefault(configType, new TypeParseConfig()).enabled) {
                     failed++;
                     messages.add(filename + "：当前知识库未启用 " + configType + " 解析");
                     continue;
@@ -209,6 +216,73 @@ public class KbDocumentService {
         return documents.stream()
                 .map(document -> view(document, directoryPaths, tags, uploaders))
                 .toList();
+    }
+
+    /** 文档列表的单页结果；{@code nextCursor} 为空表示已到最后一页。 */
+    public record DocumentPage(List<DocumentView> items, String nextCursor) {
+    }
+
+    /**
+     * 游标分页列表：返回 {@code limit + 1} 条判定是否还有下一页，
+     * 游标编码上一页最后一条的 {@code (updated_at, document_id)}。
+     */
+    public DocumentPage listPage(
+            long seriesId,
+            Long directoryId,
+            String status,
+            String keyword,
+            String cursor,
+            int limit,
+            AuthUser user) {
+        permissionService.requireRead(seriesId, user);
+        DocStatus statusFilter =
+                status == null || status.isBlank() ? null : DocStatus.parse(status, null);
+        int pageSize = Math.max(1, Math.min(200, limit));
+        Instant cursorUpdatedAt = null;
+        Long cursorDocumentId = null;
+        if (cursor != null && !cursor.isBlank()) {
+            String[] parts = cursor.split("\\|", 2);
+            if (parts.length != 2) {
+                throw new PayrollException("分页游标格式不正确");
+            }
+            try {
+                String[] timeParts = parts[0].split(":", 2);
+                long seconds = Long.parseLong(timeParts[0]);
+                long nanos = timeParts.length > 1 ? Long.parseLong(timeParts[1]) : 0L;
+                cursorUpdatedAt = Instant.ofEpochSecond(seconds, nanos);
+                cursorDocumentId = Long.parseLong(parts[1]);
+            } catch (RuntimeException e) {
+                throw new PayrollException("分页游标格式不正确");
+            }
+        }
+        List<Document> documents =
+                documentStore.findBySeries(
+                        seriesId,
+                        directoryId,
+                        statusFilter,
+                        keyword,
+                        cursorUpdatedAt,
+                        cursorDocumentId,
+                        pageSize + 1);
+        boolean hasMore = documents.size() > pageSize;
+        List<Document> page = hasMore ? documents.subList(0, pageSize) : documents;
+        Map<Long, String> directoryPaths = directoryPaths(seriesId);
+        Map<Long, List<Tag>> tags = tagStore.findByDocuments(page.stream().map(Document::id).toList());
+        Map<Long, String> uploaders = uploaderNames(page);
+        List<DocumentView> items =
+                page.stream()
+                        .map(document -> view(document, directoryPaths, tags, uploaders))
+                        .toList();
+        String nextCursor = null;
+        if (hasMore && !page.isEmpty()) {
+            Document last = page.get(page.size() - 1);
+            Instant updatedAt = last.updatedAt();
+            nextCursor =
+                    (updatedAt == null ? "0:0" : updatedAt.getEpochSecond() + ":" + updatedAt.getNano())
+                            + "|"
+                            + last.id();
+        }
+        return new DocumentPage(items, nextCursor);
     }
 
     public DocumentStatusSummary statusSummary(long seriesId, AuthUser user) {

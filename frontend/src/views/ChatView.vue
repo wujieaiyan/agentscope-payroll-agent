@@ -20,6 +20,9 @@ const routeBusy = ref(false);
 const editingId = ref(null);
 const editingTitle = ref('');
 const messageBox = ref(null);
+const hasOlder = ref(false);
+const loadingOlder = ref(false);
+const MESSAGE_PAGE_SIZE = 200;
 const gapNotice = ref('');
 const kbBound = ref([]);
 const kbMode = ref('ALL');
@@ -40,8 +43,8 @@ const attachmentPreview = ref(null);
 const questionDrafts = reactive({});
 /** 429 后的发送冷却：按服务端 retryAfterSeconds 倒计时，避免容量恢复前反复提交。 */
 const retryCooldown = ref(0);
-const ATTACHMENT_ACCEPT = '.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
-const ATTACHMENT_EXT = ['docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
+const ATTACHMENT_ACCEPT = '.pdf,.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff';
+const ATTACHMENT_EXT = ['pdf', 'docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tif', 'tiff'];
 const QUESTION_MAX = 2000;
 
 let controller = null;
@@ -238,7 +241,7 @@ async function addFiles(files) {
   for (const file of files) {
     const ext = attachmentExtOf(file.name);
     if (!ATTACHMENT_EXT.includes(ext)) {
-      toast(`暂不支持「${file.name}」，请上传 docx/xlsx 或图片`, 'warning');
+      toast(`暂不支持「${file.name}」，请上传 PDF/docx/xlsx 或图片`, 'warning');
       continue;
     }
     accepted.push(file);
@@ -557,6 +560,7 @@ function excerpt(text, limit = 80) {
 function onMessagesScroll() {
   const box = messageBox.value;
   if (!box) return;
+  if (box.scrollTop < 40 && hasOlder.value && !loadingOlder.value) loadOlderMessages();
   const top = box.getBoundingClientRect().top;
   let current = null;
   box.querySelectorAll('[data-question-id]').forEach((node) => {
@@ -685,14 +689,45 @@ async function loadSessions() {
 async function loadMessages(silent = false) {
   if (!activeId.value) return;
   try {
-    const list = (await api(`/api/chat/sessions/${activeId.value}/messages`)) || [];
+    const page = await api(
+      `/api/chat/sessions/${activeId.value}/messages?limit=${MESSAGE_PAGE_SIZE}`
+    );
+    const list = Array.isArray(page) ? page : page?.items || [];
     messages.value = list;
+    hasOlder.value = Array.isArray(page) ? false : Boolean(page?.has_more);
+    loadingOlder.value = false;
     loadFeedback(list);
     if (!silent) scrollBottom(true);
     await nextTick();
     onMessagesScroll();
   } catch (error) {
     if (!silent) toast(error.message, 'error');
+  }
+}
+
+/* 上滑到顶部时按 before_id 向前翻页，并用滚动高度差保持视口稳定。 */
+async function loadOlderMessages() {
+  if (!activeId.value || !hasOlder.value || loadingOlder.value || !messages.value.length) return;
+  loadingOlder.value = true;
+  const box = messageBox.value;
+  const previousHeight = box ? box.scrollHeight : 0;
+  const previousTop = box ? box.scrollTop : 0;
+  try {
+    const page = await api(
+      `/api/chat/sessions/${activeId.value}/messages?before_id=${messages.value[0].id}&limit=${MESSAGE_PAGE_SIZE}`
+    );
+    const items = Array.isArray(page) ? page : page?.items || [];
+    hasOlder.value = Array.isArray(page) ? false : Boolean(page?.has_more);
+    if (items.length) {
+      messages.value = [...items, ...messages.value];
+      loadFeedback(messages.value);
+    }
+    await nextTick();
+    if (box) box.scrollTop = box.scrollHeight - previousHeight + previousTop;
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    loadingOlder.value = false;
   }
 }
 
@@ -2859,14 +2894,14 @@ onBeforeUnmount(() => {
             type="button"
             class="attach-btn"
             :disabled="!activeId || attachmentBusy"
-            title="上传附件（docx/xlsx/图片）"
+            title="上传附件（PDF/docx/xlsx/图片，单文件 ≤20MB，单轮最多 5 个）"
             @click="pickAttachments"
           >＋</button>
           <textarea
             ref="composerInput"
             v-model="draft"
             rows="1"
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行；可上传 docx/xlsx/图片"
+            placeholder="输入问题，Enter 发送，Shift+Enter 换行；可上传 PDF/docx/xlsx/图片"
             @keydown="onKeydown"
             @paste="onComposerPaste"
           ></textarea>

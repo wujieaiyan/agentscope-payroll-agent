@@ -2,12 +2,14 @@ package io.agentscope.examples.payroll.service;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 轮次续流核心指标。默认写入全局 {@link Metrics#globalRegistry}：Spring Boot 会把
@@ -30,6 +32,13 @@ public final class TurnMetrics {
     public static final String SUBMIT_BUDGET_EXHAUSTED = "payroll.runtime.submit.budget.exhausted";
     public static final String EVENT_BUS_UNAVAILABLE = "payroll.chat.event.bus.unavailable";
     public static final String MODEL_FAILOVER = "payroll.model.failover";
+    public static final String MODEL_DURATION = "payroll.model.duration";
+    public static final String TURN_DURATION = "payroll.turn.duration";
+    public static final String SSE_CONNECTIONS = "payroll.sse.connections";
+    public static final String SSE_WRITE_REJECTED = "payroll.sse.write.rejected";
+    public static final String SSE_WRITE_TIMEOUT = "payroll.sse.write.timeout";
+    public static final String SSE_SUBSCRIPTION_GAP = "payroll.sse.subscription.gap";
+    public static final String SSE_HUB_POLL = "payroll.sse.hub.poll.queue";
 
     private static volatile MeterRegistry registry = Metrics.globalRegistry;
     private static volatile String deploymentMode = "single";
@@ -43,9 +52,17 @@ public final class TurnMetrics {
     private static volatile Counter leaseRenewFailed;
     private static volatile Counter submitBudgetExhausted;
     private static volatile Counter eventBusUnavailable;
+    private static volatile Counter sseWriteRejected;
+    private static volatile Counter sseWriteTimeout;
+    private static volatile Counter sseSubscriptionGap;
+    private static volatile Timer sseHubPoll;
     private static final Map<String, Counter> streamRejected = new ConcurrentHashMap<>();
     private static final Map<String, Counter> turnExpired = new ConcurrentHashMap<>();
     private static final Map<String, Counter> modelFailover = new ConcurrentHashMap<>();
+    private static final Map<String, Timer> modelDuration = new ConcurrentHashMap<>();
+    private static final Map<String, Timer> turnDuration = new ConcurrentHashMap<>();
+    private static final Map<String, AtomicInteger> sseGauges = new ConcurrentHashMap<>();
+    private static final AtomicInteger sseConnectionCount = new AtomicInteger();
 
     private TurnMetrics() {}
 
@@ -64,6 +81,14 @@ public final class TurnMetrics {
         eventBusUnavailable = null;
         turnExpired.clear();
         modelFailover.clear();
+        modelDuration.clear();
+        turnDuration.clear();
+        sseWriteRejected = null;
+        sseWriteTimeout = null;
+        sseSubscriptionGap = null;
+        sseHubPoll = null;
+        sseGauges.clear();
+        sseConnectionCount.set(0);
     }
 
     /** 启动时由装配层写入；必须在首个请求前调用。 */
@@ -231,6 +256,114 @@ public final class TurnMetrics {
         counter.increment();
     }
 
+    /** 写池拒绝：队列满时该订阅直接 gap，不重试。 */
+    public static void sseWriteRejected() {
+        Counter counter = sseWriteRejected;
+        if (counter == null) {
+            counter =
+                    Counter.builder(SSE_WRITE_REJECTED)
+                            .description("SSE 写池拒绝写入次数")
+                            .register(registry);
+            sseWriteRejected = counter;
+        }
+        counter.increment();
+    }
+
+    /** 写超时：watchdog 判定订阅停滞并摘除。 */
+    public static void sseWriteTimeout() {
+        Counter counter = sseWriteTimeout;
+        if (counter == null) {
+            counter =
+                    Counter.builder(SSE_WRITE_TIMEOUT)
+                            .description("SSE 写超时被摘除的订阅数")
+                            .register(registry);
+            sseWriteTimeout = counter;
+        }
+        counter.increment();
+    }
+
+    /** 订阅级缺口：缓冲裁剪、队列溢出或写池拒绝。 */
+    public static void sseSubscriptionGap() {
+        Counter counter = sseSubscriptionGap;
+        if (counter == null) {
+            counter =
+                    Counter.builder(SSE_SUBSCRIPTION_GAP)
+                            .description("SSE 订阅下发缺口次数")
+                            .register(registry);
+            sseSubscriptionGap = counter;
+        }
+        counter.increment();
+    }
+
+    /** poller 任务从提交到实际执行的排队耗时。 */
+    public static void sseHubPollQueue(long startedAtMillis) {
+        Timer timer = sseHubPoll;
+        if (timer == null) {
+            timer =
+                    Timer.builder(SSE_HUB_POLL)
+                            .description("SSE Hub 轮询排队耗时")
+                            .publishPercentileHistogram()
+                            .register(registry);
+            sseHubPoll = timer;
+        }
+        timer.record(Duration.ofMillis(Math.max(0L, System.currentTimeMillis() - startedAtMillis)));
+    }
+
+    /** 真实 SSE 连接建立；推送与阻塞两种模式都由 {@code ChatSse} 记账。 */
+    public static void sseConnectionOpened() {
+        sseGauge(
+                SSE_CONNECTIONS,
+                "SSE 在线连接数",
+                "connections",
+                sseConnectionCount.incrementAndGet());
+    }
+
+    public static void sseConnectionClosed() {
+        sseGauge(
+                SSE_CONNECTIONS,
+                "SSE 在线连接数",
+                "connections",
+                sseConnectionCount.updateAndGet(current -> Math.max(0, current - 1)));
+    }
+
+    public static void sseHubs(int value) {
+        sseGauge("payroll.sse.hubs", "SSE Hub 数", "hubs", value);
+    }
+
+    public static void sseSubscribers(int value) {
+        sseGauge("payroll.sse.subscribers", "SSE 活跃订阅数", "subscribers", value);
+    }
+
+    public static void sseWriteQueue(int value) {
+        sseGauge("payroll.sse.write.queue", "SSE 写池排队任务数", "write.queue", value);
+    }
+
+    public static void sseWriteInflight(int value) {
+        sseGauge("payroll.sse.write.inflight", "SSE 在途写数", "write.inflight", value);
+    }
+
+    public static void sseStalled(int value) {
+        sseGauge("payroll.sse.write.stalled", "SSE 停滞订阅数", "write.stalled", value);
+    }
+
+    public static void sseSlowClients(int value) {
+        sseGauge("payroll.sse.slow.clients", "SSE 慢客户端数", "slow.clients", value);
+    }
+
+    private static void sseGauge(String name, String description, String key, int value) {
+        AtomicInteger holder =
+                sseGauges.computeIfAbsent(
+                        key,
+                        ignored -> {
+                            AtomicInteger meter = new AtomicInteger();
+                            Gauge.builder(name, meter, AtomicInteger::get)
+                                    .description(description)
+                                    .register(registry);
+                            return meter;
+                        });
+        holder.set(Math.max(0, value));
+    }
+
     /** 首包连接失败后切换到同平面备用模型的次数；plane 区分控制面/轻量面/编码面。 */
     public static void modelFailover(String plane) {
         String tag = plane == null || plane.isBlank() ? "unknown" : plane.trim();
@@ -242,6 +375,41 @@ public final class TurnMetrics {
                                         .tag("plane", key)
                                         .register(registry));
         counter.increment();
+    }
+
+    /** 单次底层模型调用耗时；outcome 区分 success / error，plane 区分控制面/轻量面/编码面。 */
+    public static void modelCallDuration(String plane, String model, String outcome, long millis) {
+        String planeTag = plane == null || plane.isBlank() ? "unknown" : plane.trim();
+        String modelTag = model == null || model.isBlank() ? "unknown" : model.trim();
+        String outcomeTag = outcome == null || outcome.isBlank() ? "unknown" : outcome.trim();
+        modelDuration.computeIfAbsent(
+                        planeTag + "|" + modelTag + "|" + outcomeTag,
+                        key ->
+                                Timer.builder(MODEL_DURATION)
+                                        .description("单次模型调用耗时")
+                                        .publishPercentileHistogram()
+                                        .tag("plane", planeTag)
+                                        .tag("model", modelTag)
+                                        .tag("outcome", outcomeTag)
+                                        .register(registry))
+                .record(Duration.ofMillis(Math.max(0L, millis)));
+    }
+
+    /** 一轮对话的实际执行耗时（runtime 执行段，排队等待不计）；outcome 区分 success/failed/released。 */
+    public static void turnDuration(String path, String outcome, long millis) {
+        String pathTag = path == null || path.isBlank() ? "unknown" : path.trim();
+        String outcomeTag = outcome == null || outcome.isBlank() ? "unknown" : outcome.trim();
+        turnDuration.computeIfAbsent(
+                        pathTag + "|" + outcomeTag,
+                        key ->
+                                Timer.builder(TURN_DURATION)
+                                        .description("单轮对话执行耗时")
+                                        .publishPercentileHistogram()
+                                        .tag("deployment.mode", deploymentMode)
+                                        .tag("path", pathTag)
+                                        .tag("outcome", outcomeTag)
+                                        .register(registry))
+                .record(Duration.ofMillis(Math.max(0L, millis)));
     }
 
     private static Counter.Builder counter(String name, String description) {

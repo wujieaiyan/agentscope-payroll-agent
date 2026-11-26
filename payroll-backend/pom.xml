@@ -20,6 +20,12 @@
             <artifactId>payroll-common</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- inline 解析模式复用 parser 模块的解析器实现；remote 模式不会加载这些 Bean。 -->
+        <dependency>
+            <groupId>io.agentscope.examples</groupId>
+            <artifactId>payroll-parser</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

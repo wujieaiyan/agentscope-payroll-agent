@@ -5,8 +5,10 @@ import io.agentscope.examples.payroll.domain.ChatAttachment;
 import io.agentscope.examples.payroll.domain.ChatAttachmentRef;
 import io.agentscope.examples.payroll.domain.ExtractionMeta;
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.kb.KbParserService;
-import io.agentscope.examples.payroll.kb.ocr.OcrFailure;
+import io.agentscope.examples.payroll.kb.parse.ChatExtraction;
+import io.agentscope.examples.payroll.kb.parse.KbParseFormats;
+import io.agentscope.examples.payroll.kb.parse.KbParserPort;
+import io.agentscope.examples.payroll.kb.parse.OcrFailure;
 import io.agentscope.examples.payroll.service.AttachmentContext;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
@@ -27,8 +29,6 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -43,7 +43,7 @@ public class ChatAttachmentService {
 
     private final ChatAttachmentStore store;
     private final ChatSessionManager sessions;
-    private final KbParserService parser;
+    private final KbParserPort parser;
     private final AttachmentParseQueue parseQueue;
     private final AuditService audit;
     private final Path root;
@@ -53,7 +53,7 @@ public class ChatAttachmentService {
     public ChatAttachmentService(
             ChatAttachmentStore store,
             ChatSessionManager sessions,
-            KbParserService parser,
+            KbParserPort parser,
             AttachmentParseQueue parseQueue,
             AuditService audit,
             @Value("${payroll.chat.attachment.dir:./data/chat-uploads}") String dir,
@@ -227,9 +227,9 @@ public class ChatAttachmentService {
     private ChatAttachmentRef uploadOne(long userId, long sessionId, MultipartFile file) {
         String name = sanitizeName(file.getOriginalFilename());
         String ext = extensionOf(name);
-        if (!KbParserService.CHAT_SUPPORTED.contains(ext)) {
+        if (!KbParseFormats.CHAT_SUPPORTED.contains(ext)) {
             throw new PayrollException(
-                    "暂不支持「" + (ext.isEmpty() ? name : ext) + "」格式，请上传 docx/xlsx 或图片");
+                    "暂不支持「" + (ext.isEmpty() ? name : ext) + "」格式，请上传 PDF/docx/xlsx 或图片");
         }
         if (file.getSize() > maxFileBytes) {
             throw new PayrollException(
@@ -306,8 +306,8 @@ public class ChatAttachmentService {
         Path original = directory.resolve("original." + attachment.ext());
         try {
             store.updateProgress(sessionId, attachmentId, 10);
-            KbParserService.ChatExtraction extraction =
-                    parser.parseChatAttachment(original, attachment.ext());
+            ChatExtraction extraction =
+                    parser.parseChat(original, attachment.ext());
             String text = normalizeText(extraction.text());
             Files.writeString(directory.resolve("text.txt"), text, StandardCharsets.UTF_8);
             store.markReady(
@@ -349,8 +349,7 @@ public class ChatAttachmentService {
         }
     }
 
-    /** 启动恢复：进程重启或崩溃后把遗留的 PARSING 附件重新入队。 */
-    @EventListener(ApplicationReadyEvent.class)
+    /** 恢复巡检：进程重启或崩溃后把遗留的 PARSING 附件重新入队（由 KB 恢复巡检在租约内调用）。 */
     public void recoverParsingAttachments() {
         List<ChatAttachment> parsing =
                 store.findByStatus(ChatAttachment.STATUS_PARSING, 500);
@@ -459,6 +458,12 @@ public class ChatAttachmentService {
         }
         boolean valid =
                 switch (ext) {
+                    case "pdf" ->
+                            read >= 4
+                                    && head[0] == '%'
+                                    && head[1] == 'P'
+                                    && head[2] == 'D'
+                                    && head[3] == 'F';
                     case "docx", "xlsx" -> read >= 2 && head[0] == 'P' && head[1] == 'K';
                     case "xls" ->
                             read >= 4

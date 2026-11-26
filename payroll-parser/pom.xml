@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.agentscope.examples</groupId>
+        <artifactId>agentscope-payroll</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>payroll-parser</artifactId>
+    <name>Payroll Parser</name>
+    <description>独立解析进程：PDF/OCR 重活与 Web 隔离，internal HMAC 接口 + 共享卷产物</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.agentscope.examples</groupId>
+            <artifactId>payroll-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>payroll-parser</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <classifier>exec</classifier>
+                    <mainClass>io.agentscope.payroll.parser.ParserApplication</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- -Prapidocr：引入 PP-OCRv4 原生识别（约 33MB Windows x64 原生库与模型）。 -->
+        <profile>
+            <id>rapidocr</id>
+            <dependencies>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr</artifactId>
+                    <version>0.0.7</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr-onnx-windows-x86_64</artifactId>
+                    <version>1.2.2</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.github.mymonstercat</groupId>
+                    <artifactId>rapidocr-onnx-models</artifactId>
+                    <version>1.2.2</version>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+</project>

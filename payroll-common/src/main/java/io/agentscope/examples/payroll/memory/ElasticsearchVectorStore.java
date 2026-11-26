@@ -8,6 +8,7 @@ import co.elastic.clients.json.JsonData;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
 import co.elastic.clients.transport.rest_client.RestClientTransport;
+import io.agentscope.examples.payroll.service.EsMetrics;
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
@@ -100,10 +101,13 @@ public final class ElasticsearchVectorStore implements VectorStore {
         document.put("turn_index", record.turnIndex());
         document.put("content", record.content());
         document.put("created_at", record.createdAt().toString());
+        long startedAt = EsMetrics.start();
         try {
             client.index(i -> i.index(index).id(documentId(record)).document(document));
         } catch (IOException e) {
             throw new IllegalStateException("写入向量文档失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("index", startedAt);
         }
     }
 
@@ -112,6 +116,7 @@ public final class ElasticsearchVectorStore implements VectorStore {
             long userId, long sessionId, float[] queryVector, int topK, double minCosine) {
         List<Float> query = toList(queryVector);
         SearchResponse<Map> response;
+        long startedAt = EsMetrics.start();
         try {
             response =
                     client.search(
@@ -122,6 +127,8 @@ public final class ElasticsearchVectorStore implements VectorStore {
                             Map.class);
         } catch (IOException e) {
             throw new IllegalStateException("向量检索失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("search", startedAt);
         }
         List<VectorHit> hits = new ArrayList<>();
         for (Hit<Map> hit : response.hits().hits()) {
@@ -238,10 +245,13 @@ public final class ElasticsearchVectorStore implements VectorStore {
     }
 
     private void deleteByQuery(Query query) {
+        long startedAt = EsMetrics.start();
         try {
             client.deleteByQuery(d -> d.index(index).refresh(true).query(query));
         } catch (IOException e) {
             throw new IllegalStateException("删除向量文档失败：" + e.getMessage(), e);
+        } finally {
+            EsMetrics.record("delete", startedAt);
         }
     }
 

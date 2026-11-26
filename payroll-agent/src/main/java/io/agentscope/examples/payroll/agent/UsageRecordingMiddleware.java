@@ -9,6 +9,7 @@ import io.agentscope.core.middleware.ModelCallInput;
 import io.agentscope.core.model.ChatUsage;
 import io.agentscope.core.model.Model;
 import io.agentscope.examples.payroll.domain.TraceScope;
+import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.usage.LlmUsageRecord;
 import io.agentscope.examples.payroll.usage.LlmUsageRecorder;
 import io.agentscope.examples.payroll.usage.UsageModelCatalog;
@@ -70,6 +71,8 @@ final class UsageRecordingMiddleware implements MiddlewareBase {
             Model model = call.input.model();
             String modelName = model == null ? null : model.getModelName();
             UsageModelCatalog.Meta meta = UsageModelCatalog.describe(model);
+            TurnMetrics.modelCallDuration(
+                    meta.plane(), modelName, error == null ? "success" : "error", latencyMs);
             TraceScope scope = call.ctx == null ? null : call.ctx.get(TraceScope.class);
             ChatUsage usage = end == null ? null : end.getUsage();
             int prompt = usage == null ? 0 : Math.max(0, usage.getInputTokens());

@@ -133,6 +133,8 @@ class SkillNacosImporterTest {
 
         assertFalse(second.executed());
         assertEquals(0, second.total());
+        assertEquals(
+                store.catalog().size(), second.skipped(), "整表跳过时 skipped 等于库里已有行数");
         assertTrue(second.note().contains("已有"), second.note());
         assertTrue(second.summary().contains("未执行"), second.summary());
         assertFalse(store.find("audit-helper").isPresent(), "§11.2 规则 4：宁可残缺，不可静默复活");

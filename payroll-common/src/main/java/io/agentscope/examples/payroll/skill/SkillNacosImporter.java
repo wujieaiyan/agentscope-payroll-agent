@@ -32,17 +32,19 @@ public final class SkillNacosImporter {
 
     /**
      * @param executed {@code false} 表示本轮没有执行任何导入（表非空、Nacos 或库不可用）
+     * @param skipped 整表跳过时库里已有的行数；本轮逐条导入时恒为 0
      * @param note 未执行的原因，或执行后的补充说明
      */
     public record Report(
             boolean executed,
             List<String> imported,
+            int skipped,
             List<String> fileProblems,
             List<String> failures,
             String note) {
 
-        static Report skippedAll(String reason) {
-            return new Report(false, List.of(), List.of(), List.of(), reason);
+        static Report skippedAll(String reason, int skipped) {
+            return new Report(false, List.of(), skipped, List.of(), List.of(), reason);
         }
 
         /** 是否存在阻断切换的问题：正文导入失败才算，文件包问题按 §11.2 规则 2 不阻断。 */
@@ -62,6 +64,8 @@ public final class SkillNacosImporter {
                     new StringBuilder()
                             .append("技能导入：新建 ")
                             .append(imported.size())
+                            .append("，跳过 ")
+                            .append(skipped)
                             .append("，失败 ")
                             .append(failures.size());
             if (!fileProblems.isEmpty()) {
@@ -113,18 +117,19 @@ public final class SkillNacosImporter {
         try {
             rows = reader.catalog();
         } catch (PayrollUnavailableException e) {
-            return log(Report.skippedAll("读取技能表失败：" + message(e)));
+            return log(Report.skippedAll("读取技能表失败：" + message(e), 0));
         }
         if (!rows.isEmpty()) {
             return log(
                     Report.skippedAll(
-                            "skill_definition 已有 " + rows.size() + " 行，跳过导入（幂等）"));
+                            "skill_definition 已有 " + rows.size() + " 行，跳过导入（幂等）",
+                            rows.size()));
         }
         List<RemoteSkill> remotes;
         try {
             remotes = source.readSkills();
         } catch (RuntimeException e) {
-            return log(Report.skippedAll("读取 Nacos 技能失败：" + message(e)));
+            return log(Report.skippedAll("读取 Nacos 技能失败：" + message(e), 0));
         }
         List<String> imported = new ArrayList<>();
         List<String> fileProblems = new ArrayList<>();
@@ -145,7 +150,7 @@ public final class SkillNacosImporter {
                         e.getClass().getSimpleName() + ": " + message(e));
             }
         }
-        return log(new Report(true, imported, fileProblems, failures, source.location()));
+        return log(new Report(true, imported, 0, fileProblems, failures, source.location()));
     }
 
     private static Report log(Report report) {

@@ -2,6 +2,9 @@ package io.agentscope.examples.payroll.db;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import com.zaxxer.hikari.HikariPoolMXBean;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tags;
 import io.agentscope.examples.payroll.domain.AttendanceSummary;
 import io.agentscope.examples.payroll.domain.Employee;
 import io.agentscope.examples.payroll.domain.MonthlyVariablePay;
@@ -92,7 +95,40 @@ public final class PayrollDatabase {
         config.addDataSourceProperty("prepStmtCacheSize", "250");
         config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
         config.addDataSourceProperty("useServerPrepStmts", "true");
-        return new HikariDataSource(config);
+        HikariDataSource dataSource = new HikariDataSource(config);
+        bindPoolMetrics(dataSource);
+        return dataSource;
+    }
+
+    /** 私有池不在 Spring 管理下，需手动注册 hikaricp.connections.* 供 Prometheus 抓取。 */
+    private static void bindPoolMetrics(HikariDataSource dataSource) {
+        Tags tags = Tags.of("pool", dataSource.getPoolName());
+        Metrics.gauge(
+                "hikaricp.connections.active",
+                tags,
+                dataSource,
+                ds -> connections(ds, HikariPoolMXBean::getActiveConnections));
+        Metrics.gauge(
+                "hikaricp.connections.idle",
+                tags,
+                dataSource,
+                ds -> connections(ds, HikariPoolMXBean::getIdleConnections));
+        Metrics.gauge(
+                "hikaricp.connections.total",
+                tags,
+                dataSource,
+                ds -> connections(ds, HikariPoolMXBean::getTotalConnections));
+        Metrics.gauge(
+                "hikaricp.connections.pending",
+                tags,
+                dataSource,
+                ds -> connections(ds, HikariPoolMXBean::getThreadsAwaitingConnection));
+    }
+
+    private static double connections(
+            HikariDataSource dataSource, java.util.function.ToIntFunction<HikariPoolMXBean> getter) {
+        HikariPoolMXBean bean = dataSource.getHikariPoolMXBean();
+        return bean == null ? 0 : getter.applyAsInt(bean);
     }
 
     private static int envInt(String name, int fallback) {

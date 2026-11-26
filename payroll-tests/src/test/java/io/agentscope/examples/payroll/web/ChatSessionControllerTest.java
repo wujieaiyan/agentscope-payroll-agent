@@ -1,19 +1,25 @@
 package io.agentscope.examples.payroll.web;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import io.agentscope.examples.payroll.chat.ChatAttachmentService;
 import io.agentscope.examples.payroll.domain.AuthUser;
+import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.kb.KbPermissionService;
 import io.agentscope.examples.payroll.kb.KbSeriesStore;
@@ -23,17 +29,22 @@ import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.service.ChatFeedbackService;
 import io.agentscope.examples.payroll.service.ChatQuotaService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
+import io.agentscope.examples.payroll.service.ChatSseSubscription;
+import io.agentscope.examples.payroll.service.SseCallbacks;
 import io.agentscope.examples.payroll.service.TeamRunQueryService;
 import io.agentscope.examples.payroll.service.TokenBudgetService;
 import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 class ChatSessionControllerTest {
@@ -77,6 +88,7 @@ class ChatSessionControllerTest {
             throw new RejectedExecutionException("full");
         });
         when(chatQuotaService.tryAcquire(USER_ID)).thenReturn(true);
+        double connectionsBefore = sseConnections();
 
         TooManyRequestsException error =
                 assertThrows(
@@ -85,6 +97,7 @@ class ChatSessionControllerTest {
 
         assertTrue(error.getMessage().contains("请求过多"));
         verify(chatQuotaService).release(USER_ID);
+        assertEquals(connectionsBefore, sseConnections(), "拒绝路径不得残留 SSE 连接计数");
     }
 
     @Test
@@ -93,6 +106,7 @@ class ChatSessionControllerTest {
         Executor unused = mock(Executor.class);
         ChatSessionController controller = controller(unused);
         when(chatQuotaService.tryAcquire(USER_ID)).thenReturn(false);
+        double connectionsBefore = sseConnections();
 
         assertThrows(
                 TooManyRequestsException.class,
@@ -100,6 +114,7 @@ class ChatSessionControllerTest {
 
         verifyNoInteractions(unused);
         verify(chatQuotaService, never()).release(anyLong());
+        assertEquals(connectionsBefore, sseConnections(), "配额拒绝路径不得残留 SSE 连接计数");
     }
 
     @Test
@@ -153,7 +168,99 @@ class ChatSessionControllerTest {
         verifyNoInteractions(chatQuotaService);
     }
 
+    @Test
+    @DisplayName("推送模式下终态回调释放一次配额并关闭订阅")
+    void pushModeReleasesQuotaOnTerminal() {
+        ChatSessionManager.TurnContext turn = turnContext();
+        when(chatQuotaService.tryAcquire(USER_ID)).thenReturn(true);
+        when(attachmentService.prepare(USER_ID, SESSION_ID, List.of()))
+                .thenReturn(new ChatAttachmentService.PreparedAttachments(List.of(), ""));
+        when(manager.beginTurn(USER_ID, SESSION_ID, "查一下工资")).thenReturn(turn);
+        when(manager.turn(USER_ID, SESSION_ID, turn.turnId())).thenReturn(null);
+        when(runtimeClient.enabled()).thenReturn(true);
+        ChatSseSubscription subscription = mock(ChatSseSubscription.class);
+        ArgumentCaptor<SseCallbacks> captured = ArgumentCaptor.forClass(SseCallbacks.class);
+        when(manager.subscribe(
+                        eq(USER_ID),
+                        eq(SESSION_ID),
+                        eq(turn.turnId()),
+                        eq(0L),
+                        anyLong(),
+                        captured.capture()))
+                .thenReturn(subscription);
+
+        ChatSessionController controller = controller(Runnable::run, "push");
+        controller.stream(SESSION_ID, message("查一下工资"), request);
+
+        verify(chatQuotaService, never()).release(USER_ID);
+        captured.getValue().onTerminal().run();
+        verify(chatQuotaService, times(1)).release(USER_ID);
+        verify(subscription).close();
+    }
+
+    @Test
+    @DisplayName("推送订阅注册失败时返回错误并释放配额")
+    void pushSubscriptionFailureReleasesQuota() {
+        ChatSessionManager.TurnContext turn = turnContext();
+        when(chatQuotaService.tryAcquire(USER_ID)).thenReturn(true);
+        when(attachmentService.prepare(USER_ID, SESSION_ID, List.of()))
+                .thenReturn(new ChatAttachmentService.PreparedAttachments(List.of(), ""));
+        when(manager.beginTurn(USER_ID, SESSION_ID, "查一下工资")).thenReturn(turn);
+        when(manager.turn(USER_ID, SESSION_ID, turn.turnId())).thenReturn(null);
+        when(runtimeClient.enabled()).thenReturn(true);
+        when(manager.subscribe(
+                        eq(USER_ID),
+                        eq(SESSION_ID),
+                        eq(turn.turnId()),
+                        eq(0L),
+                        anyLong(),
+                        any(SseCallbacks.class)))
+                .thenThrow(new IllegalStateException("订阅失败"));
+
+        ChatSessionController controller = controller(Runnable::run, "push");
+        controller.stream(SESSION_ID, message("查一下工资"), request);
+
+        verify(chatQuotaService, times(1)).release(USER_ID);
+    }
+
+    @Test
+    @DisplayName("不带游标的历史消息保留裸数组旧契约")
+    void messagesWithoutCursorKeepLegacyArray() {
+        List<ChatMessage> all =
+                List.of(chatMessage(1L, "USER", "问题"), chatMessage(2L, "ASSISTANT", "回答"));
+        when(manager.messages(USER_ID, SESSION_ID)).thenReturn(all);
+
+        ApiResponse response = controller(Runnable::run).messages(SESSION_ID, null, null, request);
+
+        assertSame(all, response.data());
+        verify(manager, never()).messagesBefore(anyLong(), anyLong(), anyLong(), anyInt());
+    }
+
+    @Test
+    @DisplayName("带游标的历史消息返回最新一页 {items, has_more}")
+    void messagesWithCursorReturnNewestPage() {
+        List<ChatMessage> fetched =
+                List.of(
+                        chatMessage(8L, "USER", "问题4"),
+                        chatMessage(9L, "ASSISTANT", "回答4"),
+                        chatMessage(10L, "USER", "问题5"));
+        when(manager.messagesBefore(USER_ID, SESSION_ID, 11L, 3)).thenReturn(fetched);
+
+        ApiResponse response = controller(Runnable::run).messages(SESSION_ID, 11L, 2, request);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.data();
+        assertEquals(true, body.get("has_more"));
+        @SuppressWarnings("unchecked")
+        List<ChatMessage> items = (List<ChatMessage>) body.get("items");
+        assertEquals(List.of(9L, 10L), items.stream().map(ChatMessage::id).toList());
+    }
+
     private ChatSessionController controller(Executor executor) {
+        return controller(executor, "legacy");
+    }
+
+    private ChatSessionController controller(Executor executor, String sseMode) {
         return new ChatSessionController(
                 manager,
                 feedbackService,
@@ -167,8 +274,13 @@ class ChatSessionControllerTest {
                 kbSeriesStore,
                 attachmentService,
                 3,
+                sseMode,
                 executor,
                 executor);
+    }
+
+    private static ChatMessage chatMessage(long id, String role, String content) {
+        return new ChatMessage(id, SESSION_ID, role, content, List.of(), "test", LocalDateTime.now());
     }
 
     private static ChatSessionController.ChatMessageRequest message(String text) {
@@ -178,5 +290,13 @@ class ChatSessionControllerTest {
     private static ChatSessionManager.TurnContext turnContext() {
         return new ChatSessionManager.TurnContext(
                 "turn-1", USER_ID, SESSION_ID, 21L, 1L, "token", "node-a", null);
+    }
+
+    private static double sseConnections() {
+        io.micrometer.core.instrument.Gauge gauge =
+                io.micrometer.core.instrument.Metrics.globalRegistry
+                        .find(io.agentscope.examples.payroll.service.TurnMetrics.SSE_CONNECTIONS)
+                        .gauge();
+        return gauge == null ? 0 : gauge.value();
     }
 }

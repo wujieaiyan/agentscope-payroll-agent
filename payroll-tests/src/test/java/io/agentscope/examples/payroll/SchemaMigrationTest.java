@@ -24,7 +24,7 @@ class SchemaMigrationTest {
     void h2AppliesSharedMigrations() throws Exception {
         PayrollDatabase database = PayrollDatabase.inMemory("schema-" + System.nanoTime());
         try (Connection connection = database.connection()) {
-            assertEquals(49, tableCount(connection));
+            assertEquals(52, tableCount(connection));
             assertColumn(connection, "chat_messages", "routing_json");
             assertColumn(connection, "chat_messages", "citations_json");
             assertColumn(connection, "chat_messages", "turn_id");
@@ -40,6 +40,12 @@ class SchemaMigrationTest {
             assertColumn(connection, "skill_version", "body_md");
             assertColumn(connection, "skill_resource", "is_binary");
             assertColumn(connection, "skill_blob", "storage_location");
+            assertColumn(connection, "chat_sessions", "context_through_message_id");
+            assertTable(connection, "job_lease");
+            assertTable(connection, "skill_data_state");
+            assertColumn(connection, "skill_data_state", "observed_at");
+            assertTable(connection, "skill_creation_origin");
+            assertColumn(connection, "skill_creation_origin", "created_from");
             assertEquals(1, scalar(connection, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.INDEXES"
                     + " WHERE INDEX_NAME = 'UK_CHAT_MESSAGES_TURN'"));
             assertEquals("MySQL", setting(connection, "MODE"));
@@ -61,7 +67,7 @@ class SchemaMigrationTest {
         try (Connection connection = second.connection()) {
             assertTrue(seeded > 0, "演示员工应在首次初始化时写入");
             assertEquals(seeded, scalar(connection, "SELECT COUNT(*) FROM employees"));
-            assertEquals(22, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
+            assertEquals(24, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
                     + " WHERE \"version\" IS NOT NULL"));
         }
     }
@@ -85,7 +91,7 @@ class SchemaMigrationTest {
     }
 
     @Test
-    @DisplayName("迁移前的历史 H2 库补建到基线为止，V22 由 Flyway 真正执行")
+    @DisplayName("迁移前的历史 H2 库补建到基线为止，V22/V23 由 Flyway 真正执行")
     void v21LegacyDatabaseAppliesV22AfterBaseline(@TempDir Path dir) throws Exception {
         String url = "jdbc:h2:file:" + dir.resolve("at-v21").toAbsolutePath() + ";DB_CLOSE_ON_EXIT=FALSE";
         // 基线脚本的幂等补建会建出 V1–V21 的全部对象；若重放越界到 V22，
@@ -101,9 +107,11 @@ class SchemaMigrationTest {
             assertTable(connection, "skill_version");
             assertTable(connection, "skill_resource");
             assertTable(connection, "skill_blob");
-            assertEquals(49, tableCount(connection));
+            assertEquals(52, tableCount(connection));
             assertHistoryVersion(connection, "21");
             assertHistoryVersion(connection, "22");
+            assertHistoryVersion(connection, "23");
+            assertHistoryVersion(connection, "24");
         }
     }
 
@@ -150,8 +158,10 @@ class SchemaMigrationTest {
         try (Connection connection = database.connection()) {
             assertTable(connection, "skill_resource");
             assertTable(connection, "skill_blob");
-            assertEquals(49, tableCount(connection));
+            assertEquals(52, tableCount(connection));
             assertHistoryVersion(connection, "22");
+            assertHistoryVersion(connection, "23");
+            assertHistoryVersion(connection, "24");
         }
     }
 

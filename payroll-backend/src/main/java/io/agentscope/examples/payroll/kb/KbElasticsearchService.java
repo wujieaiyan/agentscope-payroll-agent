@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.examples.payroll.kb.KbEnums.ChunkLevel;
 import io.agentscope.examples.payroll.kb.KbModels.Chunk;
+import io.agentscope.examples.payroll.service.EsMetrics;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -28,7 +29,7 @@ public class KbElasticsearchService {
 
     private static final Logger log = LoggerFactory.getLogger(KbElasticsearchService.class);
     private static final long AVAILABILITY_TTL_MS = 30_000;
-    private static final Duration SEARCH_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration INDEX_TIMEOUT = Duration.ofSeconds(10);
     private static final int BULK_SHARD_BYTES = 5 * 1024 * 1024;
 
     private final ObjectMapper objectMapper;
@@ -39,6 +40,7 @@ public class KbElasticsearchService {
     private final String authHeader;
     private final boolean enabled;
     private final int dim;
+    private final Duration searchTimeout;
     private final AtomicLong lastCheck = new AtomicLong(0);
     private volatile boolean available;
     private volatile boolean indexChecked;
@@ -52,13 +54,16 @@ public class KbElasticsearchService {
             @Value("${payroll.kb.es-username:}") String username,
             @Value("${payroll.kb.es-password:}") String password,
             @Value("${payroll.kb.es-index:payroll-kb-chunks}") String index,
-            @Value("${payroll.kb.embedding-dim:768}") int dim) {
+            @Value("${payroll.kb.embedding-dim:768}") int dim,
+            @Value("${payroll.kb.search.timeout-ms:1500}") long searchTimeoutMs) {
         this.objectMapper = objectMapper;
         this.embeddingService = embeddingService;
         this.enabled = enabled;
         this.baseUrl = esUrl == null ? "http://localhost:9200" : esUrl.trim().replaceAll("/+$", "");
         this.index = index == null || index.isBlank() ? "payroll-kb-chunks" : index;
         this.dim = Math.max(64, dim);
+        // 检索请求的读超时必须与单库预算同量级：超时线程会继续占住调用线程，扩池只是推迟问题。
+        this.searchTimeout = Duration.ofMillis(Math.max(200L, searchTimeoutMs));
         this.authHeader =
                 username == null || username.isBlank()
                         ? null
@@ -106,15 +111,15 @@ public class KbElasticsearchService {
             if (indexChecked) {
                 return;
             }
-            Response head = request("HEAD", "/" + index, null, SEARCH_TIMEOUT);
+            Response head = request("HEAD", "/" + index, null, INDEX_TIMEOUT);
             if (head.status() == 404) {
-                Response created = request("PUT", "/" + index, mapping(true), SEARCH_TIMEOUT);
+                Response created = request("PUT", "/" + index, mapping(true), INDEX_TIMEOUT);
                 if (created.status() / 100 != 2) {
                     log.warn(
                             "[知识库] 创建 ES 索引失败（将退回标准分词）：status={}，body={}",
                             created.status(),
                             preview(created.body()));
-                    Response fallback = request("PUT", "/" + index, mapping(false), SEARCH_TIMEOUT);
+                    Response fallback = request("PUT", "/" + index, mapping(false), INDEX_TIMEOUT);
                     if (fallback.status() / 100 != 2) {
                         throw new IllegalStateException(
                                 "创建知识库索引失败：HTTP " + fallback.status() + " " + preview(fallback.body()));
@@ -243,7 +248,7 @@ public class KbElasticsearchService {
             }
         }
         if (hybrid && queryText != null && !queryText.isBlank()) {
-            List<SearchHit> keywordHits = searchKeyword(seriesId, queryText, size);
+            List<SearchHit> keywordHits = keywordSearch(seriesId, queryText, size);
             double maxKeyword = keywordHits.stream().mapToDouble(SearchHit::keywordScore).max().orElse(0);
             for (SearchHit keyword : keywordHits) {
                 double normalized = maxKeyword > 0 ? keyword.keywordScore() / maxKeyword : 0;
@@ -313,7 +318,7 @@ public class KbElasticsearchService {
                             "POST",
                             "/" + index + "/_search",
                             objectMapper.writeValueAsString(query),
-                            SEARCH_TIMEOUT);
+                            searchTimeout);
             if (response.status() / 100 != 2) {
                 log.warn("[知识库] ES 向量检索失败：status={}，body={}", response.status(), preview(response.body()));
                 return List.of();
@@ -332,7 +337,11 @@ public class KbElasticsearchService {
         }
     }
 
-    private List<SearchHit> searchKeyword(long seriesId, String queryText, int size) {
+    /**
+     * 关键词召回（multi_match：content^2 + titlePath），供融合 BM25 路由直接复用；
+     * 返回的 {@link SearchHit#keywordScore()} 为 ES 原始相关度，调用方需自行归一化。
+     */
+    public List<SearchHit> keywordSearch(long seriesId, String queryText, int size) {
         Map<String, Object> query = new LinkedHashMap<>();
         query.put("size", size);
         query.put(
@@ -365,7 +374,7 @@ public class KbElasticsearchService {
                             "POST",
                             "/" + index + "/_search",
                             objectMapper.writeValueAsString(query),
-                            SEARCH_TIMEOUT);
+                            searchTimeout);
             if (response.status() / 100 != 2) {
                 return List.of();
             }
@@ -450,28 +459,53 @@ public class KbElasticsearchService {
     }
 
     private Response request(String method, String path, String body, Duration timeout) {
-        HttpRequest.Builder builder =
-                HttpRequest.newBuilder(URI.create(baseUrl + path))
-                        .timeout(timeout)
-                        .header("Content-Type", "application/json");
-        if (authHeader != null) {
-            builder.header("Authorization", authHeader);
-        }
-        HttpRequest.BodyPublisher publisher =
-                body == null
-                        ? HttpRequest.BodyPublishers.noBody()
-                        : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
-        builder.method(method, publisher);
+        long startedAt = EsMetrics.start();
         try {
-            HttpResponse<String> response =
-                    http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            return new Response(response.statusCode(), response.body());
-        } catch (IOException e) {
-            throw new IllegalStateException("连接 Elasticsearch 失败：" + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Elasticsearch 请求被中断", e);
+            HttpRequest.Builder builder =
+                    HttpRequest.newBuilder(URI.create(baseUrl + path))
+                            .timeout(timeout)
+                            .header("Content-Type", "application/json");
+            if (authHeader != null) {
+                builder.header("Authorization", authHeader);
+            }
+            HttpRequest.BodyPublisher publisher =
+                    body == null
+                            ? HttpRequest.BodyPublishers.noBody()
+                            : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
+            builder.method(method, publisher);
+            try {
+                HttpResponse<String> response =
+                        http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                return new Response(response.statusCode(), response.body());
+            } catch (IOException e) {
+                throw new IllegalStateException("连接 Elasticsearch 失败：" + e.getMessage(), e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Elasticsearch 请求被中断", e);
+            }
+        } finally {
+            EsMetrics.record(op(path), startedAt);
         }
+    }
+
+    /** 按请求路径归类 op：search / index / refresh / delete，其余按管理类请求计。 */
+    private static String op(String path) {
+        if (path == null) {
+            return "admin";
+        }
+        if (path.contains("_search")) {
+            return "search";
+        }
+        if (path.contains("_bulk") || path.contains("_doc")) {
+            return "index";
+        }
+        if (path.contains("_refresh")) {
+            return "refresh";
+        }
+        if (path.contains("_delete_by_query")) {
+            return "delete";
+        }
+        return "admin";
     }
 
     private record Response(int status, String body) {

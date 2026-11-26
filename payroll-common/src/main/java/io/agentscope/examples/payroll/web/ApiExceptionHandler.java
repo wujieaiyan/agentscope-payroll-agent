@@ -8,6 +8,7 @@ import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.AuditContext;
+import jakarta.servlet.ServletException;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +22,7 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /** 统一 REST 错误响应，保持与旧版管理台一致的 {status,message} 结构。 */
@@ -33,8 +35,8 @@ public class ApiExceptionHandler {
     private final String maxRequestSize;
 
     public ApiExceptionHandler(
-            @Value("${spring.servlet.multipart.max-file-size:600MB}") String maxFileSize,
-            @Value("${spring.servlet.multipart.max-request-size:1GB}") String maxRequestSize) {
+            @Value("${spring.servlet.multipart.max-file-size:200MB}") String maxFileSize,
+            @Value("${spring.servlet.multipart.max-request-size:512MB}") String maxRequestSize) {
         this.maxFileSize = maxFileSize;
         this.maxRequestSize = maxRequestSize;
     }
@@ -107,9 +109,13 @@ public class ApiExceptionHandler {
         return error(HttpStatus.METHOD_NOT_ALLOWED, e.getMessage());
     }
 
-    @ExceptionHandler(NoResourceFoundException.class)
-    public ResponseEntity<ApiResponse> handleNotFound(NoResourceFoundException e) {
-        return error(HttpStatus.NOT_FOUND, "接口不存在：/" + e.getResourcePath());
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<ApiResponse> handleNotFound(ServletException e) {
+        String path =
+                e instanceof NoResourceFoundException notFound
+                        ? "/" + notFound.getResourcePath()
+                        : ((NoHandlerFoundException) e).getRequestURL();
+        return error(HttpStatus.NOT_FOUND, "接口不存在：" + path);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

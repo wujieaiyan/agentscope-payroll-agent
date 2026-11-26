@@ -3,9 +3,13 @@ FROM eclipse-temurin:17-jre
 
 ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
-    JAVA_OPTS="-XX:MaxRAMPercentage=75 -Dfile.encoding=UTF-8"
+    JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
 
 WORKDIR /app
+# curl 仅用于容器 liveness 探针（/actuator/health/liveness）。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 COPY payroll-agent/target/payroll-agent-runtime.jar /app/app.jar
 RUN mkdir -p /app/data /app/output
 

@@ -297,6 +297,14 @@ public final class SkillProjectParser {
         return command;
     }
 
+    /**
+     * 从已落库的元信息复算声明上限：列表与概览要展示「已用 / 上限」，必须与导入时的夹取口径完全一致，
+     * 否则同一个技能在导入预览和列表里会给出两个数字。
+     */
+    public static long dataMaxBytes(Map<String, Object> metadata) {
+        return dataMaxBytes(metadata == null ? Map.of() : metadata, new java.util.ArrayList<>());
+    }
+
     private static long dataMaxBytes(Map<String, Object> metadata, List<String> warnings) {
         Object rawData = metadata.get("data");
         Object raw = rawData instanceof Map<?, ?> map ? map.get("max-bytes") : null;

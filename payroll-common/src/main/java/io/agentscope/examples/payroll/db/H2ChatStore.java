@@ -21,6 +21,7 @@ import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -769,7 +770,10 @@ public final class H2ChatStore implements ChatContextStore {
     @Override
     public ChatContextSnapshot loadContext(long sessionId) {
         String sql =
-                "SELECT context_summary, context_turns FROM chat_sessions WHERE session_id = ?";
+                """
+                SELECT context_summary, context_turns, context_through_message_id
+                FROM chat_sessions WHERE session_id = ?
+                """;
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, sessionId);
@@ -778,7 +782,8 @@ public final class H2ChatStore implements ChatContextStore {
                     return ChatContextSnapshot.EMPTY;
                 }
                 String summary = rs.getString(1);
-                return new ChatContextSnapshot(summary == null ? "" : summary, rs.getInt(2));
+                return new ChatContextSnapshot(
+                        summary == null ? "" : summary, rs.getInt(2), rs.getLong(3));
             }
         } catch (SQLException e) {
             throw new IllegalStateException("读取会话上下文失败：" + e.getMessage(), e);
@@ -790,18 +795,71 @@ public final class H2ChatStore implements ChatContextStore {
         String sql =
                 """
                 UPDATE chat_sessions
-                SET context_summary = ?, context_turns = ?, updated_at = ?
+                SET context_summary = ?, context_turns = ?, context_through_message_id = ?,
+                    updated_at = ?
                 WHERE session_id = ?
                 """;
         try (Connection connection = database.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, snapshot.summary());
             statement.setInt(2, snapshot.summarizedTurns());
-            statement.setObject(3, LocalDateTime.now());
-            statement.setLong(4, sessionId);
+            statement.setLong(3, snapshot.throughMessageId());
+            statement.setObject(4, LocalDateTime.now());
+            statement.setLong(5, sessionId);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("保存会话上下文失败：" + e.getMessage(), e);
+        }
+    }
+
+    /** 水位之后的最近 {@code limit} 条消息（升序）：倒序取页后反转，避免全量加载。 */
+    @Override
+    public List<ChatMessage> messagesRecent(long sessionId, long afterMessageId, int limit) {
+        return messagesPage(
+                sessionId, "message_id > ?", afterMessageId, Math.max(1, limit));
+    }
+
+    /** {@code beforeId} 之前的最近 {@code limit} 条消息（升序），用于上滑翻页。 */
+    @Override
+    public List<ChatMessage> messagesBefore(long sessionId, long beforeId, int limit) {
+        return messagesPage(sessionId, "message_id < ?", beforeId, Math.max(1, limit));
+    }
+
+    /** 按条件倒序取一页消息再反转成升序；{@code condition} 只允许消息表内的 id 比较。 */
+    private List<ChatMessage> messagesPage(
+            long sessionId, String condition, long boundId, int limit) {
+        String sql =
+                """
+                SELECT message_id, session_id, role, content, tools_json, model, routing_json,
+                       citations_json, created_at
+                FROM chat_messages
+                WHERE session_id = ? AND %s
+                ORDER BY message_id DESC LIMIT ?
+                """
+                        .formatted(condition);
+        Map<Long, List<ActionProposal>> proposals = proposalsByMessage(sessionId);
+        Map<Long, List<ChatAttachmentRef>> attachments =
+                new ChatAttachmentStore(database).refsByMessage(sessionId);
+        try (Connection connection = database.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, sessionId);
+            statement.setLong(2, boundId);
+            statement.setInt(3, limit);
+            try (ResultSet rs = statement.executeQuery()) {
+                List<ChatMessage> messages = new ArrayList<>();
+                while (rs.next()) {
+                    long messageId = rs.getLong("message_id");
+                    messages.add(
+                            mapMessage(
+                                    rs,
+                                    proposals.getOrDefault(messageId, List.of()),
+                                    attachments.getOrDefault(messageId, List.of())));
+                }
+                Collections.reverse(messages);
+                return List.copyOf(messages);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询会话消息失败：" + e.getMessage(), e);
         }
     }
 

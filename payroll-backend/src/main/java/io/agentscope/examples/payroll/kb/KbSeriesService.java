@@ -129,6 +129,26 @@ public class KbSeriesService {
         return view(series, role);
     }
 
+    /**
+     * 批量读取当前用户可读的库：一次成员关系读取 + 一次库查询，替掉逐库 {@link #get}。
+     *
+     * <p>只返回可读的库，调用方据返回集合的缺失键判定「不存在或无权」，避免借检索探测库是否存在。
+     */
+    public Map<Long, Series> getAll(java.util.Collection<Long> seriesIds, AuthUser user) {
+        if (seriesIds == null || seriesIds.isEmpty() || user == null) {
+            return Map.of();
+        }
+        boolean admin = permissionService.platformAdmin(user);
+        Map<Long, KbRole> roles = admin ? Map.of() : permissionService.visibleRoles(user);
+        Map<Long, Series> readable = new LinkedHashMap<>();
+        for (Series series : seriesStore.findByIds(seriesIds)) {
+            if (admin || roles.containsKey(series.id())) {
+                readable.put(series.id(), series);
+            }
+        }
+        return readable;
+    }
+
     public SeriesView create(CreateSeriesRequest request, AuthUser user) {
         if (request == null) {
             throw new PayrollException("知识库信息不能为空");

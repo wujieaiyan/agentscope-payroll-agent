@@ -10,13 +10,18 @@ import io.agentscope.examples.payroll.web.ApiResponse;
 import io.agentscope.examples.payroll.web.RequirePermission;
 import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -37,21 +42,50 @@ public class KbDocumentController {
 
     private final KbDocumentService documentService;
     private final AuthService authService;
+    private final long maxRequestBytes;
+    private final int documentsPageSize;
 
-    public KbDocumentController(KbDocumentService documentService, AuthService authService) {
+    public KbDocumentController(
+            KbDocumentService documentService,
+            AuthService authService,
+            @Value("${spring.servlet.multipart.max-request-size:512MB}") DataSize maxRequestSize,
+            @Value("${payroll.kb.documents-page-size:100}") int documentsPageSize) {
         this.documentService = documentService;
         this.authService = authService;
+        this.maxRequestBytes = maxRequestSize.toBytes();
+        this.documentsPageSize = Math.max(1, Math.min(200, documentsPageSize));
     }
 
+    /**
+     * 文档列表：不带 {@code cursor/limit} 时保留裸数组旧契约（一个版本兼容），
+     * 带参时返回 {@code {items, next_cursor}} 的游标分页结果。
+     */
     @GetMapping
     public ApiResponse list(
             @PathVariable long seriesId,
             @RequestParam(value = "directory_id", required = false) Long directoryId,
             @RequestParam(value = "status", required = false) String status,
             @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "cursor", required = false) String cursor,
+            @RequestParam(value = "limit", required = false) Integer limit,
             HttpServletRequest request) {
         AuthUser user = authService.currentUser(request);
-        return ApiResponse.ok(documentService.list(seriesId, directoryId, status, keyword, user));
+        if (cursor == null && limit == null) {
+            return ApiResponse.ok(documentService.list(seriesId, directoryId, status, keyword, user));
+        }
+        KbDocumentService.DocumentPage page =
+                documentService.listPage(
+                        seriesId,
+                        directoryId,
+                        status,
+                        keyword,
+                        cursor,
+                        limit == null ? documentsPageSize : limit,
+                        user);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("items", page.items());
+        body.put("next_cursor", page.nextCursor());
+        return ApiResponse.ok(body);
     }
 
     @GetMapping("/status-summary")
@@ -61,15 +95,25 @@ public class KbDocumentController {
     }
 
     @PostMapping
-    public ApiResponse upload(
+    public ResponseEntity<ApiResponse> upload(
             @PathVariable long seriesId,
             @RequestParam("files") List<MultipartFile> files,
             @RequestParam(value = "directory_id", required = false) Long directoryId,
             @RequestParam(value = "dedupe_action", required = false) String dedupeAction,
             HttpServletRequest request) {
+        long declared = request.getContentLengthLong();
+        if (declared > maxRequestBytes) {
+            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                    .body(
+                            ApiResponse.error(
+                                    "上传请求超过 "
+                                            + (maxRequestBytes / 1024 / 1024)
+                                            + "MB 上限，请拆分后重试"));
+        }
         AuthUser user = authService.currentUser(request);
-        return ApiResponse.ok(
-                documentService.upload(seriesId, files, directoryId, dedupeAction, user));
+        return ResponseEntity.ok(
+                ApiResponse.ok(
+                        documentService.upload(seriesId, files, directoryId, dedupeAction, user)));
     }
 
     @GetMapping("/{documentId}")

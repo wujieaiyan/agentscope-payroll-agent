@@ -33,8 +33,8 @@ spring:
   servlet:
     multipart:
       # 知识库上传等场景；单文件上限需与 payroll.kb.max-file-size 保持一致。
-      max-file-size: "${PAYROLL_UPLOAD_MAX_FILE_SIZE:600MB}"
-      max-request-size: "${PAYROLL_UPLOAD_MAX_REQUEST_SIZE:1GB}"
+      max-file-size: "${PAYROLL_UPLOAD_MAX_FILE_SIZE:200MB}"
+      max-request-size: "${PAYROLL_UPLOAD_MAX_REQUEST_SIZE:512MB}"
   lifecycle:
     timeout-per-shutdown-phase: 10s
 
@@ -44,15 +44,35 @@ payroll:
   # all=单进程（默认）；web=只做鉴权/转发/SSE；runtime=只执行内部轮次。
   node-role: "${PAYROLL_NODE_ROLE:all}"
   node-id: "${PAYROLL_NODE_ID:local}"
+  # 启动/长任务租约（C4/C5）：多副本只有一个节点执行；时间表达式全部在 SQL 内取库时钟。
+  jobs:
+    lease-enabled: "${PAYROLL_JOBS_LEASE_ENABLED:true}"
+    lease-seconds: "${PAYROLL_JOBS_LEASE_SECONDS:120}"
+    lease-heartbeat-seconds: "${PAYROLL_JOBS_LEASE_HEARTBEAT_SECONDS:30}"
+    # 恢复巡检（KB 任务/附件解析）周期；只有持 recovery.kb 租约的节点执行。
+    recovery-interval-minutes: "${PAYROLL_JOBS_RECOVERY_INTERVAL_MINUTES:5}"
+    # 保留任务：启动只做 dry-run 统计；每日窗口内由持租约的节点执行或仅统计。
+    retention-enabled: "${PAYROLL_JOBS_RETENTION_ENABLED:true}"
+    retention-dry-run: "${PAYROLL_JOBS_RETENTION_DRY_RUN:true}"
+    retention-hour: "${PAYROLL_JOBS_RETENTION_HOUR:2}"
+    retention-minute: "${PAYROLL_JOBS_RETENTION_MINUTE:30}"
+    retention-max-minutes: "${PAYROLL_JOBS_RETENTION_MAX_MINUTES:10}"
+    retention-batch-pause-ms: "${PAYROLL_JOBS_RETENTION_BATCH_PAUSE_MS:100}"
   deployment:
     # single=单机，Redis 故障时允许本地降级；cluster=多实例，租约/事件/配额遇 Redis 故障直接 503。
     mode: "${PAYROLL_DEPLOYMENT_MODE:single}"
+  guard:
+    # 启动拓扑守卫：warn=只告警（一个版本的过渡档），fail=发现缺项即停止启动。
+    strict: "${PAYROLL_GUARD_STRICT:warn}"
   runtime:
     # Web 调用的 runtime 地址，逗号分隔；为空时 Web 节点无法执行模型，对话接口返回明确错误。
     urls: "${PAYROLL_AGENT_RUNTIME_URLS:}"
     # 单个 runtime 地址的连接/响应超时，以及一次提交的总预算（含逐个重试）。
     per-url-timeout-ms: "${PAYROLL_RUNTIME_PER_URL_TIMEOUT_MS:5000}"
     submit-budget-ms: "${PAYROLL_RUNTIME_SUBMIT_BUDGET_MS:10000}"
+    # runtime 内部轮次执行池：与 Web 对话执行隔离，队列满回传 busy（Web 侧表现为 429）。
+    turn-threads: "${PAYROLL_RUNTIME_TURN_THREADS:8}"
+    turn-queue-capacity: "${PAYROLL_RUNTIME_TURN_QUEUE_CAPACITY:64}"
   health:
     # readiness 只探测 DB + Redis；ES 与技能来源只进各自 Actuator 详情，不参与摘流。
     readiness-deps: "${PAYROLL_HEALTH_READINESS_DEPS:db,redis}"
@@ -79,6 +99,8 @@ payroll:
   usage:
     # 每用户每日 token 预算，0 表示不限；超限新轮次返回 429。
     daily-token-budget: "${PAYROLL_USAGE_DAILY_TOKEN_BUDGET:0}"
+    # 用量明细保留天数（C4）；0 表示不清理。
+    retention-days: "${PAYROLL_USAGE_RETENTION_DAYS:180}"
   definitions:
     # nacos=智能体定义整份 JSON 存 Nacos（默认，兼容存量）；db=落 agent_definition 表，
     # 数据库为权威，Nacos 仅作变更通知通道（写入失败只告警，不回滚）。
@@ -132,6 +154,10 @@ payroll:
     # 进程内会话运行时缓存上限与空闲淘汰时间；淘汰后按数据库上下文重建。
     cache-max-sessions: "${PAYROLL_CHAT_CACHE_MAX_SESSIONS:200}"
     cache-idle-minutes: "${PAYROLL_CHAT_CACHE_IDLE_MINUTES:60}"
+    # 上下文恢复窗口：只回放水位之后的最近 N 条消息，长会话不再全量读历史。
+    context-window: "${PAYROLL_CHAT_CONTEXT_WINDOW:40}"
+    # 会话淘汰限频：两次淘汰扫描的最小间隔（秒），0 表示每次访问都检查。
+    evict-interval-seconds: "${PAYROLL_CHAT_EVICT_INTERVAL_SECONDS:5}"
     # 轮次租约：TTL 30 秒、10 秒心跳；节点崩溃后最多 30 秒可被接管。
     turn-lease-seconds: "${PAYROLL_TURN_LEASE_TTL_SECONDS:30}"
     turn-heartbeat-seconds: "${PAYROLL_TURN_HEARTBEAT_SECONDS:10}"
@@ -142,6 +168,20 @@ payroll:
     # 周期 <= 0 关闭；只有 web/all 节点会执行，runtime 节点不重复扫库。
     turn-retention-days: "${PAYROLL_TURN_RETENTION_DAYS:90}"
     turn-cleanup-interval-minutes: "${PAYROLL_TURN_CLEANUP_INTERVAL_MINUTES:360}"
+    # 聊天五表 + 会话的保留天数（C4）；0 表示关闭聊天侧清理。
+    history-retention-days: "${PAYROLL_CHAT_HISTORY_RETENTION_DAYS:365}"
+    # SSE 推送模式（capacity-resilience 批次 B）：mode=legacy 保留阻塞式旧链路，
+    # mode=push 走独立写池 + 每订阅有界队列；验收通过后再把默认值改为 push。
+    sse:
+      mode: "${PAYROLL_CHAT_SSE_MODE:legacy}"
+      writer-threads: "${PAYROLL_CHAT_SSE_WRITER_THREADS:16}"
+      writer-queue: "${PAYROLL_CHAT_SSE_WRITER_QUEUE:4096}"
+      subscriber-buffer: "${PAYROLL_CHAT_SSE_SUBSCRIBER_BUFFER:512}"
+      ping-seconds: "${PAYROLL_CHAT_SSE_PING_SECONDS:15}"
+      idle-check-ms: "${PAYROLL_CHAT_SSE_IDLE_CHECK_MS:10000}"
+      # 写超时只用于 watchdog 标记并摘除停滞订阅，不调用 emitter API。
+      write-timeout-ms: "${PAYROLL_CHAT_SSE_WRITE_TIMEOUT_MS:5000}"
+      watchdog-tick-ms: "${PAYROLL_CHAT_SSE_WATCHDOG_TICK_MS:1000}"
     # 写操作确认：关闭时写工具按旧行为直接执行，仅输出 WARN 便于灰度核对。
     action-confirm:
       enabled: "${PAYROLL_ACTION_CONFIRM_ENABLED:false}"
@@ -219,6 +259,9 @@ payroll:
     # ACTIVE 灰度白名单：逗号分隔的 ID；留空表示该维度不限（两个都空=全量）。
     active-user-ids: "${PAYROLL_TEAM_ACTIVE_USER_IDS:}"
     active-session-ids: "${PAYROLL_TEAM_ACTIVE_SESSION_IDS:}"
+    # 轻量模型（意图/路由/计划）并发上限：超出后等待 2s 即走规则兜底。
+    llm:
+      max-concurrent: "${PAYROLL_TEAM_LLM_MAX_CONCURRENT:8}"
   # 向量记忆：只索引用户问题与压缩摘要；默认只在当前会话内召回，避免不同角色串线。
   memory:
     enabled: "${PAYROLL_MEMORY_ENABLED:true}"
@@ -257,9 +300,34 @@ payroll:
   # 知识库：文件落盘、解析分块、ES 索引与 Ollama 回答生成。
   kb:
     storage-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
-    max-file-size: "${PAYROLL_KB_MAX_FILE_SIZE:629145600}"
+    max-file-size: "${PAYROLL_KB_MAX_FILE_SIZE:209715200}"
     max-batch-size: "${PAYROLL_KB_MAX_BATCH:50}"
     max-directory-depth: "${PAYROLL_KB_MAX_DIR_DEPTH:5}"
+    # 解析链路：inline=Web 进程内解析（默认，兼容本地开发）；remote=转发到独立解析服务。
+    parse:
+      mode: "${PAYROLL_KB_PARSE_MODE:inline}"
+      # remote 模式下 Web 侧连接解析服务的地址与并发上限（与 parser workers 对齐）。
+      url: "${PAYROLL_KB_PARSE_URL:http://parser:8300}"
+      token: "${PAYROLL_PARSE_TOKEN:}"
+      max-skew-seconds: "${PAYROLL_KB_PARSE_MAX_SKEW:120}"
+      web-concurrency: "${PAYROLL_KB_PARSE_WEB_CONCURRENCY:2}"
+      queue-wait-ms: "${PAYROLL_KB_PARSE_QUEUE_WAIT_MS:2000}"
+      timeout-ms: "${PAYROLL_KB_PARSE_TIMEOUT_MS:900000}"
+      max-retries: "${PAYROLL_KB_PARSE_MAX_RETRIES:2}"
+      retry-backoff-ms: "${PAYROLL_KB_PARSE_RETRY_BACKOFF_MS:30000}"
+      connect-timeout-ms: "${PAYROLL_KB_PARSE_CONNECT_TIMEOUT_MS:5000}"
+      # 解析产物根目录（remote 模式下 Web 只读挂载）；parser 内为可写目录。
+      artifact-dir: "${PAYROLL_KB_PARSE_ARTIFACT_DIR:./data/parsed}"
+      # parser 侧读取源文件的目录（与 Web 的 kb.storage-dir 指向同一卷）。
+      kb-dir: "${PAYROLL_KB_STORAGE_DIR:./data/kb-uploads}"
+      worker-threads: "${PAYROLL_PARSER_WORKERS:2}"
+      # PDF 页数硬上限（文本型与扫描型均生效）；0 表示不限。
+      max-pages: "${PAYROLL_KB_PARSE_MAX_PAGES:200}"
+      # 解析产物清理（C4）：每文档保留最新 2 个版本，其余超过 TTL 的目录删除；
+      # 仅在解析进程（可写 artifact-dir）执行，Web 不清理。
+      cleanup-enabled: "${PAYROLL_KB_PARSE_CLEANUP_ENABLED:true}"
+      artifact-ttl-days: "${PAYROLL_KB_PARSE_ARTIFACT_TTL_DAYS:7}"
+      cleanup-interval-hours: "${PAYROLL_KB_PARSE_CLEANUP_INTERVAL_HOURS:24}"
     es-enabled: "${PAYROLL_KB_ES_ENABLED:true}"
     es-url: "${PAYROLL_KB_ES_URL:${payroll.memory.es-url}}"
     es-username: "${PAYROLL_KB_ES_USERNAME:${payroll.memory.es-username}}"
@@ -276,6 +344,13 @@ payroll:
     task-max-retries: "${PAYROLL_KB_TASK_MAX_RETRIES:3}"
     # 启动时恢复重启遗留的排队/运行中任务；关闭后遗留任务保持原状。
     recovery-enabled: "${PAYROLL_KB_RECOVERY_ENABLED:true}"
+    # 入库任务与日志保留天数（C4），只删终态；0 表示不清理。
+    task-retention-days: "${PAYROLL_KB_TASK_RETENTION_DAYS:180}"
+    # 文档列表游标分页默认页大小（上限 200）。
+    documents-page-size: "${PAYROLL_KB_DOCUMENTS_PAGE_SIZE:100}"
+    search:
+      # 在线检索总超时（ES HTTP 层生效）；超时按降级语义返回，不再等默认 5s。
+      timeout-ms: "${PAYROLL_KB_SEARCH_TIMEOUT_MS:1500}"
     # 扫描件兜底：无文字层页面按页渲染后交给 OCR；max-pages=0 表示不限页数。
     ocr:
       enabled: "${PAYROLL_KB_OCR_ENABLED:true}"

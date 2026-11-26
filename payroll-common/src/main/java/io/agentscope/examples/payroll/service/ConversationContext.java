@@ -27,35 +27,48 @@ final class ConversationContext {
     private static final int ANSWER_LIMIT = 500;
     static final int CONTINUATION_LIMIT = 600;
 
-    record Turn(String question, String answer) {
+    record Turn(String question, String answer, long lastMessageId) {
+
+        Turn(String question, String answer) {
+            this(question, answer, 0);
+        }
     }
 
     private String summary;
     private int summarizedTurns;
+    /** 上下文水位：不大于该 id 的消息已折叠进摘要或按规则省略，之后只按水位往后读取。 */
+    private long throughMessageId;
     private final List<Turn> turns = new ArrayList<>();
 
     ConversationContext(String summary, int summarizedTurns) {
-        this.summary = sanitize(summary == null ? "" : summary.trim());
-        this.summarizedTurns = Math.max(0, summarizedTurns);
+        this(summary, summarizedTurns, 0);
     }
 
-    /** 用已保存的摘要和消息记录恢复上下文；只配对“用户 → 助手”的完整轮次。 */
+    ConversationContext(String summary, int summarizedTurns, long throughMessageId) {
+        this.summary = sanitize(summary == null ? "" : summary.trim());
+        this.summarizedTurns = Math.max(0, summarizedTurns);
+        this.throughMessageId = Math.max(0, throughMessageId);
+    }
+
+    /**
+     * 用已保存的摘要和消息记录恢复上下文；只配对“用户 → 助手”的完整轮次。
+     *
+     * <p>消息已按水位窗口化，这里不再用 {@code summarizedTurns} 截断：摘要一旦领先于窗口长度，
+     * 旧逻辑会把最近轮次全部丢掉。{@code summarizedTurns} 只保留用于展示与统计。
+     */
     static ConversationContext from(ChatContextSnapshot snapshot, List<ChatMessage> messages) {
         ChatContextSnapshot base = snapshot == null ? ChatContextSnapshot.EMPTY : snapshot;
-        List<Turn> history = new ArrayList<>();
+        ConversationContext context =
+                new ConversationContext(
+                        base.summary(), base.summarizedTurns(), base.throughMessageId());
         String pendingQuestion = null;
         for (ChatMessage message : messages) {
             if ("USER".equals(message.role())) {
                 pendingQuestion = message.content();
             } else if ("ASSISTANT".equals(message.role()) && pendingQuestion != null) {
-                history.add(new Turn(pendingQuestion, message.content()));
+                context.turns.add(new Turn(pendingQuestion, message.content(), message.id()));
                 pendingQuestion = null;
             }
-        }
-        int summarized = Math.min(base.summarizedTurns(), history.size());
-        ConversationContext context = new ConversationContext(base.summary(), summarized);
-        if (summarized < history.size()) {
-            context.turns.addAll(history.subList(summarized, history.size()));
         }
         return context;
     }
@@ -160,8 +173,10 @@ final class ConversationContext {
             return;
         }
         summary = truncate(sanitize(newSummary == null ? "" : newSummary.trim()), SUMMARY_LIMIT);
-        summarizedTurns += Math.min(compressedTurns, turns.size());
-        turns.subList(0, Math.min(compressedTurns, turns.size())).clear();
+        int dropped = Math.min(compressedTurns, turns.size());
+        advanceWatermark(dropped);
+        summarizedTurns += dropped;
+        turns.subList(0, dropped).clear();
     }
 
     /** 压缩失败时的降级：保留已有摘要，只丢弃最早轮次并记一条省略说明。 */
@@ -170,10 +185,51 @@ final class ConversationContext {
         if (dropped <= 0) {
             return;
         }
+        advanceWatermark(dropped);
         turns.subList(0, dropped).clear();
         summarizedTurns += dropped;
         String merged = summary.isBlank() ? note : summary + " " + note;
         summary = truncate(merged == null ? "" : merged.trim(), SUMMARY_LIMIT);
+    }
+
+    /** 把水位推进到被折叠/丢弃的最后一条消息；尚未落库的轮次（id 0）不推进。 */
+    private void advanceWatermark(int dropped) {
+        if (dropped <= 0) {
+            return;
+        }
+        long foldedId = turns.get(dropped - 1).lastMessageId;
+        if (foldedId > throughMessageId) {
+            throughMessageId = foldedId;
+        }
+    }
+
+    /** 落库后回填最近一轮的助手消息 id，供下一次压缩推进水位。 */
+    void markLastAnswer(long messageId) {
+        if (messageId <= 0 || turns.isEmpty()) {
+            return;
+        }
+        int last = turns.size() - 1;
+        Turn turn = turns.get(last);
+        if (turn.lastMessageId() <= 0) {
+            turns.set(last, new Turn(turn.question(), turn.answer(), messageId));
+        }
+    }
+
+    /**
+     * 存量会话（水位为 0）的一次性窗口化：先按旧摘要口径跳过已折叠轮次，再裁剪超出窗口上限的轮次，
+     * 水位推进到被跳过或裁掉的最后一条已落库消息，后续即可只按水位读取。
+     */
+    void backfillLegacyWindow(int maxTurns) {
+        int summarized = Math.min(summarizedTurns, turns.size());
+        if (summarized > 0) {
+            advanceWatermark(summarized);
+            turns.subList(0, summarized).clear();
+        }
+        int excess = turns.size() - Math.max(1, maxTurns);
+        if (excess > 0) {
+            advanceWatermark(excess);
+            turns.subList(0, excess).clear();
+        }
     }
 
     String summary() {
@@ -181,7 +237,11 @@ final class ConversationContext {
     }
 
     ChatContextSnapshot snapshot() {
-        return new ChatContextSnapshot(summary, summarizedTurns);
+        return new ChatContextSnapshot(summary, summarizedTurns, throughMessageId);
+    }
+
+    long throughMessageId() {
+        return throughMessageId;
     }
 
     int summarizedTurns() {

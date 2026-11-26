@@ -29,6 +29,8 @@ import io.agentscope.examples.payroll.agent.ToolTraceRecorder;
 import io.agentscope.examples.payroll.domain.ActionProposal;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AgentRunRecord;
+import io.agentscope.examples.payroll.domain.ChatContextSnapshot;
+import io.agentscope.examples.payroll.domain.ChatMessage;
 import io.agentscope.examples.payroll.domain.ChatRouting;
 import io.agentscope.examples.payroll.domain.ChatToolTrace;
 import io.agentscope.examples.payroll.domain.Citation;
@@ -88,6 +90,8 @@ public final class PayrollChatService implements PayrollChat {
             Set.of("calculate_payroll", "calculate_department_payroll", "generate_payslip");
     private static final int BATCH_VALIDATION_LIMIT = 3;
     private static final int LOG_PREVIEW_LIMIT = 400;
+    /** 默认只回放最近 40 条消息，长会话不再每次全量读历史。 */
+    static final int DEFAULT_CONTEXT_WINDOW = 40;
     /** 空回复重试时追加的指令：3B 模型偶发直接 EOS，需要显式要求输出正文。 */
     private static final String RETRY_NUDGE =
             "\n\n上一轮没有产生任何可见内容。请直接输出完整的答复正文，"
@@ -123,6 +127,7 @@ public final class PayrollChatService implements PayrollChat {
     private final PayrollRouteAdvisor routeAdvisor;
     private final KbChatSettings kbSettings;
     private final KbContextPrefetcher kbPrefetcher;
+    private final int contextWindow;
     private final Object lock = new Object();
     private final ToolTraceRecorder traceRecorder = new ToolTraceRecorder();
     private final KbCitationCollector citationCollector = new KbCitationCollector();
@@ -524,6 +529,61 @@ public final class PayrollChatService implements PayrollChat {
             PayrollRouteAdvisor routeAdvisor,
             KbChatSettings kbSettings,
             KbContextPrefetcher kbPrefetcher) {
+        this(
+                engine,
+                contextStore,
+                sessionId,
+                userId,
+                graphOrchestration,
+                memory,
+                activeAgentSupplier,
+                activeFlowSupplier,
+                activeFlowIdSupplier,
+                agentCatalogSupplier,
+                activeTeam,
+                routingEnabled,
+                actionConfirmEnabled,
+                actionProposalTtlMinutes,
+                toolSafety,
+                answerCache,
+                router,
+                alwaysConfirmTools,
+                kbPolicy,
+                semantic,
+                routeAdvisor,
+                kbSettings,
+                kbPrefetcher,
+                DEFAULT_CONTEXT_WINDOW);
+    }
+
+    /**
+     * @param contextWindow 历史消息窗口上限；水位之后的最近这么多条参与上下文恢复
+     */
+    public PayrollChatService(
+            PayrollEngine engine,
+            ChatContextStore contextStore,
+            long sessionId,
+            long userId,
+            boolean graphOrchestration,
+            VectorMemoryService memory,
+            Supplier<AgentDefinition> activeAgentSupplier,
+            Supplier<FlowDefinition> activeFlowSupplier,
+            Supplier<String> activeFlowIdSupplier,
+            Supplier<List<AgentDefinition>> agentCatalogSupplier,
+            ActiveTeamService activeTeam,
+            boolean routingEnabled,
+            BooleanSupplier actionConfirmEnabled,
+            int actionProposalTtlMinutes,
+            ToolSafety toolSafety,
+            AnswerCache answerCache,
+            AgentRouter router,
+            Set<String> alwaysConfirmTools,
+            KbRoutingPolicy.Options kbPolicy,
+            SemanticRouteClassifier semantic,
+            PayrollRouteAdvisor routeAdvisor,
+            KbChatSettings kbSettings,
+            KbContextPrefetcher kbPrefetcher,
+            int contextWindow) {
         this.engine = engine;
         this.contextStore = contextStore;
         this.sessionId = sessionId;
@@ -549,6 +609,7 @@ public final class PayrollChatService implements PayrollChat {
                 routeAdvisor == null ? PayrollRouteAdvisor.disabled() : routeAdvisor;
         this.kbSettings = kbSettings == null ? KbChatSettings.defaults() : kbSettings;
         this.kbPrefetcher = kbPrefetcher;
+        this.contextWindow = Math.max(2, contextWindow);
         this.sessionContext =
                 RuntimeContext.builder()
                         .userId(String.valueOf(userId))
@@ -558,7 +619,7 @@ public final class PayrollChatService implements PayrollChat {
                         .put(KbSearchBudget.class, kbSearchBudget)
                         .put(SkillReadBudget.class, skillReadBudget)
                         .build();
-        this.context = loadContext(contextStore, sessionId);
+        this.context = loadContext(contextStore, sessionId, this.contextWindow);
     }
 
     /** 固定开关的兼容入口；需要运行期联动时使用 {@link BooleanSupplier} 重载。 */
@@ -2445,12 +2506,23 @@ public final class PayrollChatService implements PayrollChat {
         }
     }
 
-    private static ConversationContext loadContext(ChatContextStore store, long sessionId) {
+    /**
+     * 按水位读取最近窗口：水位已落库的会话只读 {@code message_id > 水位} 的最近 {@code window} 条；
+     * 存量会话（水位为 0）只做一次全量读取，随后把窗口边界回填为水位。
+     */
+    private static ConversationContext loadContext(
+            ChatContextStore store, long sessionId, int window) {
         if (sessionId <= 0) {
             return new ConversationContext("", 0);
         }
         try {
-            return ConversationContext.from(store.loadContext(sessionId), store.messages(sessionId));
+            ChatContextSnapshot snapshot = store.loadContext(sessionId);
+            if (snapshot.throughMessageId() > 0) {
+                return ConversationContext.from(
+                        snapshot,
+                        store.messagesRecent(sessionId, snapshot.throughMessageId(), window));
+            }
+            return backfillLegacyContext(store, sessionId, snapshot, window);
         } catch (RuntimeException e) {
             log.warn(
                     "[上下文] 加载失败，按空上下文继续：sessionId={}，原因={}",
@@ -2458,6 +2530,22 @@ public final class PayrollChatService implements PayrollChat {
                     rootMessage(e));
             return new ConversationContext("", 0);
         }
+    }
+
+    private static ConversationContext backfillLegacyContext(
+            ChatContextStore store, long sessionId, ChatContextSnapshot snapshot, int window) {
+        ConversationContext legacy =
+                ConversationContext.from(snapshot, store.messages(sessionId));
+        legacy.backfillLegacyWindow(Math.max(ConversationContext.KEEP_RECENT_TURNS, window / 2));
+        if (legacy.throughMessageId() > snapshot.throughMessageId()) {
+            try {
+                store.saveContext(sessionId, legacy.snapshot());
+            } catch (RuntimeException e) {
+                log.warn(
+                        "[上下文] 回填水位失败：sessionId={}，原因={}", sessionId, rootMessage(e));
+            }
+        }
+        return legacy;
     }
 
     private static String validationInput(
@@ -2614,6 +2702,14 @@ public final class PayrollChatService implements PayrollChat {
     @Override
     public String modelId() {
         return PayrollAgentFactory.modelId();
+    }
+
+    /** 助手消息落库后回填本轮消息 id，压缩时水位才能推进到精确边界。 */
+    @Override
+    public void markAssistantMessage(long messageId) {
+        synchronized (lock) {
+            context.markLastAnswer(messageId);
+        }
     }
 
     /** 本轮固定模型标识：SSE start、路由、缓存作用域与答复元数据必须一致。 */

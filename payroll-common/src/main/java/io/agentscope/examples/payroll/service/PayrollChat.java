@@ -44,6 +44,10 @@ public interface PayrollChat extends AutoCloseable {
         return ModelEnv.modelId();
     }
 
+    /** 助手消息落库后回传 id，供上下文水位在压缩时准确推进；无持久化场景为空实现。 */
+    default void markAssistantMessage(long messageId) {
+    }
+
     default void reset() {
     }
 

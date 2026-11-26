@@ -10,23 +10,25 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 /**
- * prod 启动期拓扑校验（M3 / D3）：只允许「MySQL + Redis + Nacos + 外部检索嵌入 + 凭证密钥」
- * 一种生产组合。任一项缺失即聚合报错并终止启动，不做进程内降级；
- * 允许的档位与对应环境变量见 docs/deployment-matrix.md。
+ * 启动期拓扑守卫（M3 / D3、C4-D7）：把「生产组合是否成立」的全部问题一次收集完，
+ * 再按 {@code payroll.guard.strict} 决定只告警还是一并抛出终止启动。
  *
- * <p>校验失败只输出一条带编号的中文错误，避免堆栈刷屏。
+ * <p>两阶段的原因：首版用 warn 让存量部署先把清单补完，下一版本切 fail 才阻断；
+ * 装配不再限定 prod profile，否则非 prod 环境无法演练 fail。
+ *
+ * <p>错误信息只报「未配置/为默认值/不满足要求」，不回显任何取值，避免把密钥写进日志。
+ * 生产组合与必填 env 见 docs/deployment-matrix.md、docs/capacity-resilience-remediation-spec.md §7.1。
  */
 @Component
-@Profile("prod")
 public class TopologyGuard implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(TopologyGuard.class);
     private static final String DOC = "docs/deployment-matrix.md";
+    private static final String DEFAULT_ADMIN_PASSWORD = "admin123";
 
     private final Environment environment;
     private final Function<String, String> env;
@@ -44,38 +46,64 @@ public class TopologyGuard implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        boolean strict = "fail".equalsIgnoreCase(
+                environment.getProperty("payroll.guard.strict", "warn").trim());
         List<String> errors = new ArrayList<>();
-        checkDeploymentMode(errors);
-        checkDatabase(errors);
-        checkRedis(errors);
-        checkNacos(errors);
-        checkExternalRetrieval(errors);
-        checkSecretKey(errors);
-        if (!errors.isEmpty()) {
-            StringBuilder message = new StringBuilder("prod 拓扑校验失败（")
-                    .append(errors.size())
-                    .append(" 项），已停止启动：");
-            for (int i = 0; i < errors.size(); i++) {
-                message.append(System.lineSeparator())
-                        .append("  ")
-                        .append(i + 1)
-                        .append(") ")
-                        .append(errors.get(i));
+        List<String> warnings = new ArrayList<>();
+        String role = role();
+        boolean cluster = "cluster".equalsIgnoreCase(
+                environment.getProperty("payroll.deployment.mode", "single").trim());
+        boolean production = cluster || environment.matchesProfiles("prod");
+
+        if (environment.matchesProfiles("prod") && !cluster) {
+            errors.add("prod 环境部署模式必须为 cluster（payroll.deployment.mode / PAYROLL_DEPLOYMENT_MODE）");
+        }
+        if (production) {
+            checkDatabase(errors);
+            checkRedis(errors);
+            checkNacos(errors);
+            checkExternalRetrieval(errors);
+            checkSecretKey(errors);
+        }
+        checkAdminPassword(errors);
+        checkNodeRole(errors, warnings, role, cluster);
+        if (isWeb(role)) {
+            checkInternalToken(errors);
+            if ("remote".equalsIgnoreCase(
+                    environment.getProperty("payroll.kb.parse.mode", "inline").trim())) {
+                checkParseToken(errors);
             }
-            message.append(System.lineSeparator()).append("参考 ").append(DOC);
+        }
+
+        warnings.forEach(warning -> log.warn("[Topology] 启动守卫提示：{}", warning));
+        if (errors.isEmpty()) {
+            log.info("[Topology] 启动守卫通过：strict={}, node-role={}, deployment={}",
+                    strict ? "fail" : "warn", role, cluster ? "cluster" : "single");
+            return;
+        }
+
+        StringBuilder message = new StringBuilder()
+                .append("启动拓扑校验发现 ")
+                .append(errors.size())
+                .append(" 项问题");
+        if (strict) {
+            message.append("（payroll.guard.strict=fail），已停止启动：");
+        } else {
+            message.append("（payroll.guard.strict=warn，仅告警，下一版本将改为 fail）：");
+        }
+        for (int i = 0; i < errors.size(); i++) {
+            message.append(System.lineSeparator())
+                    .append("  ")
+                    .append(i + 1)
+                    .append(") ")
+                    .append(errors.get(i));
+        }
+        message.append(System.lineSeparator()).append("参考 ").append(DOC);
+        if (strict) {
             log.error(message.toString());
             throw new IllegalStateException(message.toString());
         }
-        log.info(
-                "[Topology] prod 拓扑校验通过：cluster + 非 H2 数据库 + Redis + Nacos + 外部检索嵌入 + 凭证密钥");
-    }
-
-    private void checkDeploymentMode(List<String> errors) {
-        String mode = environment.getProperty("payroll.deployment.mode", "single").trim();
-        if (!"cluster".equalsIgnoreCase(mode)) {
-            errors.add("部署模式必须为 cluster（payroll.deployment.mode / PAYROLL_DEPLOYMENT_MODE），当前："
-                    + (mode.isEmpty() ? "<空>" : mode));
-        }
+        log.warn(message.toString());
     }
 
     private void checkDatabase(List<String> errors) {
@@ -129,6 +157,53 @@ public class TopologyGuard implements ApplicationRunner {
         } catch (IllegalArgumentException e) {
             errors.add("PAYROLL_SECRET_KEY 必须是 Base64 编码的 32 字节密钥");
         }
+    }
+
+    private void checkAdminPassword(List<String> errors) {
+        String password = propertyOrEnv("payroll.auth.admin-password", "PAYROLL_ADMIN_PASSWORD");
+        if (password.isBlank() || DEFAULT_ADMIN_PASSWORD.equals(password)) {
+            errors.add("管理员初始口令未修改（payroll.auth.admin-password / PAYROLL_ADMIN_PASSWORD 为默认值或为空）");
+        }
+    }
+
+    private void checkNodeRole(List<String> errors, List<String> warnings, String role, boolean cluster) {
+        if (!"all".equals(role)) {
+            return;
+        }
+        if (cluster) {
+            errors.add("集群部署禁止 node-role=all（payroll.node-role / PAYROLL_NODE_ROLE），请拆成 web 与 runtime");
+        } else {
+            warnings.add("单机部署使用 node-role=all（payroll.node-role / PAYROLL_NODE_ROLE），仅允许本地/单机");
+        }
+    }
+
+    private void checkInternalToken(List<String> errors) {
+        if (propertyOrEnv("payroll.internal.token", "PAYROLL_AGENT_RUNTIME_TOKEN").isBlank()) {
+            errors.add("Web 节点未配置内部调用密钥（payroll.internal.token / PAYROLL_AGENT_RUNTIME_TOKEN）");
+        }
+    }
+
+    private void checkParseToken(List<String> errors) {
+        if (propertyOrEnv("payroll.kb.parse.token", "PAYROLL_PARSE_TOKEN").isBlank()) {
+            errors.add("解析模式为 remote 但未配置解析密钥（payroll.kb.parse.token / PAYROLL_PARSE_TOKEN）");
+        }
+    }
+
+    private boolean isWeb(String role) {
+        return "web".equals(role) || "all".equals(role);
+    }
+
+    private String role() {
+        String role = environment.getProperty("payroll.node-role", "all").trim().toLowerCase(Locale.ROOT);
+        return role.isEmpty() ? "all" : role;
+    }
+
+    private String propertyOrEnv(String key, String envKey) {
+        String property = environment.getProperty(key);
+        if (property != null && !property.isBlank()) {
+            return property.trim();
+        }
+        return value(envKey, "");
     }
 
     private void checkHttpUrl(List<String> errors, String label, String raw) {

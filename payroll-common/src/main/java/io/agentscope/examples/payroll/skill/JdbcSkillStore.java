@@ -5,6 +5,7 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.support.JsonSupport;
 import java.nio.charset.StandardCharsets;
@@ -89,6 +90,39 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
             "SELECT " + ROW_COLUMNS + " FROM skill_definition WHERE skill_id = ?";
 
     private static final String SELECT_ROW_FOR_UPDATE = SELECT_ROW + " FOR UPDATE";
+
+    /**
+     * 列表页一屏要的四列：版本号、写入者、数据需求、文件数。当前版本号与 {@code meta_json} 走
+     * {@code LEFT JOIN}（内置技能可能还没有版本行），setup 脚本是否存在再由
+     * {@link #SELECT_SETUP_PATHS} 批量补齐——逐条调 {@code detail} 会退化成 N+1。
+     */
+    private static final String SELECT_SUMMARIES =
+            """
+            SELECT d.skill_id, d.description, d.builtin, d.content_length, d.resource_count,
+                   d.updated_at, d.updated_by, d.revision, d.current_version_id,
+                   v.version_no, v.meta_json
+            FROM skill_definition d
+            LEFT JOIN skill_version v ON v.version_id = d.current_version_id
+            ORDER BY d.sort_order ASC, d.skill_id ASC
+            """;
+
+    private static final String SELECT_PROVENANCE =
+            "SELECT created_by, created_at, updated_by FROM skill_definition WHERE skill_id = ?";
+
+    /** 只取可能成为 setup 的路径：根目录 {@code setup.sh} 与 {@code scripts/**}，与解析规则同一口径。 */
+    private static final String SELECT_SETUP_PATHS =
+            """
+            SELECT r.skill_id, r.path FROM skill_resource r
+            JOIN skill_definition d ON d.current_version_id = r.version_id
+            WHERE r.skill_id IN %s AND (r.path = ? OR r.path LIKE 'scripts/%')
+            """;
+
+    /** 历史版本只读视图：清单与正文同版本，不用当前版本冒充。 */
+    private static final String SELECT_VERSION_AT =
+            """
+            SELECT version_id, version_no, body_md, content_length, change_note, created_by, created_at
+            FROM skill_version WHERE skill_id = ? AND version_no = ?
+            """;
 
     /**
      * 版本行只追加（D3a）；{@code meta_json} 是当前版本可改的元信息，不属正文。
@@ -261,6 +295,33 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
     /** 版本行的两个必读字段：正文进 DTO，{@code version_no} 进审计。 */
     private record VersionBody(int versionNo, String body) {}
 
+    /** 列表摘要行：定义行 + 当前版本号/元信息，setup 判定结果由批量查询补齐。 */
+    private record SummaryRow(
+            String id,
+            String description,
+            boolean builtin,
+            int contentLength,
+            int resourceCount,
+            long updatedAt,
+            String updatedBy,
+            long revision,
+            long versionId,
+            int versionNo,
+            String metaJson) {}
+
+    /** 定义行的溯源列；与 {@link Row} 分开查，避免目录快照多读三列。 */
+    private record Provenance(String createdBy, long createdAt, String updatedBy) {}
+
+    /** 历史版本读到内存后再去查清单，避免在 ResultSet 打开时再发一条语句。 */
+    private record VersionAt(
+            long versionId,
+            int versionNo,
+            String body,
+            int contentLength,
+            String changeNote,
+            String createdBy,
+            long createdAt) {}
+
     /** 回滚目标：指针、正文与指纹，三者一起才够追加一条新版本行。 */
     private record VersionTarget(long versionId, String body, String contentHash) {}
 
@@ -353,6 +414,198 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
         }
         remaining.values().forEach(row -> summaries.add(summary(row)));
         return List.copyOf(summaries);
+    }
+
+    /**
+     * 列表页专用：比 {@link #list()} 多版本号、写入者与 setup 判定，只多一次批量资源查询。
+     * 内置技能（库里还没有行）按「来源无法判定」返回：版本号 {@code null}、数据需求 {@code null}。
+     */
+    @Override
+    public List<SkillSummary> summaries() {
+        Map<String, SummaryRow> byId = new LinkedHashMap<>();
+        Map<String, Set<String>> loaded;
+        try (Connection connection = database.connection()) {
+            try (PreparedStatement statement = connection.prepareStatement(SELECT_SUMMARIES);
+                    ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    SummaryRow row = readSummaryRow(rs);
+                    byId.put(row.id(), row);
+                }
+            }
+            loaded = byId.isEmpty()
+                    ? Map.of()
+                    : selectSetupPaths(connection, List.copyOf(byId.keySet()));
+        } catch (SQLException e) {
+            throw unavailable("读取技能摘要失败", e);
+        }
+        Map<String, Set<String>> setupPaths = loaded;
+        List<SkillSummary> result = new ArrayList<>(byId.size() + RoleSkills.ids().size());
+        Set<String> seen = new LinkedHashSet<>();
+        for (String id : RoleSkills.ids()) {
+            SummaryRow row = byId.get(id);
+            result.add(row == null ? builtinSummary(id) : summary(row, setupPaths.get(id)));
+            seen.add(id);
+        }
+        byId.values().stream()
+                .filter(row -> !seen.contains(row.id()))
+                .forEach(row -> result.add(summary(row, setupPaths.get(row.id()))));
+        return List.copyOf(result);
+    }
+
+    /** 当前版本的文件路径 → sha256；技能不存在或文件包停用时为空。 */
+    @Override
+    public Map<String, String> resourceHashes(String id) {
+        String skillId = SkillIds.normalize(id);
+        try (Connection connection = database.connection()) {
+            Row row = readRow(connection, skillId, false);
+            if (row == null || !fileSettings.enabled()) {
+                return Map.of();
+            }
+            return Collections.unmodifiableMap(hashByPath(selectResources(connection, row.versionId())));
+        } catch (SQLException e) {
+            throw unavailable("读取技能 " + skillId + " 的文件指纹失败", e);
+        }
+    }
+
+    @Override
+    public SkillVersionContent versionContent(String id, int versionNo) {
+        String skillId = SkillIds.normalize(id);
+        try (Connection connection = database.connection()) {
+            Row row = readRow(connection, skillId, false);
+            if (row == null) {
+                throw new PayrollNotFoundException("技能不存在：" + skillId);
+            }
+            VersionAt version = selectVersionAt(connection, skillId, versionNo);
+            List<ResourceRef> refs =
+                    fileSettings.enabled()
+                            ? selectResources(connection, version.versionId())
+                            : List.of();
+            return new SkillVersionContent(
+                    version.versionNo(),
+                    version.body(),
+                    version.changeNote(),
+                    version.createdBy(),
+                    version.createdAt(),
+                    version.contentLength(),
+                    version.versionId() == row.versionId(),
+                    summaries(refs));
+        } catch (SQLException e) {
+            throw unavailable("读取技能 " + skillId + " 的版本 v" + versionNo + " 失败", e);
+        }
+    }
+
+    private static SummaryRow readSummaryRow(ResultSet rs) throws SQLException {
+        java.sql.Timestamp updatedAt = rs.getTimestamp("updated_at");
+        int versionNo = rs.getInt("version_no");
+        if (rs.wasNull()) {
+            versionNo = 0;
+        }
+        return new SummaryRow(
+                rs.getString("skill_id"),
+                text(rs.getString("description")),
+                rs.getBoolean("builtin"),
+                rs.getInt("content_length"),
+                rs.getInt("resource_count"),
+                updatedAt == null ? 0L : updatedAt.getTime(),
+                text(rs.getString("updated_by")),
+                rs.getLong("revision"),
+                rs.getLong("current_version_id"),
+                versionNo,
+                text(rs.getString("meta_json")));
+    }
+
+    private static Map<String, Set<String>> selectSetupPaths(
+            Connection connection, List<String> skillIds) throws SQLException {
+        Map<String, Set<String>> bySkill = new LinkedHashMap<>();
+        for (int from = 0; from < skillIds.size(); from += MAX_IN_PARAMS) {
+            List<String> chunk =
+                    skillIds.subList(from, Math.min(from + MAX_IN_PARAMS, skillIds.size()));
+            String sql = SELECT_SETUP_PATHS.formatted(placeholders(chunk.size()));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                int index = 1;
+                for (String id : chunk) {
+                    statement.setString(index++, id);
+                }
+                statement.setString(index, SkillFilePackage.SETUP_SH);
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        bySkill.computeIfAbsent(rs.getString("skill_id"), ignored -> new LinkedHashSet<>())
+                                .add(rs.getString("path"));
+                    }
+                }
+            }
+        }
+        return bySkill;
+    }
+
+    private static VersionAt selectVersionAt(Connection connection, String skillId, int versionNo)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(SELECT_VERSION_AT)) {
+            bind(statement, List.of(skillId, versionNo));
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    throw new PayrollNotFoundException("版本不存在：v" + versionNo);
+                }
+                java.sql.Timestamp createdAt = rs.getTimestamp("created_at");
+                return new VersionAt(
+                        rs.getLong("version_id"),
+                        rs.getInt("version_no"),
+                        rs.getString("body_md"),
+                        rs.getInt("content_length"),
+                        text(rs.getString("change_note")),
+                        text(rs.getString("created_by")),
+                        createdAt == null ? 0L : createdAt.getTime());
+            }
+        }
+    }
+
+    private static Provenance selectProvenance(Connection connection, String skillId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(SELECT_PROVENANCE)) {
+            bind(statement, List.of(skillId));
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return new Provenance("", 0L, "");
+                }
+                java.sql.Timestamp createdAt = rs.getTimestamp("created_at");
+                return new Provenance(
+                        text(rs.getString("created_by")),
+                        createdAt == null ? 0L : createdAt.getTime(),
+                        text(rs.getString("updated_by")));
+            }
+        }
+    }
+
+    /** setup 判定：声明了可用脚本才算需要数据；{@code meta_json} 坏掉时按未知（{@code null}）处理。 */
+    private static Boolean needsData(Map<String, Object> meta, Set<String> setupPaths) {
+        if (meta == null) {
+            return null;
+        }
+        Object raw = meta.get("setup");
+        return SkillInitRequirements.setupPath(
+                        raw == null ? null : String.valueOf(raw),
+                        setupPaths == null ? Set.of() : setupPaths)
+                != null;
+    }
+
+    /** 元信息解析失败返回 {@code null}：调用方据此把派生字段一律报「未知」，而不是猜一个默认值。 */
+    private static Map<String, Object> parseMeta(String metaJson) {
+        try {
+            return metaJson == null || metaJson.isBlank()
+                    ? Map.of()
+                    : JsonSupport.fromJson(metaJson, META_JSON);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static Boolean needsData(Map<String, Object> customMeta, List<ResourceRef> refs) {
+        Object raw = customMeta.get("setup");
+        Set<String> paths = new LinkedHashSet<>();
+        refs.forEach(ref -> paths.add(ref.path()));
+        return SkillInitRequirements.setupPath(
+                        raw == null ? null : String.valueOf(raw), paths)
+                != null;
     }
 
     /** 目录单查询：不带正文、不读 blob（§5.2 的红线：装配单个技能的全部资源不得拖慢整张目录）。 */
@@ -591,6 +844,8 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
                             ? selectResources(connection, row.versionId())
                             : List.of();
             VersionBody version = selectVersionBody(connection, row);
+            Map<String, Object> custom = selectCustomMeta(connection, row.versionId());
+            Provenance provenance = selectProvenance(connection, skillId);
             return new SkillDetail(
                     skillId,
                     row.description(),
@@ -598,12 +853,16 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
                     SOURCE_DB,
                     row.builtin(),
                     row.builtin(),
+                    provenance.createdAt(),
                     row.updatedAt(),
                     summaries(refs),
                     row.executionEnabled(),
-                    metadataOf(row, selectCustomMeta(connection, row.versionId())),
+                    metadataOf(row, custom),
                     String.valueOf(row.revision()),
-                    version.versionNo());
+                    version.versionNo(),
+                    provenance.createdBy(),
+                    provenance.updatedBy(),
+                    needsData(custom, refs));
         } catch (SQLException e) {
             throw unavailable("读取技能 " + skillId + " 失败", e);
         }
@@ -915,6 +1174,47 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
                 });
         SkillRepositories.invalidateShared();
         return true;
+    }
+
+    /**
+     * 单文件写：只 upsert 目标路径那一行清单，其余文件不读不写，因此耗时不随文件数增长。
+     * 先删同路径旧行再插入，等价于覆盖；新文件的删除命中 0 行，不影响结果。
+     */
+    @Override
+    public List<SkillFilePackage.Summary> writeFile(
+            String id, String path, String content, String expectedRevision, String operator) {
+        String skillId = SkillIds.normalize(id);
+        requireFilesEnabled();
+        SkillFilePackage.SkillFile file =
+                SkillFilePackage.normalizeAll(
+                                List.of(new SkillFilePackage.SkillFile(path, content)), fileSettings)
+                        .get(0);
+        Pending pending =
+                inTransaction(
+                        skillId,
+                        (connection, newBlobs) -> {
+                            Row locked =
+                                    lockRow(
+                                            connection,
+                                            skillId,
+                                            expectedRevision,
+                                            "技能不存在或未落库：" + skillId);
+                            deleteResourceRow(connection, locked.versionId(), file.path());
+                            writeResources(
+                                    connection,
+                                    locked.versionId(),
+                                    skillId,
+                                    List.of(file),
+                                    newBlobs);
+                            return replaceResources(
+                                    connection,
+                                    locked,
+                                    selectResources(connection, locked.versionId()),
+                                    operator);
+                        });
+        SkillRepositories.invalidateShared();
+        log.info("[Skill] 已写入技能 {} 的单文件 {}", skillId, file.path());
+        return summaries(pending.resources());
     }
 
     @Override
@@ -1785,6 +2085,25 @@ public final class JdbcSkillStore implements SkillStore, SkillRuntimeReader {
                 row.contentLength(),
                 row.resourceCount(),
                 String.valueOf(row.revision()));
+    }
+
+    /** 摘要行 + setup 判定；版本号与写入者直接来自定义行与当前版本行。 */
+    private static SkillSummary summary(SummaryRow row, Set<String> setupPaths) {
+        Map<String, Object> meta = parseMeta(row.metaJson());
+        return new SkillSummary(
+                row.id(),
+                row.description(),
+                SOURCE_DB,
+                row.builtin(),
+                row.builtin(),
+                row.updatedAt(),
+                row.contentLength(),
+                row.resourceCount(),
+                String.valueOf(row.revision()),
+                row.versionNo(),
+                row.updatedBy(),
+                needsData(meta, setupPaths),
+                meta == null ? null : SkillProjectParser.dataMaxBytes(meta));
     }
 
     private Row readRow(ResultSet rs) throws SQLException {

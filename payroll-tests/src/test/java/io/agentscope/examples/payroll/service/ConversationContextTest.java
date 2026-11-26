@@ -37,7 +37,7 @@ class ConversationContextTest {
     }
 
     @Test
-    @DisplayName("恢复上下文时跳过已摘要轮次并配对用户与助手消息")
+    @DisplayName("恢复上下文时配对用户与助手消息，已窗口化的消息不再按摘要轮次截断")
     void restoresFromMessagesAndSnapshot() {
         List<ChatMessage> messages = new ArrayList<>();
         for (int i = 1; i <= 5; i++) {
@@ -50,11 +50,10 @@ class ConversationContextTest {
                 ConversationContext.from(new ChatContextSnapshot("早前摘要", 2), messages);
 
         assertEquals(2, context.summarizedTurns());
-        assertEquals(3, context.recentTurnCount());
+        assertEquals(5, context.recentTurnCount());
         String rendered = context.render();
         assertTrue(rendered.contains("早前摘要"));
-        assertTrue(rendered.contains("- 问题3"));
-        assertFalse(rendered.contains("- 问题1"));
+        assertTrue(rendered.contains("- 问题5"));
         assertFalse(rendered.contains("失败"));
     }
 
@@ -200,6 +199,62 @@ class ConversationContextTest {
         assertEquals(
                 context.augment("陪产假呢", "记忆", "", ""),
                 context.augment("陪产假呢", "记忆", "", "", ""));
+    }
+
+    @Test
+    @DisplayName("摘要轮次超过窗口长度时最近四轮仍进入提示词（水位窗口回归）")
+    void recentTurnsSurviveWhenSummaryExceedsWindow() {
+        List<ChatMessage> messages = new ArrayList<>();
+        long id = 0;
+        for (int i = 11; i <= 30; i++) {
+            messages.add(message(++id, "USER", "问题" + i));
+            messages.add(message(++id, "ASSISTANT", "回答" + i));
+        }
+
+        ConversationContext context =
+                ConversationContext.from(new ChatContextSnapshot("早期 20 轮摘要", 20, 0), messages);
+
+        assertEquals(20, context.recentTurnCount());
+        String rendered = context.render();
+        for (int i = 27; i <= 30; i++) {
+            assertTrue(rendered.contains("- 问题" + i), rendered);
+        }
+        assertTrue(rendered.contains("早期 20 轮摘要"));
+    }
+
+    @Test
+    @DisplayName("压缩后水位指向被折叠轮次的最后一条助手消息")
+    void compressionAdvancesWatermarkToFoldedMessage() {
+        ConversationContext context = ConversationContext.from(ChatContextSnapshot.EMPTY, turns(8));
+
+        context.applySummary("摘要", 2);
+
+        assertEquals(4L, context.throughMessageId());
+        assertEquals(6, context.recentTurnCount());
+        assertEquals(4L, context.snapshot().throughMessageId());
+    }
+
+    @Test
+    @DisplayName("存量会话首次窗口化后水位回填到最后被裁掉的消息")
+    void legacyBackfillAdvancesWatermark() {
+        ConversationContext context = ConversationContext.from(ChatContextSnapshot.EMPTY, turns(30));
+        assertEquals(0L, context.throughMessageId());
+
+        context.backfillLegacyWindow(10);
+
+        assertEquals(40L, context.throughMessageId());
+        assertEquals(10, context.recentTurnCount());
+    }
+
+    /** 构造 {@code count} 轮“用户 → 助手”消息，消息 id 从 1 连续递增。 */
+    private static List<ChatMessage> turns(int count) {
+        List<ChatMessage> messages = new ArrayList<>();
+        long id = 0;
+        for (int i = 1; i <= count; i++) {
+            messages.add(message(++id, "USER", "问题" + i));
+            messages.add(message(++id, "ASSISTANT", "回答" + i));
+        }
+        return messages;
     }
 
     private static ChatMessage message(long id, String role, String content) {

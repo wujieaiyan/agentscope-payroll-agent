@@ -15,6 +15,7 @@ import io.agentscope.examples.payroll.router.RouteDecision;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import io.agentscope.examples.payroll.service.InternalAuth;
 import io.agentscope.examples.payroll.service.SemanticCacheContext;
+import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
 import io.agentscope.examples.payroll.skill.NacosFlowRegistry;
 import io.agentscope.examples.payroll.support.JsonSupport;
@@ -31,6 +32,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,7 +65,7 @@ public class InternalTurnController {
     private static final long DEFAULT_TURN_MILLIS = 60_000L;
 
     private final ChatSessionManager manager;
-    private final Executor chatStreamExecutor;
+    private final Executor runtimeTurnExecutor;
     private final AgentRouter router;
     private final NacosAgentRegistry agentRegistry;
     private final NacosFlowRegistry flowRegistry;
@@ -79,7 +81,7 @@ public class InternalTurnController {
 
     public InternalTurnController(
             ChatSessionManager manager,
-            @Qualifier("chatStreamExecutor") Executor chatStreamExecutor,
+            @Qualifier("runtimeTurnExecutor") Executor runtimeTurnExecutor,
             AgentRouter router,
             NacosAgentRegistry agentRegistry,
             NacosFlowRegistry flowRegistry,
@@ -97,7 +99,7 @@ public class InternalTurnController {
             @Value("${payroll.node-role:all}") String role,
             @Value("${payroll.internal.max-skew-seconds:120}") long maxSkewSeconds) {
         this.manager = manager;
-        this.chatStreamExecutor = chatStreamExecutor;
+        this.runtimeTurnExecutor = runtimeTurnExecutor;
         this.router = router == null ? AgentRouter.disabled() : router;
         this.agentRegistry = agentRegistry;
         this.flowRegistry = flowRegistry;
@@ -161,7 +163,7 @@ public class InternalTurnController {
                 request.ownerNode());
         emitQueued(turn.get());
         try {
-            chatStreamExecutor.execute(
+            runtimeTurnExecutor.execute(
                     () ->
                             execute(
                                     turn.get(),
@@ -169,7 +171,7 @@ public class InternalTurnController {
                                     request.attachmentText(),
                                     request.cacheScope()));
         } catch (RejectedExecutionException e) {
-            ChatStreamRejection.record(chatStreamExecutor, "runtime");
+            ChatStreamRejection.record(runtimeTurnExecutor, "runtime");
             manager.failTurn(turn.get(), "执行队列已满");
             manager.finishRemoteTurn(request.turnId());
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
@@ -399,7 +401,7 @@ public class InternalTurnController {
 
     /** 有空闲线程时返回 0（无需排队），否则返回预计的队列位次。 */
     private int queuePosition() {
-        if (chatStreamExecutor instanceof ThreadPoolExecutor pool
+        if (runtimeTurnExecutor instanceof ThreadPoolExecutor pool
                 && pool.getActiveCount() >= pool.getMaximumPoolSize()) {
             return pool.getQueue().size() + 1;
         }
@@ -429,6 +431,8 @@ public class InternalTurnController {
             String cacheScope) {
         long startedAt = System.nanoTime();
         AtomicBoolean finished = new AtomicBoolean(false);
+        AtomicReference<String> path = new AtomicReference<>("unknown");
+        AtomicReference<String> outcome = new AtomicReference<>("released");
         try {
             SemanticCacheContext.set(cacheScope);
             turn.chat()
@@ -444,6 +448,10 @@ public class InternalTurnController {
                                             if (saved != null) {
                                                 UserProfileRecorder.schedule(turn.userId());
                                             }
+                                            if (reply.routing() != null) {
+                                                path.set(reply.routing().path());
+                                            }
+                                            outcome.set("success");
                                             return saved;
                                         } finally {
                                             finished.set(true);
@@ -451,6 +459,7 @@ public class InternalTurnController {
                                     }));
         } catch (RuntimeException e) {
             log.error("[轮次] runtime 执行异常：turn={}", turn.turnId(), e);
+            outcome.set("failed");
             if (finished.compareAndSet(false, true)) {
                 manager.failTurn(turn, rootMessage(e));
             }
@@ -461,7 +470,9 @@ public class InternalTurnController {
             }
             manager.finishRemoteTurn(turn.turnId());
             // 只统计真正执行的时间，排队等待不计入平均轮次时长。
-            recordTurnDuration((System.nanoTime() - startedAt) / 1_000_000L);
+            long millis = (System.nanoTime() - startedAt) / 1_000_000L;
+            recordTurnDuration(millis);
+            TurnMetrics.turnDuration(path.get(), outcome.get(), millis);
         }
     }
 

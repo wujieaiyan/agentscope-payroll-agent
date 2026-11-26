@@ -60,6 +60,32 @@ public class KbSeriesStore {
         }
     }
 
+    /** 批量读取未删除的库；多库检索一次往返完成权限过滤前的加载。 */
+    public List<Series> findByIds(java.util.Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", ids.stream().map(id -> "?").toList());
+        try (Connection connection = database.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                SELECT + " WHERE series_id IN (" + placeholders + ") AND deleted_at IS NULL")) {
+            int index = 1;
+            for (Long id : ids) {
+                statement.setLong(index++, id);
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Series> result = new ArrayList<>();
+                while (rs.next()) {
+                    result.add(map(rs));
+                }
+                return result;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("查询知识库失败：" + e.getMessage(), e);
+        }
+    }
+
     public Series insert(Series series) {
         String sql =
                 """

@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.profile;
 
+import io.agentscope.examples.payroll.jobs.JobLeases;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.concurrent.Executors;
@@ -9,15 +10,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 抽取凭证清理：与 chat_turns 同周期（默认 90 天），只在非 runtime 节点执行，避免重复扫库。
+ * 抽取凭证清理：与 chat_turns 同周期（默认 90 天），只在非 runtime 节点执行，避免重复扫库；
+ * 多副本下每轮再由 {@link JobLeases} 选出唯一执行者。
  */
 public final class UserProfileMaintenance implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(UserProfileMaintenance.class);
     private static final long FIRST_DELAY_MINUTES = 5;
+    private static final String LEASE_JOB = "retention.profile";
 
     private final UserProfileStore store;
     private final Duration retention;
+    private final JobLeases leases;
     private final ScheduledExecutorService scheduler;
 
     public UserProfileMaintenance(
@@ -25,8 +29,18 @@ public final class UserProfileMaintenance implements AutoCloseable {
             int retentionDays,
             int intervalMinutes,
             boolean enabled) {
+        this(store, retentionDays, intervalMinutes, enabled, null);
+    }
+
+    public UserProfileMaintenance(
+            UserProfileStore store,
+            int retentionDays,
+            int intervalMinutes,
+            boolean enabled,
+            JobLeases leases) {
         this.store = store;
         this.retention = Duration.ofDays(Math.max(0, retentionDays));
+        this.leases = leases;
         if (!enabled || store == null || retentionDays <= 0 || intervalMinutes <= 0) {
             this.scheduler = null;
             return;
@@ -51,7 +65,12 @@ public final class UserProfileMaintenance implements AutoCloseable {
 
     private void run() {
         try {
-            cleanup(LocalDateTime.now().minus(retention));
+            if (leases == null) {
+                cleanup(LocalDateTime.now().minus(retention));
+            } else {
+                leases.runIfAcquired(
+                        LEASE_JOB, lease -> cleanup(LocalDateTime.now().minus(retention)));
+            }
         } catch (RuntimeException e) {
             log.warn("[工作偏好] 清理抽取凭证失败：{}", e.getClass().getSimpleName());
         }

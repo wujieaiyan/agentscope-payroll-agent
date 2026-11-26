@@ -11,11 +11,11 @@ import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.domain.ChatAttachment;
 import io.agentscope.examples.payroll.domain.ChatAttachmentRef;
 import io.agentscope.examples.payroll.domain.PayrollException;
-import io.agentscope.examples.payroll.kb.KbOcrService;
-import io.agentscope.examples.payroll.kb.KbParserService;
-import io.agentscope.examples.payroll.kb.ocr.OcrEngineProperties;
-import io.agentscope.examples.payroll.kb.ocr.OcrExtractionService;
-import io.agentscope.examples.payroll.kb.ocr.TesseractImageExtractor;
+import io.agentscope.payroll.parser.KbParserService;
+import io.agentscope.payroll.parser.ocr.KbOcrService;
+import io.agentscope.payroll.parser.ocr.OcrEngineProperties;
+import io.agentscope.payroll.parser.ocr.OcrExtractionService;
+import io.agentscope.payroll.parser.ocr.TesseractImageExtractor;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.ChatSessionManager;
 import java.io.ByteArrayOutputStream;
@@ -165,9 +165,9 @@ class ChatAttachmentServiceTest {
                                         List.of(
                                                 new MockMultipartFile(
                                                         "files",
-                                                        "合同.pdf",
-                                                        "application/pdf",
-                                                        "%PDF-1.4".getBytes(
+                                                        "说明.txt",
+                                                        "text/plain",
+                                                        "plain text".getBytes(
                                                                 StandardCharsets.UTF_8)))));
 
         assertTrue(error.getMessage().contains("暂不支持"));

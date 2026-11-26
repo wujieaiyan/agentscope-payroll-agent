@@ -190,7 +190,14 @@ class DdlSyntaxTest {
                         table + ".skill_id 必须与 ID 上限同宽，否则长 ID 只写不读");
             }
         }
-        assertEquals(List.of("skill_definition", "skill_resource", "skill_version"), found.stream().sorted().toList());
+        assertEquals(
+                List.of(
+                        "skill_creation_origin",
+                        "skill_data_state",
+                        "skill_definition",
+                        "skill_resource",
+                        "skill_version"),
+                found.stream().sorted().toList());
     }
 
     private static void insertMaxLengthId(Connection connection) throws Exception {

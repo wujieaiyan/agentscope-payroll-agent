@@ -3,15 +3,16 @@ FROM eclipse-temurin:17-jre
 
 ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
-    JAVA_OPTS="-XX:MaxRAMPercentage=75 -Dfile.encoding=UTF-8"
+    JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
 
 WORKDIR /app
-# 扫描件 OCR 兜底：知识库解析无文字层 PDF 时调用 tesseract。
+# curl 仅用于容器 liveness 探针（/actuator/health/liveness）。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
+# PDF 渲染/OCR 已由 parser 服务承担；Web 镜像不再内置 Tesseract，避免重依赖与内存争用。
 COPY payroll-backend/target/payroll-backend-exec.jar /app/app.jar
-RUN mkdir -p /app/data /app/output
+RUN mkdir -p /app/data /app/parsed /app/output
 
 EXPOSE 8080
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -394,6 +394,31 @@ class ModelConnectionRegistryTest {
     }
 
     @Test
+    @DisplayName("编码面误选内置环境连接时返回配置错误，而不是 NoSuchElementException")
+    void codingWithBuiltinEnvConnectionFailsCleanly() throws IOException {
+        nacos = new FakeNacos();
+        ModelConnectionRegistry registry = registry(true);
+
+        ModelConfigException error =
+                assertThrows(
+                        ModelConfigException.class,
+                        () ->
+                                registry.saveDefaults(
+                                        new ModelDefaults("", ModelConnections.ENV_CONTROL_ID, ""),
+                                        0,
+                                        "admin"));
+
+        String expected =
+                ModelConnections.envCodingConfigured()
+                        ? ModelConfigException.ENV_LOCKED
+                        : ModelConfigException.CAPABILITY_UNSUPPORTED;
+        assertEquals(expected, error.code());
+        assertEquals(0, nacos.writes.get(), "校验失败时不得写入");
+        assertEquals(0, registry.revision());
+        assertEquals("", registry.catalog().defaults().coding());
+    }
+
+    @Test
     @DisplayName("写路径读取 Nacos 失败时 fail-closed，503 且不写入旧目录")
     void writeFailsClosedWhenNacosReadFails() throws IOException {
         nacos = new FakeNacos();

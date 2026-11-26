@@ -8,11 +8,14 @@ import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.kb.KbConfigModels.ChunkConfig;
 import io.agentscope.examples.payroll.kb.KbConfigModels.ConfigPayload;
-import io.agentscope.examples.payroll.kb.KbConfigModels.ParseConfig;
 import io.agentscope.examples.payroll.kb.KbConfigModels.RetrievalConfig;
 import io.agentscope.examples.payroll.kb.KbDtos.ConfigView;
 import io.agentscope.examples.payroll.kb.KbDtos.SaveConfigRequest;
 import io.agentscope.examples.payroll.kb.KbEnums.IndexStrategy;
+import io.agentscope.examples.payroll.kb.parse.OcrConfig;
+import io.agentscope.examples.payroll.kb.parse.ParseConfig;
+import io.agentscope.examples.payroll.kb.parse.ParseOptions;
+import io.agentscope.examples.payroll.kb.parse.TypeParseConfig;
 import io.agentscope.examples.payroll.kb.KbModels.ConfigVersion;
 import io.agentscope.examples.payroll.kb.KbModels.Series;
 import java.util.List;
@@ -249,10 +252,10 @@ public class KbConfigService {
             payload.parse.perType = KbConfigModels.defaultParse().perType;
         }
         if (payload.parse.ocr == null) {
-            payload.parse.ocr = new KbConfigModels.OcrConfig();
+            payload.parse.ocr = new OcrConfig();
         }
         if (payload.parse.options == null) {
-            payload.parse.options = new KbConfigModels.ParseOptions();
+            payload.parse.options = new ParseOptions();
         }
         if (payload.chunk.common == null) {
             payload.chunk.common = new KbConfigModels.CommonChunkConfig();
@@ -290,7 +293,7 @@ public class KbConfigService {
             }
         }
         for (String type : parse.docTypes) {
-            KbConfigModels.TypeParseConfig typeConfig = parse.perType.get(type);
+            TypeParseConfig typeConfig = parse.perType.get(type);
             if (typeConfig == null) {
                 throw new PayrollException("解析配置：缺少 " + type + " 的解析策略");
             }
