@@ -391,6 +391,17 @@ Nacos 鉴权沿用 `PAYROLL_NACOS_USERNAME`/`PAYROLL_NACOS_PASSWORD`；写接口
 - `/health` 里该组件的键是 `skills`（原来叫 `nacos`，db 源沿用同名会误导告警），
   陈旧阈值 `PAYROLL_HEALTH_SKILLS_STALE_SECONDS`（默认 300）。
 
+### 技能控制台（2026-11 重做）
+
+管理台技能页已从单文件弹窗改为「列表 / 工作台六页签 / 三栏编辑器 / 新建 / 导入」五屏，路由见 `docs/frontend-ia.md`，视觉与交互以 `docs/skill-console-prototype-parity-spec.md` 与 `docs/skill-console-ui-redesign.md` 为准。
+
+- 迁移 `V24__skill_console_state.sql` 只新增两张读模型表：`skill_data_state`（数据工作区状态缓存，键为 `skill_id`）与 `skill_creation_origin`（模板创建血缘）。不修改既有表，H2 与 MySQL 共用，可重放。
+- 新建模板放在 `payroll-common/src/main/resources/skill-templates/*.md`（当前 4 篇），由 `GET /api/admin/skills/templates` 列出、`POST /api/admin/skills/from-template` 克隆；模板正文同样要过质量门槛。
+- 数据状态（`GET /{id}/data`）只在打开数据页时实时查沙箱，并把结果回写 `skill_data_state`；列表与概览只读这份缓存。后台 `SkillDataStateRefresher` 负责收敛非终态，终态后不再访问沙箱；`NOT_REQUIRED` 由「是否声明 setup」派生、不落库。
+- **列表接口不调用沙箱**：绑定数、文件数、`needsData`、数据状态全部来自库内摘要/缓存；200 条技能的列表延迟不受沙箱影响。
+- 工作台新增只读接口：`GET /{id}/overview`（健康卡与下一步）、`GET /{id}/bindings`（引用智能体）、`GET /{id}/versions/{versionNo}`（版本正文，供前端本地 diff）；写接口仍沿用 §「技能存储来源」中的 revision 与审计契约。
+- 编辑器预览使用 `marked` + `DOMPurify`（`resources`/`scripts` 文件按纯文本展示），冲突时不提供强制覆盖。
+
 ### 参考文件与脚本文件
 
 技能可携带配套文件（参考文档、脚本、目录式技能项目的根文件），存放在同 group 的 `<技能ID>.files.json`：

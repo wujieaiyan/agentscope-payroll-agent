@@ -1,0 +1,893 @@
+<div class="ui-root">
+<style>
+.ui-root{
+  --bg:#f5f6f8; --panel:#ffffff; --line:#e6e8ee; --line-2:#d7dbe3;
+  --ink:#12151b; --ink-2:#4b5465; --ink-3:#7e8798; --ink-4:#a3aab8;
+  --accent:#2f6feb; --accent-2:#2457c4; --accent-soft:#edf3ff;
+  --green:#18794e; --green-soft:#e8f5ee;
+  --amber:#9a6700; --amber-soft:#fff6e3;
+  --red:#c92a2a; --red-soft:#fdecec;
+  --r-lg:12px; --r-md:8px; --r-sm:6px;
+  --shadow-1:0 1px 2px rgba(16,24,40,.05);
+  --shadow-2:0 12px 32px rgba(16,24,40,.12);
+  --mono:ui-monospace,"JetBrains Mono","Cascadia Code",Consolas,monospace;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:13px; line-height:1.55; color:var(--ink); background:var(--bg); min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+}
+.ui-root *{box-sizing:border-box}
+.ui-root ::selection{background:#dbe8ff;color:#123a86}
+.ui-root button{font:inherit;color:inherit;cursor:pointer;background:none;border:0}
+.ui-root a{color:var(--accent);text-decoration:none;cursor:pointer}
+.ui-root :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.ui-root .defs{position:absolute;width:0;height:0;overflow:hidden}
+.ui-root svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.ui-root .mono{font-family:var(--mono);font-size:12px}
+.ui-root .muted{color:var(--ink-3)}
+.ui-root .num{font-variant-numeric:tabular-nums}
+
+/* chrome */
+.ui-root .app{display:grid;grid-template-columns:56px minmax(0,1fr);min-height:100vh}
+.ui-root .rail{background:#101418;display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0;position:sticky;top:0;height:100vh}
+.ui-root .brand{width:32px;height:32px;border-radius:9px;background:#fff;color:#101418;display:grid;place-items:center;font-weight:700;font-size:14px;margin-bottom:10px}
+.ui-root .rail-btn{width:36px;height:36px;border-radius:9px;color:#8b93a1;display:grid;place-items:center;position:relative}
+.ui-root .rail-btn:hover{background:#1b212a;color:#d5dae3}
+.ui-root .rail-btn.on{background:#1e2530;color:#fff}
+.ui-root .rail-btn.on::before{content:"";position:absolute;left:-10px;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--accent)}
+.ui-root .rail-spacer{flex:1}
+.ui-root .rail-avatar{width:28px;height:28px;border-radius:50%;background:#2b3542;color:#dfe5ee;display:grid;place-items:center;font-size:11px;font-weight:600}
+.ui-root .main{min-width:0;display:flex;flex-direction:column}
+.ui-root .topbar{height:52px;display:flex;align-items:center;gap:14px;padding:0 24px;background:rgba(255,255,255,.86);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+.ui-root .crumb{display:flex;align-items:center;gap:8px;color:var(--ink-3);font-size:12.5px;white-space:nowrap}
+.ui-root .crumb b{color:var(--ink);font-weight:600;font-size:13px}
+.ui-root .topbar .spacer{flex:1}
+.ui-root .search-trigger{display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;min-width:230px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel);color:var(--ink-3);font-size:12.5px}
+.ui-root .search-trigger:hover{border-color:var(--line-2);color:var(--ink-2)}
+.ui-root .search-trigger kbd{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-4);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+.ui-root .icon-btn{width:30px;height:30px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--ink-3)}
+.ui-root .icon-btn:hover{background:#eef0f4;color:var(--ink)}
+.ui-root .avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#335cff,#6f42c1);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600}
+.ui-root .switcher{display:flex;align-items:center;gap:6px;padding:12px 24px 0;flex-wrap:wrap}
+.ui-root .switcher .lbl{font-size:11px;color:var(--ink-4);letter-spacing:.04em;text-transform:uppercase;margin-right:4px}
+.ui-root .switcher button{height:28px;padding:0 11px;border-radius:999px;font-size:12px;color:var(--ink-2);border:1px solid transparent}
+.ui-root .switcher button:hover{background:#eceef2}
+.ui-root .switcher button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.ui-root .canvas{max-width:1280px;width:100%;margin:0 auto;padding:18px 24px 64px}
+.ui-root .screen{display:none}
+.ui-root .screen.on{display:block;animation:fade .18s ease}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.ui-root .screen.on{animation:none}}
+
+/* primitives */
+.ui-root h1{margin:0;font-size:22px;line-height:1.25;letter-spacing:-.01em;font-weight:650}
+.ui-root h2{margin:0;font-size:17px;line-height:1.3;font-weight:650}
+.ui-root h3{margin:0;font-size:13px;font-weight:600}
+.ui-root p{margin:0}
+.ui-root .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border-radius:var(--r-md);font-size:13px;font-weight:500;border:1px solid transparent;white-space:nowrap;transition:background .12s,border-color .12s,box-shadow .12s}
+.ui-root .btn.sm{height:28px;padding:0 9px;font-size:12px;border-radius:var(--r-sm)}
+.ui-root .btn.primary{background:var(--accent);color:#fff;box-shadow:0 1px 1px rgba(16,24,40,.08)}
+.ui-root .btn.primary:hover{background:var(--accent-2)}
+.ui-root .btn.secondary{background:var(--panel);border-color:var(--line-2);color:var(--ink)}
+.ui-root .btn.secondary:hover{background:#f7f8fa;border-color:#c6ccd7}
+.ui-root .btn.ghost{color:var(--ink-2)}
+.ui-root .btn.ghost:hover{background:#eceef2;color:var(--ink)}
+.ui-root .btn.danger{background:var(--red);color:#fff}
+.ui-root .btn[disabled]{opacity:.45;pointer-events:none}
+.ui-root .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-1)}
+.ui-root .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.ui-root .panel-head.slim{padding-bottom:10px;border-bottom:0}
+.ui-root .panel-head a{font-size:12px;color:var(--ink-3)}
+.ui-root .panel-head a:hover{color:var(--accent)}
+.ui-root .divider{height:1px;background:var(--line);margin:14px 0}
+.ui-root .tag{display:inline-flex;align-items:center;height:22px;padding:0 7px;border-radius:var(--r-sm);background:#f1f3f6;color:var(--ink-2);font-size:11.5px;font-weight:500}
+.ui-root .tag.mono{font-family:var(--mono);font-size:11px}
+.ui-root .status{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+.ui-root .status i{width:7px;height:7px;border-radius:50%;background:var(--ink-4);flex:none}
+.ui-root .status.ok{color:var(--green)} .ui-root .status.ok i{background:var(--green)}
+.ui-root .status.warn{color:var(--amber)} .ui-root .status.warn i{background:var(--amber)}
+.ui-root .status.bad{color:var(--red)} .ui-root .status.bad i{background:var(--red)}
+.ui-root .status.idle{color:var(--ink-3)} .ui-root .status.idle i{background:#c3c9d4}
+.ui-root .segmented{display:inline-flex;gap:2px;padding:3px;background:#eceef2;border-radius:9px}
+.ui-root .segmented button{height:28px;padding:0 12px;border-radius:7px;font-size:12.5px;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px}
+.ui-root .segmented button:hover{color:var(--ink)}
+.ui-root .segmented button.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(16,24,40,.08)}
+.ui-root .segmented .count{font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+.ui-root .segmented button.on .count{color:var(--ink-2)}
+
+/* page head */
+.ui-root .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin:8px 0 16px}
+.ui-root .page-head .sub{margin-top:4px;color:var(--ink-3);font-size:12.5px}
+.ui-root .page-head .actions{display:flex;gap:8px;align-items:center}
+.ui-root .summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--ink-3);font-size:12.5px;margin-bottom:14px}
+.ui-root .summary b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.ui-root .summary .sep{width:3px;height:3px;border-radius:50%;background:#c9ced8}
+.ui-root .summary a{margin-left:auto;font-size:12px}
+
+/* list toolbar + table */
+.ui-root .toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.ui-root .field-search{display:flex;align-items:center;gap:7px;height:30px;padding:0 9px;border:1px solid var(--line);border-radius:var(--r-md);min-width:250px;color:var(--ink-3);background:#fbfcfd}
+.ui-root .field-search:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:#fff}
+.ui-root .field-search input{border:0;outline:0;background:none;font:inherit;font-size:12.5px;color:var(--ink);width:100%}
+.ui-root .field-search kbd{font-family:var(--mono);font-size:10px;color:var(--ink-4);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.ui-root .toolbar .spacer{flex:1}
+.ui-root .chip{height:28px;padding:0 10px;border-radius:999px;font-size:12px;color:var(--ink-2);border:1px solid transparent}
+.ui-root .chip:hover{background:#f1f3f6}
+.ui-root .chip.on{background:var(--accent-soft);color:var(--accent-2);border-color:#cfe0ff;font-weight:550}
+.ui-root table{width:100%;border-collapse:separate;border-spacing:0}
+.ui-root thead th{position:sticky;top:0;background:#fbfcfd;text-align:left;font-weight:500;font-size:11.5px;letter-spacing:.02em;color:var(--ink-3);padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;z-index:2}
+.ui-root tbody td{padding:11px 14px;border-bottom:1px solid #eef0f4;vertical-align:middle}
+.ui-root tbody tr:hover td{background:#fafbfc}
+.ui-root tbody tr:last-child td{border-bottom:0}
+.ui-root .skill-cell{display:flex;align-items:center;gap:10px;min-width:260px}
+.ui-root .tile{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font-size:13px;font-weight:600;flex:none;background:#eef1f6;color:#4a5568}
+.ui-root .tile.t1{background:#eef3ff;color:#2f5fd0}
+.ui-root .tile.t2{background:#eaf6ef;color:#18794e}
+.ui-root .tile.t3{background:#fff4e5;color:#9a6700}
+.ui-root .tile.t4{background:#f3eefc;color:#6f42c1}
+.ui-root .skill-name{display:flex;flex-direction:column;gap:1px;min-width:0}
+.ui-root .skill-name b{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px}
+.ui-root .skill-name span{font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}
+.ui-root .avatars{display:inline-flex;align-items:center}
+.ui-root .av{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:9.5px;font-weight:600;color:#fff;border:2px solid var(--panel);margin-left:-6px;background:#335cff}
+.ui-root .av:first-child{margin-left:0}
+.ui-root .av.a2{background:#0f766e} .ui-root .av.a3{background:#b45309} .ui-root .av.a4{background:#6f42c1}
+.ui-root .av.more{background:#e9ecf2;color:var(--ink-2)}
+.ui-root .bind{display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:12.5px}
+.ui-root .row-act{display:flex;align-items:center;gap:2px;justify-content:flex-end}
+.ui-root .row-act .link{font-size:12px;color:var(--ink-3);padding:4px 6px;border-radius:5px}
+.ui-root .row-act .link:hover{background:#eef0f4;color:var(--ink)}
+.ui-root .table-foot{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;color:var(--ink-3);font-size:12px}
+.ui-root .table-foot .pages{display:flex;gap:4px}
+.ui-root .table-foot .pages button{width:26px;height:26px;border-radius:6px;font-size:12px;color:var(--ink-2)}
+.ui-root .table-foot .pages button.on{background:#eceef2;color:var(--ink);font-weight:600}
+
+/* workbench */
+.ui-root .crumbs{display:flex;align-items:center;gap:7px;color:var(--ink-3);font-size:12px;margin:2px 0 12px}
+.ui-root .crumbs a{color:var(--ink-3)}
+.ui-root .crumbs a:hover{color:var(--accent)}
+.ui-root .wb-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-bottom:16px}
+.ui-root .wb-title{display:flex;gap:12px;align-items:flex-start}
+.ui-root .tile.lg{width:42px;height:42px;border-radius:11px;font-size:16px}
+.ui-root .wb-title h1{font-size:21px;font-family:var(--mono);letter-spacing:-.02em}
+.ui-root .wb-title .desc{color:var(--ink-3);font-size:12.5px;margin-top:2px}
+.ui-root .meta-row{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.ui-root .wb-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;margin-top:16px}
+.ui-root .stack{display:flex;flex-direction:column;gap:16px}
+.ui-root .health-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0}
+.ui-root .health{padding:14px 16px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:7px}
+.ui-root .health:last-child{border-right:0}
+.ui-root .health .h-top{display:flex;align-items:center;justify-content:space-between;color:var(--ink-3);font-size:12px}
+.ui-root .health .h-val{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.ui-root .health .h-sub{font-size:11.5px;color:var(--ink-3)}
+.ui-root .health a{font-size:11.5px;color:var(--ink-3)}
+.ui-root .health a:hover{color:var(--accent)}
+.ui-root .bar{height:5px;border-radius:999px;background:#eef0f4;overflow:hidden}
+.ui-root .bar i{display:block;height:100%;border-radius:999px;background:var(--accent)}
+.ui-root .checklist{list-style:none;margin:0;padding:4px 0}
+.ui-root .checklist li{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--ink-2);font-size:12.5px}
+.ui-root .checklist li+li{border-top:1px solid #f0f2f5}
+.ui-root .cb{width:18px;height:18px;border-radius:50%;border:1.5px solid var(--line-2);display:grid;place-items:center;color:#fff;flex:none}
+.ui-root .checklist li.done .cb{background:var(--green);border-color:var(--green)}
+.ui-root .checklist li.now .cb{border-color:var(--accent)}
+.ui-root .checklist li.done{color:var(--ink-3)}
+.ui-root .checklist li em{margin-left:auto;font-style:normal;font-size:11px;color:var(--ink-4)}
+.ui-root .checklist li .btn{margin-left:auto}
+.ui-root .timeline{padding:8px 16px 14px}
+.ui-root .tl{display:flex;gap:10px;padding:7px 0;font-size:12.5px;color:var(--ink-2)}
+.ui-root .tl-dot{width:7px;height:7px;border-radius:50%;background:#c9ced8;margin-top:6px;flex:none}
+.ui-root .tl-dot.on{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.ui-root .tl b{font-family:var(--mono);font-size:11.5px;color:var(--ink);margin-right:6px}
+.ui-root .tl .when{color:var(--ink-4);font-size:11.5px;margin-left:6px}
+.ui-root .side-row{display:flex;align-items:center;gap:9px;padding:9px 16px;border-top:1px solid #f0f2f5;font-size:12.5px}
+.ui-root .side-row:first-of-type{border-top:0}
+.ui-root .side-row .grow{flex:1;min-width:0}
+.ui-root .side-row .grow b{display:block;font-weight:550;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ui-root .side-row .grow span{font-size:11px;color:var(--ink-4)}
+.ui-root .kv{display:flex;justify-content:space-between;gap:14px;padding:8px 16px;font-size:12px;color:var(--ink-3)}
+.ui-root .kv b{font-weight:500;color:var(--ink-2);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ui-root .danger-zone{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ui-root .danger-zone p{font-size:11.5px;color:var(--ink-3)}
+
+/* editor */
+.ui-root .editor-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:6px 0 14px}
+.ui-root .editor-head .sub{color:var(--ink-3);font-size:12px;margin-top:2px}
+.ui-root .conflict{display:none;align-items:center;gap:10px;padding:9px 14px;border:1px solid #f0d9a8;background:var(--amber-soft);border-radius:var(--r-md);margin-bottom:12px;font-size:12.5px;color:#7a5200}
+.ui-root .conflict.show{display:flex}
+.ui-root .conflict .grow{flex:1}
+.ui-root .conflict .btn{background:rgba(255,255,255,.7);border-color:#e6c98c;color:#7a5200}
+.ui-root .editor-grid{display:grid;grid-template-columns:196px minmax(0,1fr) 288px;gap:14px;align-items:start}
+.ui-root .tree{padding:8px;position:sticky;top:68px}
+.ui-root .tree-title{font-size:11px;color:var(--ink-4);padding:6px 8px;letter-spacing:.03em}
+.ui-root .tree-group{font-size:11.5px;color:var(--ink-3);padding:8px 8px 4px;display:flex;align-items:center;gap:5px}
+.ui-root .tree-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:6px;font-size:12px;color:var(--ink-2);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ui-root .tree-item:hover{background:#f3f5f8}
+.ui-root .tree-item.on{background:var(--accent-soft);color:var(--accent-2);font-weight:550}
+.ui-root .tree-item.indent{padding-left:22px}
+.ui-root .editor-main{overflow:hidden}
+.ui-root .editor-tabs{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);background:#fbfcfd}
+.ui-root .editor-tabs .filetab{height:26px;padding:0 9px;border-radius:6px;background:#eef0f4;font-family:var(--mono);font-size:11.5px;color:var(--ink);display:inline-flex;align-items:center;gap:6px}
+.ui-root .editor-tabs .draft{margin-left:auto;font-size:11.5px;color:var(--ink-4)}
+.ui-root .code{padding:12px 0;max-height:470px;overflow:auto;background:#fff;font-family:var(--mono);font-size:12px;line-height:23px}
+.ui-root .line{display:grid;grid-template-columns:46px minmax(0,1fr);padding-right:16px}
+.ui-root .line .ln{text-align:right;padding-right:12px;color:#b6bdc9;user-select:none;font-size:11px}
+.ui-root .line .lc{white-space:pre-wrap;color:#2b3242}
+.ui-root .line.h{color:#0b3a8f}
+.ui-root .line.h .lc{font-weight:650}
+.ui-root .line.mut .lc{color:#7e8798}
+.ui-root .line.add{background:#f1faf4;box-shadow:inset 3px 0 0 #2da44e}
+.ui-root .line.add .lc::before{content:"+ ";color:#2da44e}
+.ui-root .savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-top:1px solid var(--line);background:#fbfcfd}
+.ui-root .save-meta{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--ink-3)}
+.ui-root .save-meta .ok{color:var(--green)}
+.ui-root .checks{padding:0 0 6px;position:sticky;top:68px}
+.ui-root .check{display:flex;align-items:flex-start;gap:8px;padding:8px 16px;font-size:12px;color:var(--ink-2)}
+.ui-root .check svg{width:14px;height:14px;margin-top:2px;flex:none}
+.ui-root .check.ok svg{color:var(--green)}
+.ui-root .check.hint svg{color:var(--ink-4)}
+.ui-root .checks .field-wrap{padding:0 16px}
+.ui-root .label{display:block;font-size:11.5px;color:var(--ink-3);margin-bottom:5px}
+.ui-root .input{width:100%;height:32px;border:1px solid var(--line);border-radius:var(--r-md);padding:0 9px;font:inherit;font-size:12.5px;background:#fff}
+.ui-root .input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.ui-root .hint{font-size:11px;color:var(--ink-4);margin-top:6px;line-height:1.5}
+.ui-root .presence{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-3);padding:0 16px 10px}
+
+/* create */
+.ui-root .steps{display:flex;align-items:center;gap:8px;margin:4px 0 18px;flex-wrap:wrap}
+.ui-root .step{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-3)}
+.ui-root .step .n{width:20px;height:20px;border-radius:50%;border:1px solid var(--line-2);display:grid;place-items:center;font-size:10.5px;font-family:var(--mono)}
+.ui-root .step.on{color:var(--ink);font-weight:600}
+.ui-root .step.on .n{background:var(--ink);border-color:var(--ink);color:#fff}
+.ui-root .step.done .n{background:var(--green);border-color:var(--green);color:#fff}
+.ui-root .steps .line{width:26px;height:1px;background:var(--line-2)}
+.ui-root .path-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.ui-root .path-card{padding:18px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel);box-shadow:var(--shadow-1);transition:border-color .12s,box-shadow .12s,transform .12s}
+.ui-root .path-card:hover{border-color:#c9d6f4;box-shadow:var(--shadow-2);transform:translateY(-1px)}
+.ui-root .path-card.rec{border-color:#c7d8ff;background:linear-gradient(180deg,#fbfdff,#fff)}
+.ui-root .path-card .pc-top{display:flex;align-items:center;justify-content:space-between}
+.ui-root .pc-icon{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:#f1f3f7;color:var(--ink-2)}
+.ui-root .path-card.rec .pc-icon{background:var(--accent-soft);color:var(--accent-2)}
+.ui-root .path-card h3{font-size:14px}
+.ui-root .path-card p{font-size:12px;color:var(--ink-3);line-height:1.6}
+.ui-root .path-card ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+.ui-root .path-card li{display:flex;gap:7px;font-size:11.5px;color:var(--ink-2)}
+.ui-root .path-card li svg{width:13px;height:13px;color:var(--green);margin-top:2px;flex:none}
+.ui-root .path-card .btn{margin-top:auto;justify-content:center}
+.ui-root .recent{margin-top:16px}
+.ui-root .recent-row{display:flex;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #f0f2f5;font-size:12.5px}
+.ui-root .recent-row:first-of-type{border-top:0}
+.ui-root .recent-row .grow{flex:1}
+.ui-root .recent-row em{font-style:normal;color:var(--ink-4);font-size:11.5px}
+.ui-root .tip{display:flex;gap:9px;align-items:flex-start;margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:#fbfcfd;color:var(--ink-3);font-size:12px}
+.ui-root .tip svg{width:14px;height:14px;margin-top:2px;flex:none;color:var(--ink-4)}
+
+/* import */
+.ui-root .import-grid{display:grid;grid-template-columns:minmax(0,1fr) 308px;gap:16px;align-items:start}
+.ui-root .src{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #f0f2f5}
+.ui-root .src .pc-icon{width:28px;height:28px;border-radius:7px}
+.ui-root .src code{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ui-root .src .grow{flex:1;min-width:0}
+.ui-root .src b{display:block;font-size:12px;font-weight:550}
+.ui-root .ftree{padding:8px 10px 12px}
+.ui-root .frow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;font-size:12px;color:var(--ink-2)}
+.ui-root .frow:hover{background:#f7f8fa}
+.ui-root .frow .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ui-root .frow .sz{font-size:11px;color:var(--ink-4);font-family:var(--mono)}
+.ui-root .fgroup{font-size:11px;color:var(--ink-4);padding:8px 8px 3px;letter-spacing:.03em}
+.ui-root .frow.indent{padding-left:24px}
+.ui-root .frow svg{color:var(--ink-4)}
+.ui-root .fb{display:inline-flex;align-items:center;height:19px;padding:0 6px;border-radius:4px;font-size:10.5px;font-weight:550}
+.ui-root .fb.add{background:var(--green-soft);color:var(--green)}
+.ui-root .fb.mod{background:var(--amber-soft);color:var(--amber)}
+.ui-root .fb.same{background:#f1f3f6;color:var(--ink-3)}
+.ui-root .warning{display:flex;gap:9px;margin:8px 12px 12px;padding:9px 11px;border-radius:var(--r-md);background:var(--amber-soft);color:#7a5200;font-size:11.5px;line-height:1.55}
+.ui-root .warning svg{width:14px;height:14px;margin-top:2px;flex:none}
+.ui-root .summary-card .sum{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.ui-root .sum-row{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--ink-3)}
+.ui-root .sum-row b{color:var(--ink);font-weight:600;font-family:var(--mono);font-size:12px}
+.ui-root .sum-actions{display:flex;flex-direction:column;gap:8px;padding:0 16px 16px}
+.ui-root .sum-actions .btn{justify-content:center}
+@media (max-width:1080px){
+  .ui-root .editor-grid{grid-template-columns:minmax(0,1fr) 288px}
+  .ui-root .tree{display:none}
+  .ui-root .wb-grid{grid-template-columns:minmax(0,1fr)}
+  .ui-root .path-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:820px){
+  .ui-root .app{grid-template-columns:1fr}
+  .ui-root .rail{display:none}
+  .ui-root .import-grid,.ui-root .editor-grid{grid-template-columns:minmax(0,1fr)}
+  .ui-root .checks{position:static}
+  .ui-root .path-grid{grid-template-columns:minmax(0,1fr)}
+  .ui-root .canvas{padding:14px 14px 48px}
+  .ui-root .topbar{padding:0 14px}
+  .ui-root .switch-hide{display:none}
+}
+</style>
+
+<svg class="defs" aria-hidden="true">
+  <defs>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20v3H6.5A2.5 2.5 0 0 1 4 20.5z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 3.5 19h17z"/><path d="M12 9.5v4.5"/><circle cx="12" cy="17" r=".8" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"/><path d="M16 5.6a3 3 0 0 1 0 5.8M17.5 14.6c2 .5 3.2 1.9 3.6 4.1"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.5h8A1.5 1.5 0 0 1 20.5 10v7A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.5h7l5 5V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20z"/><path d="M13 3.5V9h5"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m9 8-4 4 4 4M15 8l4 4-4 4"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-3a1 1 0 0 0-1-1h-9a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2M18 10.4c0 3-2.6 4.2-6 4.2H8.4"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1"/><path d="M5 8.5V19a.5.5 0 0 0 .5.5h13A.5.5 0 0 0 19 19V8.5"/><path d="M10 12.5h4"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5 19 6v6c0 4.4-3 7.3-7 8.5-4-1.2-7-4.1-7-8.5V6z"/><path d="m9 12 2 2 4-4.5"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-columns" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M10 5v14M15.5 5v14"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5 13.8 9l5.7 1.8-5.7 1.8L12 18l-1.8-5.4L4.5 10.8 10.2 9z"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M7 3.5h7l4.5 4.5V20a.5.5 0 0 1-.5.5H7a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M9.5 12h5M9.5 15.5h5M9.5 8.5h2"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+  <aside class="rail" aria-label="主导航">
+    <div class="brand">协</div>
+    <button class="rail-btn" title="对话"><svg class="i"><use href="#i-spark"/></svg></button>
+    <button class="rail-btn" title="智能体"><svg class="i"><use href="#i-users"/></svg></button>
+    <button class="rail-btn" title="流程"><svg class="i"><use href="#i-git"/></svg></button>
+    <button class="rail-btn on" title="技能"><svg class="i"><use href="#i-book"/></svg></button>
+    <button class="rail-btn" title="知识库"><svg class="i"><use href="#i-folder"/></svg></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-btn" title="设置"><svg class="i"><use href="#i-shield"/></svg></button>
+    <div class="rail-avatar">王</div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb"><span>平台能力</span><span>·</span><b>技能</b></div>
+      <div class="spacer"></div>
+      <button class="search-trigger"><svg class="i"><use href="#i-search"/></svg><span>搜索技能、命令</span><kbd>⌘K</kbd></button>
+      <button class="icon-btn" title="帮助"><svg class="i"><use href="#i-alert"/></svg></button>
+      <div class="avatar">王</div>
+    </header>
+
+    <div class="switcher" role="tablist" aria-label="原型页面">
+      <span class="lbl">原型</span>
+      <button class="on" data-screen="list">列表</button>
+      <button data-screen="workbench">工作台</button>
+      <button data-screen="editor">编辑器</button>
+      <button data-screen="create">新建</button>
+      <button data-screen="import">导入预检</button>
+    </div>
+
+    <div class="canvas">
+
+      <!-- ============ 1. 列表 ============ -->
+      <section class="screen on" data-panel="list" aria-label="技能列表">
+        <div class="page-head">
+          <div>
+            <h1>技能</h1>
+            <p class="sub">让智能体按固定流程和资料工作。保存即生成版本，可随时回滚。</p>
+          </div>
+          <div class="actions">
+            <button class="btn ghost"><svg class="i"><use href="#i-upload"/></svg>导入</button>
+            <button class="btn primary"><svg class="i"><use href="#i-plus"/></svg>新建技能</button>
+          </div>
+        </div>
+
+        <div class="summary">
+          <span><b class="num">24</b> 个技能</span><i class="sep"></i>
+          <span class="status ok"><i></i><b class="num">21</b> 可用</span><i class="sep"></i>
+          <span class="status warn"><i></i><b class="num">2</b> 需处理</span><i class="sep"></i>
+          <span><b class="num">3</b> 未绑定</span>
+          <a href="#" onclick="return false">查看需处理 →</a>
+        </div>
+
+        <div class="panel">
+          <div class="toolbar">
+            <label class="field-search">
+              <svg class="i"><use href="#i-search"/></svg>
+              <input placeholder="搜索名称、ID 或说明" aria-label="搜索技能">
+              <kbd>/</kbd>
+            </label>
+            <div class="chips" role="group" aria-label="类型筛选">
+              <button class="chip on">全部</button>
+              <button class="chip">内置</button>
+              <button class="chip">自定义</button>
+              <button class="chip">已覆盖</button>
+            </div>
+            <div class="spacer"></div>
+            <button class="btn ghost sm">数据状态<svg class="i" style="width:13px;height:13px"><use href="#i-chevron"/></svg></button>
+            <button class="btn ghost sm">最近更新<svg class="i" style="width:13px;height:13px"><use href="#i-chevron"/></svg></button>
+            <button class="icon-btn" title="列设置"><svg class="i"><use href="#i-columns"/></svg></button>
+          </div>
+
+          <div style="overflow:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th style="min-width:330px">技能</th>
+                  <th>状态</th>
+                  <th>绑定</th>
+                  <th>版本</th>
+                  <th>最近更新</th>
+                  <th style="width:120px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div class="skill-cell">
+                      <div class="tile t1">诗</div>
+                      <div class="skill-name"><b>诗词创作规范</b><span class="mono">poetry-notes</span></div>
+                    </div>
+                  </td>
+                  <td><span class="status ok"><i></i>数据就绪</span></td>
+                  <td><span class="bind"><span class="avatars"><span class="av">王</span><span class="av a2">李</span></span>2 个</span></td>
+                  <td class="mono">v7</td>
+                  <td><span class="muted">2 小时前</span> <span class="muted">· 王敏</span></td>
+                  <td>
+                    <div class="row-act">
+                      <button class="link">打开</button>
+                      <button class="icon-btn" style="width:26px;height:26px" title="更多"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="skill-cell">
+                      <div class="tile t2">薪</div>
+                      <div class="skill-name"><b>社保公积金口径</b><span class="mono">payroll-policy-notes · 已覆盖</span></div>
+                    </div>
+                  </td>
+                  <td><span class="status ok"><i></i>数据就绪</span></td>
+                  <td><span class="bind"><span class="avatars"><span class="av a3">陈</span><span class="av a4">周</span><span class="av more">+1</span></span>3 个</span></td>
+                  <td class="mono">v12</td>
+                  <td><span class="muted">昨天</span> <span class="muted">· 李哲</span></td>
+                  <td>
+                    <div class="row-act">
+                      <button class="link">打开</button>
+                      <button class="icon-btn" style="width:26px;height:26px" title="更多"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="skill-cell">
+                      <div class="tile t3">审</div>
+                      <div class="skill-name"><b>代码评审清单</b><span class="mono">dev-code-review</span></div>
+                    </div>
+                  </td>
+                  <td><span class="status warn"><i></i>未初始化</span></td>
+                  <td><span class="bind"><span class="avatars"><span class="av a2">李</span></span>1 个</span></td>
+                  <td class="mono">v3</td>
+                  <td><span class="muted">3 天前</span> <span class="muted">· 陈可</span></td>
+                  <td>
+                    <div class="row-act">
+                      <button class="link">打开</button>
+                      <button class="icon-btn" style="width:26px;height:26px" title="更多"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="skill-cell">
+                      <div class="tile t4">引</div>
+                      <div class="skill-name"><b>知识库引用格式</b><span class="mono">kb-citation-style · 内置 · 无需数据</span></div>
+                    </div>
+                  </td>
+                  <td><span class="status idle"><i></i>无需数据</span></td>
+                  <td><span class="bind"><span class="muted">未绑定</span></span></td>
+                  <td class="mono">—</td>
+                  <td><span class="muted">10-18</span></td>
+                  <td>
+                    <div class="row-act">
+                      <button class="link">打开</button>
+                      <button class="icon-btn" style="width:26px;height:26px" title="更多"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="skill-cell">
+                      <div class="tile t1">译</div>
+                      <div class="skill-name"><b>古诗英译</b><span class="mono">poetry-translate</span></div>
+                    </div>
+                  </td>
+                  <td><span class="status bad"><i></i>初始化失败</span></td>
+                  <td><span class="bind"><span class="avatars"><span class="av">王</span></span>1 个</span></td>
+                  <td class="mono">v2</td>
+                  <td><span class="muted">11-21</span> <span class="muted">· 系统导入</span></td>
+                  <td>
+                    <div class="row-act">
+                      <button class="link">查看原因</button>
+                      <button class="icon-btn" style="width:26px;height:26px" title="更多"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-foot">
+            <span>共 24 个 · 每页 20</span>
+            <div class="pages"><button class="on">1</button><button>2</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 2. 工作台 ============ -->
+      <section class="screen" data-panel="workbench" aria-label="技能工作台">
+        <div class="crumbs"><a href="#" onclick="return false">技能</a><span>/</span><span class="mono">poetry-notes</span></div>
+
+        <div class="wb-head">
+          <div class="wb-title">
+            <div class="tile t1 lg">诗</div>
+            <div>
+              <h1>poetry-notes</h1>
+              <div class="desc">诗词创作规范：平仄、押韵与意象</div>
+              <div class="meta-row">
+                <span class="tag">自定义</span>
+                <span class="tag">来源 db</span>
+                <span class="tag mono">v7</span>
+                <span class="status ok"><i></i>数据就绪</span>
+                <span class="status ok"><i></i>脚本已开启</span>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn secondary"><svg class="i"><use href="#i-play"/></svg>在对话中试用</button>
+            <button class="btn primary">编辑正文</button>
+            <button class="icon-btn" title="更多"><svg class="i"><use href="#i-more"/></svg></button>
+          </div>
+        </div>
+
+        <div class="segmented" role="tablist" aria-label="技能页签">
+          <button class="on">概览</button>
+          <button>正文</button>
+          <button>文件 <span class="count">3</span></button>
+          <button>数据 <span class="count">●</span></button>
+          <button>版本 <span class="count">7</span></button>
+          <button>绑定 <span class="count">2</span></button>
+        </div>
+
+        <div class="wb-grid">
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-head"><h3>健康</h3><a href="#" onclick="return false">查看诊断</a></div>
+              <div class="health-grid">
+                <div class="health">
+                  <div class="h-top"><span>数据</span><span class="status ok"><i></i>就绪</span></div>
+                  <div class="h-val num">2.4 / 5 GiB</div>
+                  <div class="bar"><i style="width:48%"></i></div>
+                  <div class="h-sub">上次初始化 11-21 · 用时 3m 12s</div>
+                  <a href="#" onclick="return false">重建数据</a>
+                </div>
+                <div class="health">
+                  <div class="h-top"><span>脚本</span><span class="status ok"><i></i>已开启</span></div>
+                  <div class="h-val num">3 个脚本</div>
+                  <div class="h-sub">执行仍需在对话中确认</div>
+                  <a href="#" onclick="return false">管理脚本</a>
+                </div>
+                <div class="health">
+                  <div class="h-top"><span>绑定</span><span class="status ok"><i></i>2 个智能体</span></div>
+                  <div class="h-val" style="display:flex;align-items:center;gap:6px">
+                    <span class="avatars"><span class="av">王</span><span class="av a2">李</span></span>
+                    <span style="font-size:12px;color:var(--ink-3)">诗词助手、文案助手</span>
+                  </div>
+                  <div class="h-sub">删除前需先解绑</div>
+                  <a href="#" onclick="return false">查看绑定</a>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>下一步</h3><span class="muted" style="font-size:12px">2 / 4</span></div>
+              <ul class="checklist">
+                <li class="done"><span class="cb"><svg class="i" style="width:11px;height:11px"><use href="#i-check"/></svg></span>正文通过质量检查<em>v7</em></li>
+                <li class="done"><span class="cb"><svg class="i" style="width:11px;height:11px"><use href="#i-check"/></svg></span>上传参考文件<em>2 个</em></li>
+                <li class="now"><span class="cb"></span>在对话中试用一次<button class="btn sm secondary">去对话</button></li>
+                <li><span class="cb"></span>绑定更多智能体<button class="btn sm ghost">去绑定</button></li>
+              </ul>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>最近变更</h3><a href="#" onclick="return false">全部版本</a></div>
+              <div class="timeline">
+                <div class="tl"><span class="tl-dot on"></span><div><b>v7</b>补充押韵判定规则<span class="when">王敏 · 2 小时前</span></div></div>
+                <div class="tl"><span class="tl-dot"></span><div><b>v6</b>新增意象词表引用<span class="when">李哲 · 昨天</span></div></div>
+                <div class="tl"><span class="tl-dot"></span><div><b>v5</b>收紧输出格式<span class="when">王敏 · 11-19</span></div></div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="stack">
+            <div class="panel">
+              <div class="panel-head"><h3>引用方</h3><a href="#" onclick="return false">去智能体页</a></div>
+              <div class="side-row"><span class="av a2">诗</span><div class="grow"><b>诗词助手</b><span>主入口 · 在线</span></div><svg class="i" style="width:14px;height:14px;color:var(--ink-4)"><use href="#i-chevron"/></svg></div>
+              <div class="side-row"><span class="av a3">文</span><div class="grow"><b>文案助手</b><span>在线</span></div><svg class="i" style="width:14px;height:14px;color:var(--ink-4)"><use href="#i-chevron"/></svg></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>标识</h3></div>
+              <div class="kv"><span>技能 ID</span><b class="mono">poetry-notes</b></div>
+              <div class="kv"><span>来源</span><b>db · 可写</b></div>
+              <div class="kv"><span>创建</span><b>王敏 · 10-12</b></div>
+              <div class="kv"><span>更新</span><b>王敏 · 2 小时前</b></div>
+            </div>
+
+            <div class="panel">
+              <div class="danger-zone">
+                <div>
+                  <h3 style="color:var(--red)">删除技能</h3>
+                  <p>被 2 个智能体引用，需先解绑</p>
+                </div>
+                <button class="btn sm secondary" disabled>删除</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ============ 3. 编辑器 ============ -->
+      <section class="screen" data-panel="editor" aria-label="正文编辑器">
+        <div class="editor-head">
+          <div>
+            <h2>编辑正文</h2>
+            <div class="sub">poetry-notes · 基于 v7 编辑 · 自动保存草稿 12:04</div>
+          </div>
+          <div class="actions" style="display:flex;gap:10px;align-items:center">
+            <button class="btn ghost sm" id="conflictDemo">演示冲突状态</button>
+            <div class="segmented"><button class="on">源码</button><button>预览</button><button>对比 v7</button></div>
+          </div>
+        </div>
+
+        <div class="conflict" id="conflictBar" role="alert">
+          <svg class="i" style="width:15px;height:15px"><use href="#i-alert"/></svg>
+          <div class="grow">李哲 在 2 分钟前把该技能更新到了 <b>v8</b>。你的修改基于 v7，直接保存会覆盖对方的改动。</div>
+          <button class="btn sm">查看差异</button>
+          <button class="btn sm">放弃我的修改</button>
+          <button class="btn sm">覆盖为 v9</button>
+        </div>
+
+        <div class="editor-grid">
+          <aside class="panel tree" aria-label="技能文件">
+            <div class="tree-title">技能文件</div>
+            <div class="tree-item on"><svg class="i" style="width:14px;height:14px"><use href="#i-file"/></svg>SKILL.md</div>
+            <div class="tree-group"><svg class="i" style="width:13px;height:13px"><use href="#i-folder"/></svg>references/</div>
+            <div class="tree-item indent"><svg class="i" style="width:13px;height:13px"><use href="#i-file"/></svg>格律入门.md</div>
+            <div class="tree-item indent"><svg class="i" style="width:13px;height:13px"><use href="#i-file"/></svg>意象词表.md</div>
+            <div class="tree-group"><svg class="i" style="width:13px;height:13px"><use href="#i-folder"/></svg>scripts/</div>
+            <div class="tree-item indent"><svg class="i" style="width:13px;height:13px"><use href="#i-code"/></svg>build_index.py</div>
+            <div class="tree-item indent"><svg class="i" style="width:13px;height:13px"><use href="#i-code"/></svg>setup.sh</div>
+          </aside>
+
+          <div class="panel editor-main">
+            <div class="editor-tabs">
+              <span class="filetab"><svg class="i" style="width:12px;height:12px"><use href="#i-file"/></svg>SKILL.md</span>
+              <span class="draft">草稿已保存</span>
+            </div>
+            <div class="code" aria-label="Markdown 源码">
+              <div class="line h"><span class="ln">1</span><span class="lc"># 诗词创作规范</span></div>
+              <div class="line"><span class="ln">2</span><span class="lc"></span></div>
+              <div class="line"><span class="ln">3</span><span class="lc">你是诗词创作助手。按下面的步骤回应，不要跳过检查。</span></div>
+              <div class="line"><span class="ln">4</span><span class="lc"></span></div>
+              <div class="line h"><span class="ln">5</span><span class="lc">## 步骤</span></div>
+              <div class="line"><span class="ln">6</span><span class="lc">1. 判断体裁：绝句 / 律诗 / 词，确认字数与句数。</span></div>
+              <div class="line"><span class="ln">7</span><span class="lc">2. 检查平仄：标出不合律的字，给出替字建议。</span></div>
+              <div class="line"><span class="ln">8</span><span class="lc">3. 检查押韵：按《平水韵》核对韵部。</span></div>
+              <div class="line"><span class="ln">9</span><span class="lc">4. 意象建议：从 references/意象词表.md 中择取，不要生造。</span></div>
+              <div class="line"><span class="ln">10</span><span class="lc"></span></div>
+              <div class="line h"><span class="ln">11</span><span class="lc">## 输出要求</span></div>
+              <div class="line add"><span class="ln">12</span><span class="lc">- 先给结论，再列修改点；引用词表时注明文件名。</span></div>
+              <div class="line add"><span class="ln">13</span><span class="lc">- 不确定的韵部要明说，不要编造出处。</span></div>
+              <div class="line"><span class="ln">14</span><span class="lc"></span></div>
+              <div class="line mut"><span class="ln">15</span><span class="lc">> 数据目录 /data 只读；需要时用 skill_read 读取参考文件。</span></div>
+            </div>
+            <div class="savebar">
+              <div class="save-meta">
+                <span class="num">214 字</span><span style="color:#d4d8e0">|</span>
+                <span class="ok">检查全部通过</span>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="btn ghost">取消</button>
+                <button class="btn primary">保存为 v8</button>
+              </div>
+            </div>
+          </div>
+
+          <aside class="panel checks" aria-label="质量检查">
+            <div class="panel-head slim"><h3>检查</h3><span class="muted" style="font-size:11px">实时</span></div>
+            <div class="check ok"><svg class="i"><use href="#i-check"/></svg>正文 214 字，不少于 200</div>
+            <div class="check ok"><svg class="i"><use href="#i-check"/></svg>包含 Markdown 标题</div>
+            <div class="check ok"><svg class="i"><use href="#i-check"/></svg>包含流程词「步骤 / 输出要求」</div>
+            <div class="check hint"><svg class="i"><use href="#i-spark"/></svg>建议：补一个输入示例，模型更稳</div>
+            <div class="divider"></div>
+            <div class="field-wrap">
+              <label class="label" for="note">变更说明</label>
+              <input class="input" id="note" value="补充押韵判定规则">
+              <p class="hint">写进版本时间线，回滚时能看懂为什么改。留空也能保存。</p>
+            </div>
+            <div class="divider"></div>
+            <div class="label" style="padding:0 16px">谁在编辑</div>
+            <div class="presence"><span class="av">王</span>你 · <span class="av a2">李</span>李哲 2 分钟前更新</div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ============ 4. 新建 ============ -->
+      <section class="screen" data-panel="create" aria-label="新建技能">
+        <div class="page-head">
+          <div>
+            <h1>新建技能</h1>
+            <p class="sub">先选起点，之后都能改：正文、文件、数据、绑定都在工作台里。</p>
+          </div>
+          <button class="btn ghost">取消</button>
+        </div>
+
+        <div class="steps">
+          <span class="step on"><span class="n">1</span>选择起点</span><span class="line"></span>
+          <span class="step"><span class="n">2</span>填写与检查</span><span class="line"></span>
+          <span class="step"><span class="n">3</span>完成</span>
+        </div>
+
+        <div class="path-grid">
+          <div class="path-card">
+            <div class="pc-top"><div class="pc-icon"><svg class="i"><use href="#i-doc"/></svg></div></div>
+            <h3>从空白创建</h3>
+            <p>只写一段 Markdown，适合解释口径、规范与话术。</p>
+            <ul>
+              <li><svg class="i"><use href="#i-check"/></svg>约 1 分钟完成</li>
+              <li><svg class="i"><use href="#i-check"/></svg>可稍后补文件与数据</li>
+            </ul>
+            <button class="btn secondary">开始填写</button>
+          </div>
+
+          <div class="path-card rec">
+            <div class="pc-top"><div class="pc-icon"><svg class="i"><use href="#i-spark"/></svg></div><span class="tag" style="background:var(--accent-soft);color:var(--accent-2)">推荐</span></div>
+            <h3>从模板创建</h3>
+            <p>带好结构的骨架与合格标准，不容易漏项。</p>
+            <ul>
+              <li><svg class="i"><use href="#i-check"/></svg>政策说明 / 处理流程</li>
+              <li><svg class="i"><use href="#i-check"/></svg>写作规范 / 数据分析</li>
+            </ul>
+            <button class="btn primary">选择模板</button>
+          </div>
+
+          <div class="path-card">
+            <div class="pc-top"><div class="pc-icon"><svg class="i"><use href="#i-git"/></svg></div></div>
+            <h3>导入项目</h3>
+            <p>从 Git 仓库或 ZIP 导入完整技能包，带参考文件与脚本。</p>
+            <ul>
+              <li><svg class="i"><use href="#i-check"/></svg>预检文件树与覆盖差异</li>
+              <li><svg class="i"><use href="#i-check"/></svg>支持 SKILL.md 项目结构</li>
+            </ul>
+            <button class="btn secondary">开始导入</button>
+          </div>
+        </div>
+
+        <div class="panel recent">
+          <div class="panel-head"><h3>最近使用的模板</h3><a href="#" onclick="return false">管理模板</a></div>
+          <div class="recent-row"><div class="tile" style="width:28px;height:28px;border-radius:7px"><svg class="i" style="width:14px;height:14px"><use href="#i-doc"/></svg></div><div class="grow">政策口径说明</div><em>上周使用 4 次</em><button class="btn sm ghost">使用</button></div>
+          <div class="recent-row"><div class="tile" style="width:28px;height:28px;border-radius:7px"><svg class="i" style="width:14px;height:14px"><use href="#i-doc"/></svg></div><div class="grow">处理流程与输出格式</div><em>上周使用 2 次</em><button class="btn sm ghost">使用</button></div>
+          <div class="recent-row"><div class="tile" style="width:28px;height:28px;border-radius:7px"><svg class="i" style="width:14px;height:14px"><use href="#i-doc"/></svg></div><div class="grow">写作规范（语气与禁用词）</div><em>昨天使用</em><button class="btn sm ghost">使用</button></div>
+        </div>
+
+        <div class="tip">
+          <svg class="i"><use href="#i-shield"/></svg>
+          <span>内置技能也可以改：在列表打开后保存正文，会生成覆盖版本，不改动原始内置内容。</span>
+        </div>
+      </section>
+
+      <!-- ============ 5. 导入预检 ============ -->
+      <section class="screen" data-panel="import" aria-label="导入预检">
+        <div class="crumbs"><a href="#" onclick="return false"><svg class="i" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-arrow-left"/></svg> 新建技能</a><span>/</span><span>导入项目</span></div>
+
+        <div class="page-head" style="margin-bottom:8px">
+          <div>
+            <h1>检查导入内容</h1>
+            <p class="sub">预检不会写入任何数据，确认后再导入。</p>
+          </div>
+        </div>
+
+        <div class="steps">
+          <span class="step done"><span class="n"><svg class="i" style="width:11px;height:11px"><use href="#i-check"/></svg></span>来源</span><span class="line"></span>
+          <span class="step on"><span class="n">2</span>预检</span><span class="line"></span>
+          <span class="step"><span class="n">3</span>确认导入</span>
+        </div>
+
+        <div class="import-grid">
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-head"><h3>来源</h3><a href="#" onclick="return false">修改</a></div>
+              <div class="src">
+                <div class="pc-icon"><svg class="i"><use href="#i-git"/></svg></div>
+                <div class="grow"><b>Git 仓库 · main</b><code>https://github.com/Wscats/poetry-skills.git</code></div>
+                <span class="tag mono">0.8s</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>将写入的文件</h3><span class="muted" style="font-size:11.5px">5 个 · 31 KB</span></div>
+              <div class="ftree">
+                <div class="frow"><svg class="i" style="width:14px;height:14px"><use href="#i-file"/></svg><span class="grow"><b>SKILL.md</b></span><span class="sz">4.0 KB</span><span class="fb mod">覆盖</span></div>
+                <div class="fgroup">references/</div>
+                <div class="frow indent"><svg class="i" style="width:13px;height:13px"><use href="#i-file"/></svg><span class="grow">格律入门.md</span><span class="sz">12 KB</span><span class="fb add">新增</span></div>
+                <div class="frow indent"><svg class="i" style="width:13px;height:13px"><use href="#i-file"/></svg><span class="grow">意象词表.md</span><span class="sz">8.0 KB</span><span class="fb mod">覆盖</span></div>
+                <div class="fgroup">scripts/</div>
+                <div class="frow indent"><svg class="i" style="width:13px;height:13px"><use href="#i-code"/></svg><span class="grow">build_index.py</span><span class="sz">6.0 KB</span><span class="fb add">新增</span></div>
+                <div class="frow indent"><svg class="i" style="width:13px;height:13px"><use href="#i-code"/></svg><span class="grow">setup.sh</span><span class="sz">1.2 KB</span><span class="fb same">不变</span></div>
+                <div class="warning">
+                  <svg class="i"><use href="#i-alert"/></svg>
+                  <span>同名技能已存在（当前 v7）。导入会生成 v8 并覆盖 2 个文件；如需保留旧版本，可先在工作台记下版本号，之后回滚。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="stack">
+            <div class="panel summary-card">
+              <div class="panel-head"><h3>导入摘要</h3></div>
+              <div class="sum">
+                <div class="sum-row"><span>技能 ID</span><b>poetry-skills</b></div>
+                <div class="sum-row"><span>说明</span><b style="font-family:inherit;font-weight:500">诗词创作技能包</b></div>
+                <div class="sum-row"><span>新增</span><b style="color:var(--green)">3 个文件</b></div>
+                <div class="sum-row"><span>覆盖</span><b style="color:var(--amber)">2 个文件</b></div>
+                <div class="sum-row"><span>setup</span><b style="font-size:11px">bash scripts/setup.sh</b></div>
+                <div class="sum-row"><span>数据上限</span><b>2 GiB</b></div>
+              </div>
+              <div class="sum-actions">
+                <button class="btn primary">确认导入并生成 v8</button>
+                <button class="btn ghost">返回修改来源</button>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>预检结果</h3></div>
+              <div class="check ok"><svg class="i"><use href="#i-check"/></svg>SKILL.md 结构合法</div>
+              <div class="check ok"><svg class="i"><use href="#i-check"/></svg>脚本后缀与大小合规</div>
+              <div class="check ok"><svg class="i"><use href="#i-check"/></svg>未发现敏感文件</div>
+              <div class="check hint"><svg class="i"><use href="#i-spark"/></svg>setup 会联网下载数据，最长 10 分钟</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root = document.querySelector('.ui-root');
+  if (!root || root.dataset.bound) return;
+  root.dataset.bound = '1';
+  var switcher = root.querySelector('.switcher');
+  switcher.addEventListener('click', function(e){
+    var btn = e.target.closest('button[data-screen]');
+    if (!btn) return;
+    switcher.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b === btn); });
+    root.querySelectorAll('.screen').forEach(function(s){
+      s.classList.toggle('on', s.getAttribute('data-panel') === btn.getAttribute('data-screen'));
+    });
+    root.querySelector('.canvas').scrollIntoView({block:'start', behavior:'smooth'});
+  });
+
+  var demo = root.querySelector('#conflictDemo');
+  var bar = root.querySelector('#conflictBar');
+  if (demo && bar){
+    demo.addEventListener('click', function(){
+      var show = !bar.classList.contains('show');
+      bar.classList.toggle('show', show);
+      demo.textContent = show ? '隐藏冲突状态' : '演示冲突状态';
+    });
+  }
+
+  var checks = root.querySelector('.checks');
+  if (checks && window.matchMedia('(max-width: 1080px)').matches) {
+    checks.style.position = 'static';
+  }
+})();
+</script>
+</div>

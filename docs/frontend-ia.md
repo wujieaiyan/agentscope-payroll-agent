@@ -47,6 +47,20 @@
 - 「用户与角色」原侧栏未加权限，但页面接口本就要求 `user:manage`；M8 将菜单可见性对齐到同一权限码，HR/VIEWER 不再看到治理项。
 - 纯员工看不到薪酬与治理菜单；其可用工作台只剩平台组的「团队运行」，对话始终保持全局入口。
 
+### 2.1 技能子路由
+
+技能菜单仍是单条目（`/platform/skills`），页面内部按「列表 / 新建 / 导入 / 工作台 / 编辑器」拆子路由；`menuFromRoutes` 只看父路由的 `meta.menu`，子路由不产生侧栏项。
+
+| 路径 | 页面 | 说明 |
+| --- | --- | --- |
+| `/platform/skills` | 列表 | 查询条件写入 URL（keyword/type/dataStatus/view/sort/page） |
+| `/platform/skills/new` | 新建选择 | 空白创建 / 模板创建 / 从技能包导入 |
+| `/platform/skills/new/editor` | 新建编辑器 | 完成质量门槛后 `POST /api/admin/skills` |
+| `/platform/skills/import` | 导入向导 | Git / ZIP 三步骤，预检不落盘 |
+| `/platform/skills/:id` | 工作台概览 | 等同 `/:id/overview` |
+| `/platform/skills/:id/:tab` | 工作台页签 | `overview/body/files/data/versions/bindings`；`references`、`scripts` 旧别名重定向到 `files` |
+| `/platform/skills/:id/edit` | 正文编辑器 | 三栏；409 冲突条；离开保留草稿 |
+
 ## 3. 旧路径重定向
 
 旧路径保留至少一个版本（书签、断点恢复、邮件链接不失效），实现见 `frontend/src/router/index.js` 与 `frontend/src/router/workspaces.js` 的 `LEGACY_REDIRECTS`。
@@ -80,5 +94,6 @@
 ## 6. 验收与回归
 
 - 前端单测 `frontend/tests/unit/navigation.test.js`：旧路径重定向、三类角色落地页、按权限的菜单可见性、工作偏好开关、审计归属。
+- 技能子路由：`frontend/tests/e2e/skills-smoke.spec.js` 覆盖 `/references` 深链落 `files`、页签 URL 同步与编辑器离开草稿；`frontend/tests/e2e/visual-smoke.spec.js` 对 28 条路由（含 11 条技能子路由）做三档宽度截图与溢出断言。
 - 手工冒烟：ADMIN 登录落在 `/platform/agents`，HR 落在 `/payroll/employees`，VIEWER 落在 `/payroll/employees`；旧路径无 404；普通角色无治理项；对话页行为不变。
 - 回滚：菜单与路由 `meta` 可回退到旧手写数组；旧路径一直保留，回滚不影响深链。
