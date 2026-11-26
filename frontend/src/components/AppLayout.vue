@@ -1,14 +1,22 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api/http';
 import { auth, can, logout, markPasswordChanged } from '../stores/auth';
+import { loadSkillEnv, useSkillEnv } from '../stores/skillEnv';
 import { toast } from '../stores/toast';
 import { defaultPathForWorkspace, landingPath, menuFromRoutes } from '../router/workspaces';
 
 const router = useRouter();
 const route = useRoute();
-const collapsed = ref(false);
+const collapsed = ref(localStorage.getItem('console.sidebar.collapsed') === '1');
+const skillEnv = useSkillEnv();
+watch(collapsed, (value) => {
+  localStorage.setItem('console.sidebar.collapsed', value ? '1' : '0');
+});
+onMounted(() => {
+  if (can('skill:manage')) loadSkillEnv();
+});
 const collapsedGroups = reactive({});
 const showPassword = ref(false);
 const passwordSaving = ref(false);
@@ -46,6 +54,11 @@ const activeGroup = computed(
 function switchWorkspace(group) {
   activeWorkspace.value = group.key;
   router.push(defaultPathForWorkspace(groups.value, group.key));
+}
+
+/** 子路由（如技能工作台 /platform/skills/:id/:tab）没有自己的菜单项，导航高亮按前缀判断。 */
+function isNavActive(path) {
+  return route.path === path || route.path.startsWith(`${path}/`);
 }
 
 const displayName = computed(() => (auth.user ? auth.user.display_name || auth.user.username : ''));
@@ -154,6 +167,7 @@ async function signOut() {
               :key="item.path"
               :to="item.path"
               class="nav-item"
+              :class="{ 'router-link-active': isNavActive(item.path) }"
               :title="item.label"
             >
               <span class="nav-icon">
@@ -174,11 +188,26 @@ async function signOut() {
     <div class="main">
       <header class="topbar">
         <div class="crumb">
-          <span class="crumb-root">协同智能体</span>
+          <router-link
+            v-if="activeGroup"
+            class="crumb-root"
+            :to="defaultPathForWorkspace(groups, activeWorkspace)"
+          >
+            {{ activeGroup.title }}
+          </router-link>
+          <span v-else class="crumb-root">协同智能体</span>
           <span class="crumb-sep">/</span>
           <strong>{{ route.meta.title || '' }}</strong>
         </div>
         <div class="user-area">
+          <span
+            v-if="skillEnv"
+            class="env-chip"
+            :title="skillEnv.writable ? '技能存储可写' : '技能存储只读'"
+          >
+            <span class="dot" :class="skillEnv.writable ? 'ok' : 'warn'"></span>
+            {{ skillEnv.label }}
+          </span>
           <div class="user-card">
             <span class="avatar">{{ (displayName || '用').slice(0, 1) }}</span>
             <span class="user-meta">
@@ -237,18 +266,18 @@ async function signOut() {
 .ws-tab {
   flex: 1;
   padding: 5px 0;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: var(--sidebar-ink);
+  color: rgba(255, 255, 255, 0.55);
   font-size: 12px;
   cursor: pointer;
 }
-.ws-tab:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.ws-tab:hover { color: #fff; background: rgba(255, 255, 255, 0.06); }
 .ws-tab.active {
   color: #fff;
-  background: rgba(45, 140, 240, 0.3);
-  border-color: rgba(45, 140, 240, 0.6);
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.14);
 }
 .nav-chat { margin: 0 8px 6px; }
 </style>
