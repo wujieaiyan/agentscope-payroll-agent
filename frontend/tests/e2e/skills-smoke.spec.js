@@ -156,6 +156,47 @@ test.describe('技能工作台', () => {
     await expect(page.locator('.binding-name')).toContainText('诗词助手');
   });
 
+  test('数据页签只读浏览：目录树、文本预览与二进制元数据', async ({ page }) => {
+    const mock = await setup(page);
+    await page.goto('/platform/skills/poetry-skills');
+    await page.getByRole('tab', { name: '数据' }).click();
+
+    const browser = page.locator('.data-browser');
+    await expect(browser).toContainText('只读');
+    const tree = browser.getByRole('tree', { name: 'data 目录树' });
+    await expect(tree.locator('.tree-row')).toHaveCount(3);
+    await expect(tree).toContainText('poets');
+
+    await tree.getByRole('treeitem', { name: /poets/ }).click();
+    await expect(tree.getByRole('treeitem', { name: /li-bai\.md/ })).toBeVisible();
+    expect(mock.calls.dataTree.map((call) => call.path)).toEqual(['', 'poets']);
+
+    await tree.getByRole('treeitem', { name: /index\.json/ }).click();
+    await expect(browser.locator('.preview-pre')).toContainText('"poets"');
+    expect(mock.calls.dataFile[0]).toMatchObject({ id: 'poetry-skills', path: 'index.json' });
+
+    await tree.getByRole('treeitem', { name: /cover\.png/ }).click();
+    await expect(browser).toContainText('二进制');
+    await expect(browser).toContainText('二进制文件不展示内容');
+    await expect(browser.locator('.preview-pre')).toHaveCount(0);
+  });
+
+  test('数据为空与沙箱忙时分别给出空态与 409 提示', async ({ page }) => {
+    await setup(page, { dataEmpty: true });
+    await page.goto('/platform/skills/poetry-skills');
+    await page.getByRole('tab', { name: '数据' }).click();
+    await expect(page.locator('.data-browser')).toContainText('目录为空');
+
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await setup(page, { dataTreeBusy: true });
+    await page.goto('/platform/skills/poetry-skills');
+    await page.getByRole('tab', { name: '数据' }).click();
+    await expect(page.locator('.data-browser .browser-error')).toContainText(
+      '技能数据正在初始化，完成后可浏览'
+    );
+    await expect(page.locator('.data-browser .tree-list')).toHaveCount(0);
+  });
+
   test('/references 深链重定向到文件页签', async ({ page }) => {
     await setup(page);
     await page.goto('/platform/skills/poetry-skills/references');

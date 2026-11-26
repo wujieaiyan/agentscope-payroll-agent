@@ -37,6 +37,42 @@ public interface SandboxGateway {
 
     SkillData deleteSkillData(String skillId);
 
+    /**
+     * 读取技能数据目录树；未实现该能力的客户端抛 {@link UnsupportedOperationException}，
+     * 由 Web 层翻译成明确错误，避免静默返回空树。
+     */
+    default DataTree dataTree(String skillId, String path, int depth) {
+        throw new UnsupportedOperationException("当前沙箱客户端不支持技能数据浏览");
+    }
+
+    /** 读取技能数据中的单个文本文件（按 maxBytes 截断）；未实现时同上。 */
+    default DataFile dataFile(String skillId, String path, int maxBytes) {
+        throw new UnsupportedOperationException("当前沙箱客户端不支持技能数据浏览");
+    }
+
+    record DataEntry(
+            String name, String path, String type, long size, long modifiedAt, Boolean isText) {
+    }
+
+    record DataTree(
+            String skillId,
+            String path,
+            List<DataEntry> entries,
+            boolean truncated,
+            int entryLimit) {
+    }
+
+    record DataFile(
+            String path,
+            long size,
+            long modifiedAt,
+            boolean isText,
+            String encoding,
+            boolean truncated,
+            String content,
+            String mime) {
+    }
+
     record Script(String path, String content) {
     }
 

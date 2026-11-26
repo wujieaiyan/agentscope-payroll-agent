@@ -143,6 +143,8 @@ export function createSkillsMock(options = {}) {
     previewZip: [],
     updatedFile: [],
     dataInit: [],
+    dataTree: [],
+    dataFile: [],
     rollbacks: [],
   };
   const createdSkills = new Map();
@@ -415,6 +417,51 @@ export function createSkillsMock(options = {}) {
     return { id, total: versions.length, versions };
   }
 
+  const DATA_TREE = {
+    '': [
+      { name: 'poets', path: 'poets', type: 'dir', size: 0, modifiedAt: UPDATED_AT },
+      { name: 'index.json', path: 'index.json', type: 'file', size: 20481, modifiedAt: UPDATED_AT, isText: true },
+      { name: 'cover.png', path: 'cover.png', type: 'file', size: 512000, modifiedAt: UPDATED_AT, isText: false },
+    ],
+    poets: [
+      { name: 'li-bai.md', path: 'poets/li-bai.md', type: 'file', size: 512, modifiedAt: UPDATED_AT, isText: true },
+    ],
+  };
+
+  function dataTreePayload(id, path) {
+    return {
+      skillId: id,
+      path,
+      entries: state.dataEmpty ? [] : DATA_TREE[path] || [],
+      truncated: false,
+      entryLimit: 500,
+    };
+  }
+
+  function dataFilePayload(path) {
+    if (path.endsWith('.png')) {
+      return {
+        path,
+        size: 512000,
+        modifiedAt: UPDATED_AT,
+        isText: false,
+        truncated: false,
+        mime: 'image/png',
+      };
+    }
+    const content = path === 'poets/li-bai.md' ? '# 李白\n静夜思。\n' : '{\n  "poets": ["li-bai"]\n}\n';
+    return {
+      path,
+      size: content.length,
+      modifiedAt: UPDATED_AT,
+      isText: true,
+      encoding: 'utf-8',
+      truncated: false,
+      content,
+      mime: path.endsWith('.md') ? 'text/markdown' : 'application/json',
+    };
+  }
+
   function dataPayload(id) {
     const failed = state.source === 'db' && id === 'payroll-policy-notes';
     return {
@@ -579,6 +626,21 @@ export function createSkillsMock(options = {}) {
           kind: filePath.startsWith('scripts/') ? 'script' : 'reference',
         })
       );
+    }
+
+    const dataBrowseMatch = path.match(/^\/api\/admin\/skills\/([^/]+)\/data\/(tree|file)$/);
+    if (dataBrowseMatch) {
+      const id = decodeURIComponent(dataBrowseMatch[1]);
+      const relative = url.searchParams.get('path') || '';
+      if (dataBrowseMatch[2] === 'tree') {
+        calls.dataTree.push({ id, path: relative });
+        if (state.dataTreeBusy) {
+          return reply(route, fail(409, '技能数据正在初始化，请等待完成后再浏览'));
+        }
+        return reply(route, ok(dataTreePayload(id, relative)));
+      }
+      calls.dataFile.push({ id, path: relative });
+      return reply(route, ok(dataFilePayload(relative)));
     }
 
     const subMatch = path.match(

@@ -1,7 +1,12 @@
 package io.agentscope.examples.payroll.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.agentscope.examples.payroll.domain.PayrollConflictException;
+import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
+import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
 import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
+import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.support.JsonSupport;
@@ -187,6 +192,36 @@ public final class SandboxClient implements SandboxGateway {
                 send("DELETE", SkillInitProtocol.statusPath(skillId), "", CONTROL_TIMEOUT));
     }
 
+    @Override
+    public DataTree dataTree(String skillId, String path, int depth) {
+        requireEnabled("技能数据浏览");
+        String canonical = SkillDataProtocol.treePath(skillId, path, depth);
+        HttpResponse<String> response = send("GET", canonical, "", Duration.ofSeconds(5));
+        int status = response.statusCode();
+        if (status == 401 || status == 403) {
+            throw signatureFailure();
+        }
+        if (status >= 200 && status < 300) {
+            return parseDataTree(response.body());
+        }
+        throw dataFailure(status, response.body());
+    }
+
+    @Override
+    public DataFile dataFile(String skillId, String path, int maxBytes) {
+        requireEnabled("技能数据浏览");
+        String canonical = SkillDataProtocol.filePath(skillId, path, maxBytes);
+        HttpResponse<String> response = send("GET", canonical, "", Duration.ofSeconds(10));
+        int status = response.statusCode();
+        if (status == 401 || status == 403) {
+            throw signatureFailure();
+        }
+        if (status >= 200 && status < 300) {
+            return parseDataFile(response.body());
+        }
+        throw dataFailure(status, response.body());
+    }
+
     private SkillData skillDataOf(HttpResponse<String> response) {
         int status = response.statusCode();
         if (status == 401 || status == 403) {
@@ -274,6 +309,60 @@ public final class SandboxClient implements SandboxGateway {
                 longValue(raw.get("size_bytes"), 0),
                 raw.get("log_tail") == null ? "" : String.valueOf(raw.get("log_tail")),
                 raw.get("message") == null ? null : String.valueOf(raw.get("message")));
+    }
+
+    private static DataTree parseDataTree(String body) {
+        Map<String, Object> raw = parseMap(body);
+        List<DataEntry> entries = new ArrayList<>();
+        Object list = raw.get("entries");
+        if (list instanceof List<?> items) {
+            for (Object item : items) {
+                if (!(item instanceof Map<?, ?> map)) {
+                    continue;
+                }
+                entries.add(
+                        new DataEntry(
+                                text(map.get("name"), ""),
+                                text(map.get("path"), ""),
+                                text(map.get("type"), "file"),
+                                longValue(map.get("size"), 0),
+                                longValue(map.get("modifiedAt"), 0),
+                                map.get("isText") == null ? null : truthy(map.get("isText"))));
+            }
+        }
+        return new DataTree(
+                text(raw.get("skillId"), ""),
+                text(raw.get("path"), ""),
+                List.copyOf(entries),
+                truthy(raw.get("truncated")),
+                integer(raw.get("entryLimit"), 500));
+    }
+
+    private static DataFile parseDataFile(String body) {
+        Map<String, Object> raw = parseMap(body);
+        return new DataFile(
+                text(raw.get("path"), ""),
+                longValue(raw.get("size"), 0),
+                longValue(raw.get("modifiedAt"), 0),
+                truthy(raw.get("isText")),
+                raw.get("encoding") == null ? null : String.valueOf(raw.get("encoding")),
+                truthy(raw.get("truncated")),
+                raw.get("content") == null ? null : String.valueOf(raw.get("content")),
+                text(raw.get("mime"), "application/octet-stream"));
+    }
+
+    private static RuntimeException dataFailure(int status, String body) {
+        String message = messageOf(body, "技能数据读取失败");
+        if (status == 404) {
+            return new PayrollNotFoundException(message);
+        }
+        if (status == 409 || status == 429) {
+            return new PayrollConflictException(message);
+        }
+        if (status >= 500) {
+            return new SandboxUnavailableException(message);
+        }
+        return new PayrollException(message);
     }
 
     private static Map<String, Object> parseMap(String body) {

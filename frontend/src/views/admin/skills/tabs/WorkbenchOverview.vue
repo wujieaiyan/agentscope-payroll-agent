@@ -62,10 +62,6 @@ const initDuration = computed(() => {
   if (millis < 60_000) return `${(millis / 1000).toFixed(1)} 秒`;
   return `${Math.round(millis / 60_000)} 分钟`;
 });
-const canRebuild = computed(
-  () => props.sandboxEnabled && needsData.value !== false && needsData.value !== null
-);
-
 const checklistDone = computed(() => checklist.value.filter((item) => item.ok).length);
 const checklistTotal = computed(() => checklist.value.length || 4);
 
@@ -126,14 +122,8 @@ function relative(ts) {
               <template v-if="initDuration"> · 用时 {{ initDuration }}</template>
             </p>
           </template>
-          <button
-            class="link-btn"
-            type="button"
-            :disabled="!canRebuild"
-            :title="canRebuild ? '' : '当前不可重建数据'"
-            @click="emit('go', 'data')"
-          >
-            重建数据
+          <button class="link-btn" type="button" @click="emit('go', 'data')">
+            去数据
           </button>
         </article>
 
@@ -152,6 +142,9 @@ function relative(ts) {
             setup：{{ scriptHealth.setupCommand || '—' }}
           </p>
           <p class="health-hint">执行仍需在对话中确认</p>
+          <button class="link-btn" type="button" @click="emit('go', 'files')">
+            去文件
+          </button>
         </article>
 
         <article class="health-card">
@@ -183,15 +176,10 @@ function relative(ts) {
             <strong>{{ item.label }}</strong>
             <span>{{ checkDetail(item) }}</span>
           </div>
-          <button
-            v-if="!item.ok"
-            class="link-btn"
-            type="button"
-            @click="runAction(item)"
-          >
+          <span v-if="item.ok" class="check-done">已完成</span>
+          <button class="link-btn" type="button" @click="runAction(item)">
             {{ actionLabel(item.action) }}
           </button>
-          <span v-else class="check-done">已完成</span>
         </li>
       </ul>
     </PanelCard>

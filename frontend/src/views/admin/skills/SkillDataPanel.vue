@@ -4,6 +4,7 @@ import { api } from '../../../api/http';
 import { toast } from '../../../stores/toast';
 import { formatSize, formatTimestamp } from '../../../utils/format';
 import ConfirmDialog from '../../../components/ui/ConfirmDialog.vue';
+import SkillDataBrowser from './SkillDataBrowser.vue';
 import { dataStatusMeta } from './rules';
 
 const DEFAULT_DECLARED = 2 * 1024 * 1024 * 1024;
@@ -265,6 +266,13 @@ const confirmCopy = computed(() => {
         </button>
         <pre v-if="logOpen" class="trace-pre log-pre">{{ logLines.join('\n') }}</pre>
       </div>
+
+      <SkillDataBrowser
+        v-if="requiresData"
+        :skill-id="skillId"
+        :status="status"
+        :sandbox-enabled="sandboxEnabled"
+      />
     </template>
 
     <ConfirmDialog

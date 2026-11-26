@@ -1,12 +1,14 @@
 package io.agentscope.examples.payroll.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -21,6 +23,8 @@ import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
+import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
+import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.SandboxGateway;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
@@ -1434,6 +1438,137 @@ class SkillAdminControllerTest {
 
         verify(auditService)
                 .record(eq("skill.data.delete"), eq("skill"), eq("poetry-skill"), any(), any());
+    }
+
+    @Test
+    @DisplayName("数据目录树把沙箱条目映射为前端字段，缺失 isText 不补默认值")
+    void dataTreeMapsSandboxEntries() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.dataTree("poetry-skill", null, SkillDataProtocol.DEFAULT_DEPTH))
+                .thenReturn(
+                        new SandboxGateway.DataTree(
+                                "poetry-skill",
+                                "",
+                                List.of(
+                                        new SandboxGateway.DataEntry(
+                                                "reports", "reports", "dir", 0, 1L, null),
+                                        new SandboxGateway.DataEntry(
+                                                "a.txt", "a.txt", "file", 5, 2L, true)),
+                                false,
+                                500));
+
+        Map<?, ?> data = (Map<?, ?>) controller.dataTree("poetry-skill", null, null).data();
+
+        assertEquals("poetry-skill", data.get("skillId"));
+        assertEquals("", data.get("path"));
+        assertEquals(false, data.get("truncated"));
+        assertEquals(500, data.get("entryLimit"));
+        List<?> entries = (List<?>) data.get("entries");
+        Map<?, ?> dir = (Map<?, ?>) entries.get(0);
+        assertEquals("reports", dir.get("path"));
+        assertEquals("dir", dir.get("type"));
+        assertFalse(dir.containsKey("isText"), String.valueOf(dir));
+        Map<?, ?> file = (Map<?, ?>) entries.get(1);
+        assertEquals(true, file.get("isText"));
+        assertEquals(5L, file.get("size"));
+        verify(gateway).dataTree("poetry-skill", null, SkillDataProtocol.DEFAULT_DEPTH);
+        verify(auditService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("数据文件预览回传正文与 MIME，审计只记元数据不含正文")
+    void dataFileReturnsContentAndAuditsMetadata() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.dataFile("poetry-skill", "reports/a.md", SkillDataProtocol.DEFAULT_PREVIEW_BYTES))
+                .thenReturn(
+                        new SandboxGateway.DataFile(
+                                "reports/a.md", 5, 2L, true, "utf-8", false, "hello", "text/markdown"));
+
+        Map<?, ?> data =
+                (Map<?, ?>) controller.dataFile("poetry-skill", "reports/a.md", null).data();
+
+        assertEquals("reports/a.md", data.get("path"));
+        assertEquals(5L, data.get("size"));
+        assertEquals("utf-8", data.get("encoding"));
+        assertEquals("hello", data.get("content"));
+        assertEquals("text/markdown", data.get("mime"));
+        verify(auditService)
+                .record(
+                        "skill.data.read",
+                        "skill",
+                        "poetry-skill",
+                        null,
+                        Map.of(
+                                "skillId", "poetry-skill",
+                                "path", "reports/a.md",
+                                "sizeBytes", 5L,
+                                "truncated", false,
+                                "isText", true));
+
+        when(gateway.dataFile("poetry-skill", "a.bin", SkillDataProtocol.DEFAULT_PREVIEW_BYTES))
+                .thenReturn(
+                        new SandboxGateway.DataFile(
+                                "a.bin", 3, 2L, false, null, false, null, "application/octet-stream"));
+        Map<?, ?> binary = (Map<?, ?>) controller.dataFile("poetry-skill", "a.bin", null).data();
+        assertFalse(binary.containsKey("encoding"));
+        assertFalse(binary.containsKey("content"));
+        assertEquals("application/octet-stream", binary.get("mime"));
+    }
+
+    @Test
+    @DisplayName("非 db 来源、未声明 setup 或沙箱关闭时拒绝浏览，不触达网关")
+    void dataBrowseRequiresDbSetupAndSandbox() {
+        SkillDetail nacos =
+                new SkillDetail(
+                        "poetry", "诗词", "正文", "nacos", false, false, 1L, List.of(), false,
+                        Map.of("setup", "bash setup.sh"), "", 0);
+        when(registry.detail("poetry")).thenReturn(nacos);
+        assertThrows(PayrollException.class, () -> controller.dataTree("poetry", null, null));
+
+        when(registry.detail("payroll-auditor"))
+                .thenReturn(detail("payroll-auditor", "审计", "正文", List.of(), "1", 1));
+        assertThrows(
+                PayrollException.class, () -> controller.dataFile("payroll-auditor", "a.txt", null));
+
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(false);
+        assertThrows(
+                PayrollException.class, () -> controller.dataTree("poetry-skill", null, null));
+
+        verify(gateway, never()).dataTree(any(), any(), anyInt());
+        verify(gateway, never()).dataFile(any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("沙箱客户端不支持数据浏览时映射为 503 的沙箱不可用异常")
+    void dataBrowseMapsUnsupportedGateway() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.dataTree(any(), any(), anyInt()))
+                .thenThrow(new UnsupportedOperationException("旧版沙箱"));
+
+        assertThrows(
+                SandboxUnavailableException.class,
+                () -> controller.dataTree("poetry-skill", null, null));
+    }
+
+    @Test
+    @DisplayName("数据浏览接口同样要求 skill:manage")
+    void dataBrowseEndpointsRequireSkillManage() {
+        for (String name : List.of("dataTree", "dataFile")) {
+            Method method =
+                    Arrays.stream(SkillAdminController.class.getDeclaredMethods())
+                            .filter(candidate -> candidate.getName().equals(name))
+                            .findFirst()
+                            .orElseThrow();
+            RequirePermission required = method.getAnnotation(RequirePermission.class);
+            assertTrue(
+                    required != null
+                            && Arrays.asList(required.value()).contains(Permissions.SKILL_MANAGE),
+                    name + " 缺少 skill:manage");
+        }
     }
 
     /** 已落库、带版本行的技能详情：管理台初始化与数据删除的审计要带 version_no。 */

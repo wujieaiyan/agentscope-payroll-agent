@@ -7,6 +7,8 @@ import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
+import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.SandboxClient;
@@ -774,6 +776,94 @@ public class SkillAdminController {
         return ApiResponse.ok(dataMap(id, setupPathOf(detail), deleted));
     }
 
+    /** 浏览 data/ 目录树；初始化中由沙箱返回 409，未初始化返回 404。 */
+    @GetMapping("/{id}/data/tree")
+    @RequirePermission(Permissions.SKILL_MANAGE)
+    public ApiResponse dataTree(
+            @PathVariable String id,
+            @RequestParam(name = "path", required = false) String path,
+            @RequestParam(name = "depth", required = false) Integer depth) {
+        SkillDetail detail = store.detail(id);
+        requireDataBrowsable(detail);
+        SandboxGateway.DataTree tree;
+        try {
+            tree =
+                    gateway.dataTree(
+                            detail.id(),
+                            path,
+                            depth == null ? SkillDataProtocol.DEFAULT_DEPTH : depth);
+        } catch (IllegalStateException | UnsupportedOperationException e) {
+            throw new SandboxUnavailableException(e.getMessage(), e);
+        }
+        List<Map<String, Object>> entries = new ArrayList<>();
+        if (tree.entries() != null) {
+            for (SandboxGateway.DataEntry entry : tree.entries()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("name", entry.name());
+                item.put("path", entry.path());
+                item.put("type", entry.type());
+                item.put("size", entry.size());
+                item.put("modifiedAt", entry.modifiedAt());
+                if (entry.isText() != null) {
+                    item.put("isText", entry.isText());
+                }
+                entries.add(item);
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("skillId", detail.id());
+        result.put("path", tree.path());
+        result.put("entries", entries);
+        result.put("truncated", tree.truncated());
+        result.put("entryLimit", tree.entryLimit());
+        return ApiResponse.ok(result);
+    }
+
+    /** 预览 data/ 中的单个文本文件；二进制只回元数据，读取行为记入审计（不含正文）。 */
+    @GetMapping("/{id}/data/file")
+    @RequirePermission(Permissions.SKILL_MANAGE)
+    public ApiResponse dataFile(
+            @PathVariable String id,
+            @RequestParam(name = "path", required = false) String path,
+            @RequestParam(name = "maxBytes", required = false) Integer maxBytes) {
+        SkillDetail detail = store.detail(id);
+        requireDataBrowsable(detail);
+        SandboxGateway.DataFile file;
+        try {
+            file =
+                    gateway.dataFile(
+                            detail.id(),
+                            path,
+                            maxBytes == null
+                                    ? SkillDataProtocol.DEFAULT_PREVIEW_BYTES
+                                    : maxBytes);
+        } catch (IllegalStateException | UnsupportedOperationException e) {
+            throw new SandboxUnavailableException(e.getMessage(), e);
+        }
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("skillId", detail.id());
+        after.put("path", file.path());
+        after.put("sizeBytes", file.size());
+        after.put("truncated", file.truncated());
+        after.put("isText", file.isText());
+        auditService.record("skill.data.read", "skill", detail.id(), null, after);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("path", file.path());
+        result.put("size", file.size());
+        result.put("modifiedAt", file.modifiedAt());
+        result.put("isText", file.isText());
+        if (file.encoding() != null) {
+            result.put("encoding", file.encoding());
+        }
+        result.put("truncated", file.truncated());
+        if (file.content() != null) {
+            result.put("content", file.content());
+        }
+        result.put("mime", file.mime());
+        return ApiResponse.ok(result);
+    }
+
     @DeleteMapping("/{id}")
     @RequirePermission(Permissions.SKILL_MANAGE)
     public ApiResponse delete(
@@ -1502,6 +1592,21 @@ public class SkillAdminController {
                                 .map(SkillFilePackage.Summary::path)
                                 .collect(Collectors.toSet());
         return SkillInitRequirements.setupPath(setupCommand(detail.metadata()), paths);
+    }
+
+    /** 数据浏览前置：只有 db 源、声明了 setup 且沙箱启用的技能才有 data/ 可看。 */
+    private void requireDataBrowsable(SkillDetail detail) {
+        if (detail.source() != null && !"db".equalsIgnoreCase(detail.source())) {
+            throw new PayrollException("当前来源不提供数据状态，无法浏览 data/");
+        }
+        if (setupPathOf(detail) == null) {
+            throw new PayrollException(
+                    "该技能未声明初始化脚本（frontmatter setup 或 setup.sh），无需浏览数据");
+        }
+        if (!gateway.enabled()) {
+            throw new PayrollException(
+                    "沙箱服务未启用，无法浏览技能数据（检查 PAYROLL_SKILL_EXEC_ENABLED / PAYROLL_SANDBOX_URL / PAYROLL_SANDBOX_TOKEN）");
+        }
     }
 
     private static String setupCommand(Map<String, Object> metadata) {
