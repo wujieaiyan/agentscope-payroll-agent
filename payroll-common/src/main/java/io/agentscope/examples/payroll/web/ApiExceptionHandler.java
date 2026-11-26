@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
+import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
 import io.agentscope.examples.payroll.support.AuditContext;
 import jakarta.servlet.ServletException;
 import java.util.Map;
@@ -31,6 +32,9 @@ public class ApiExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
+    /** 本仓库自己的代码都在这个前缀下；AgentScope 框架本体（{@code io.agentscope.core}）不在其中。 */
+    private static final String APPLICATION_PACKAGE = "io.agentscope.examples.";
+
     private final String maxFileSize;
     private final String maxRequestSize;
 
@@ -51,9 +55,28 @@ public class ApiExceptionHandler {
         return error(HttpStatus.GONE, e.getMessage());
     }
 
-    @ExceptionHandler({PayrollException.class, IllegalArgumentException.class})
-    public ResponseEntity<ApiResponse> handleBadRequest(RuntimeException e) {
+    @ExceptionHandler(PayrollException.class)
+    public ResponseEntity<ApiResponse> handleBadRequest(PayrollException e) {
         return error(HttpStatus.BAD_REQUEST, e.getMessage());
+    }
+
+    /**
+     * 参数校验沿用 400，但只有本仓库代码主动抛出的消息才回给页面。JDK 与框架抛出的
+     * {@link IllegalArgumentException}（格式化、数字解析等）是实现细节，原文只进日志。
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiResponse> handleIllegalArgument(IllegalArgumentException e) {
+        if (thrownByApplication(e)) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+        log.warn("请求参数被库代码拒绝，已隐藏内部异常文本：{}", e.toString());
+        return error(HttpStatus.BAD_REQUEST, "请求参数不合法，请检查后重试");
+    }
+
+    /** 按抛出点判定而不是消息内容：栈顶帧在应用包内才算我们写给用户看的校验文案。 */
+    private static boolean thrownByApplication(IllegalArgumentException e) {
+        StackTraceElement[] frames = e.getStackTrace();
+        return frames.length > 0 && frames[0].getClassName().startsWith(APPLICATION_PACKAGE);
     }
 
     @ExceptionHandler(PayrollConflictException.class)
@@ -74,6 +97,13 @@ public class ApiExceptionHandler {
         // 503 不回传内部地址，详细原因只进日志。
         log.warn("配置中心不可用，拒绝写入：{}", e.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "配置中心暂时不可用，请稍后重试");
+    }
+
+    @ExceptionHandler(SandboxUnavailableException.class)
+    public ResponseEntity<ApiResponse> handleSandboxUnavailable(SandboxUnavailableException e) {
+        AuditContext.markWriteResult(AuditEntry.WRITE_UNAVAILABLE);
+        log.warn("沙箱服务不可用：{}", e.getMessage());
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "沙箱服务暂时不可用，请稍后重试");
     }
 
     @ExceptionHandler(UnauthorizedException.class)

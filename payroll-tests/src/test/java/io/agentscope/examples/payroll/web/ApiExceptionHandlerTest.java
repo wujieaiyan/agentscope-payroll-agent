@@ -3,9 +3,11 @@ package io.agentscope.examples.payroll.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
+import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -31,6 +33,42 @@ class ApiExceptionHandlerTest {
         String message = response.getBody() == null ? "" : response.getBody().message();
         assertTrue(message.contains("单文件上限 600 MB"), message);
         assertTrue(message.contains("单次请求上限 1 GB"), message);
+    }
+
+    @Test
+    @DisplayName("本仓库抛出的参数校验消息原样回传")
+    void reportsApplicationValidationMessage() {
+        ResponseEntity<ApiResponse> response =
+                handler.handleIllegalArgument(new IllegalArgumentException("员工编号不能为空"));
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertEquals("员工编号不能为空", response.getBody().message());
+    }
+
+    @Test
+    @DisplayName("JDK 抛出的 IllegalArgumentException 只给通用提示，不泄露内部文本")
+    void hidesLibraryExceptionText() {
+        // 与技能列表那次 400 同形：模板漏转义时 Formatter 抛出 Conversion = '''。
+        IllegalArgumentException jdk =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> "SELECT 'scripts/%'".formatted("'x'"));
+
+        ResponseEntity<ApiResponse> response = handler.handleIllegalArgument(jdk);
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertEquals("请求参数不合法，请检查后重试", response.getBody().message());
+        assertFalse(response.getBody().message().contains("Conversion"));
+    }
+
+    @Test
+    @DisplayName("业务异常仍按原文回传 400")
+    void keepsBusinessMessageOnBadRequest() {
+        ResponseEntity<ApiResponse> response =
+                handler.handleBadRequest(new PayrollException("请提供原密码与新密码"));
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertEquals("请提供原密码与新密码", response.getBody().message());
     }
 
     @Test
