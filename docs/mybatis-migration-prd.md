@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | D1 | 接入形态 | `mybatis-spring-boot-starter` 3.0.5 + XML Mapper | 官方 starter 之外手写 `SqlSessionFactory`；MyBatis-Plus | 推荐 |
 | D2 | 连接与引导归属 | `PayrollDatabase` 仍是唯一连接/迁移入口，新增**只读 `DataSource` 适配器**给它挂到 Spring；Flyway 留在原处；排除 Boot 的 DataSource/Flyway/SqlInit 自动配置 | 把连接池配置整体迁给 Spring Boot；或让 Boot 接管 Flyway | **需拍板** |
-| D3 | 事务 | 引入 Spring `DataSourceTransactionManager`；事务分三层：① 跨 store 级联只在服务层；② **store 方法级**用于今天 `setAutoCommit(false)` 的 26 处；③ 单语句不加。显式 `isolation=READ_COMMITTED`。详见 §5.0.1 / §5.0.3 | 全部不加事务（与现状等价）；或每个 Mapper 方法都加 | 推荐 |
+| D3 | 事务 | 引入 Spring `DataSourceTransactionManager`；事务分三层：① 跨 store 级联只在服务层；② **store 方法级**用于 27 个 store 内多语句事务体（2 个跨 store 级联上移服务层）；③ 单语句不加。显式 `isolation=READ_COMMITTED`。详见 §5.0.1 / §5.0.3 | 全部不加事务（与现状等价）；或每个 Mapper 方法都加 | 推荐 |
 | D4 | 方言策略 | 统一写 MySQL 方言，H2（`MODE=MySQL`）作为执行器；用双引擎测试兜底；`_databaseId` 只作逃生口 | 保留 `dialect(h2Sql, mysqlSql)` 双份 SQL | **需拍板** |
 | D5 | Mapper 组织 | XML + 显式 `resultMap`（记录类型用 `<constructor>`）；接口放 `*.db.mapper`；`SkillStore` 等端口不变 | 注解 SQL；或 Mapper 直接返回领域记录由自动映射推断 | 推荐 |
 | D6 | 自增主键回填 | P0 用审计表实测定稿：**只允许 `useGeneratedKeys` + 主键载体参数**；兜底仅限 `<selectKey order="AFTER">`（同 Statement 同连接）；**禁止跨 Mapper 调用 `SELECT LAST_INSERT_ID()`**。upsert 场景单独实测。详见 §5.0.4 | 改成客户端生成 ID（雪花/UUID） | **需拍板**（影响 25 处写接口） |
@@ -36,7 +36,7 @@
 | 方言选择器 `dialect(h2Sql, mysqlSql)` 在仓储内被调用 | [PayrollDatabase.java:194](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/PayrollDatabase.java#L194)、[JobLeaseStore.java:120](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JobLeaseStore.java#L120)、[H2PayrollRepository.java:255](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2PayrollRepository.java#L255) |
 | 43 个主源码文件依赖 `PayrollDatabase`（common 30 / backend 11 / agent 2） | `grep -rl "PayrollDatabase"` 实测 |
 | 主源码 246 条 SQL 字面量，405 处 `prepareStatement/createStatement` | `grep` 实测（2026-11-27） |
-| 事务全靠手写：**13 个 store 文件 / 26 处 `setAutoCommit(false)`**（另加一次性迁移工具 `H2ToMysqlMigration` 2 处）、19 处 `rollback()`、0 处 `@Transactional` | [H2ChatTurnStore.java:62](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatTurnStore.java#L62)、[JdbcSkillStore.java:1577](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1577)、`grep setAutoCommit` 实测（2026-11-27） |
+| 事务全靠手写：**13 个 store 文件 / 23 处 `setAutoCommit(false)`**（拆开统一事务辅助后共 29 个多语句方法，其中 2 个跨 store 级联；另加引导种子 1 处、一次性迁移工具 `H2ToMysqlMigration` 1 处）、19 处 `rollback()`、0 处 `@Transactional` | [H2ChatTurnStore.java:62](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatTurnStore.java#L62)、[JdbcSkillStore.java:1577](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1577)、`grep setAutoCommit` 实测（2026-11-27） |
 | 事务由 `Connection` 参数跨类携带：`H2ChatStore.delete` 把同一连接传给另外 3 个 store 的 `static deleteForSession`，级联 7 张表 | [H2ChatStore.java:169-171](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L169)、[H2ChatStore.java:868-870](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L868)、[ChatAttachmentStore.java:284](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/ChatAttachmentStore.java#L284) |
 | 连接复用比：**338 次 `connection()` / 405 条语句 ≈ 1.20 语句每连接**（common 236/297 + backend 102/108） | `grep "database.connection()"` 与 `prepareStatement|createStatement` 实测 |
 | 约束冲突按 **SQLState 前缀 `23`** 分支的共 8 处（7 处 `getSQLState()` + 1 处 `catch SQLIntegrityConstraintViolationException`） | [JobLeaseStore.java:126](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JobLeaseStore.java#L126)、[H2ChatStore.java:511](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L511)、[H2ChatTurnStore.java:277](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatTurnStore.java#L277)、[H2UserProfileStore.java:761](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2UserProfileStore.java#L761)、[JdbcAgentDefinitionRepository.java:312](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JdbcAgentDefinitionRepository.java#L312)、[ModelCredentialStore.java:104](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/ModelCredentialStore.java#L104)、[JdbcSkillStore.java:2145](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L2145) |
@@ -101,7 +101,7 @@
 | 方案 | 做法 | 改造量 | 优点 | 代价 / 风险 |
 |---|---|---|---|---|
 | **A 维持手写 JDBC** | 现状 | 0 | 零风险、零依赖 | S1–S6 全部保留；246 条 SQL 的维护成本随表增长继续上升 |
-| **B MyBatis + 保留自研引导**（推荐） | starter 接入；`PayrollDatabase` 只多暴露一个 `DataSource` 适配器；仓储逐个改成 Mapper | 24–28 人日，分 5 批 | SQL 与代码分离、动态 SQL 可控、事务交给 Spring、改造可分批回滚；引导层/Flyway/连接池零改动 | 需要一次性引入依赖；XML 数量多；事务语义要从「手写」切换到「声明式」，且 26 处手工事务需先登记（§5.0.1） |
+| **B MyBatis + 保留自研引导**（推荐） | starter 接入；`PayrollDatabase` 只多暴露一个 `DataSource` 适配器；仓储逐个改成 Mapper | 24–28 人日，分 5 批 | SQL 与代码分离、动态 SQL 可控、事务交给 Spring、改造可分批回滚；引导层/Flyway/连接池零改动 | 需要一次性引入依赖；XML 数量多；事务语义要从「手写」切换到「声明式」，且 29 个多语句事务体需先登记（§5.0.1） |
 | **C MyBatis-Plus** | 在 B 之上加 BaseMapper/Wrapper | 22–27 人日 | 单表 CRUD 更省 | 项目 SQL 多为多表/聚合/动态过滤，Wrapper 表达力不足反而混两套；版本与 Spring Boot 3.5 的适配风险额外承担 |
 | **D Spring Data JDBC / JPA** | 实体映射 + Repository | 30+ 人日 | 声明式 | 现有 SQL 大量手写优化（`LIMIT/OFFSET`、upsert、批量删除），迁移等于重写查询计划；H2/MySQL 差异被 ORM 掩盖更难排查 |
 
@@ -115,28 +115,55 @@
 
 #### 5.0.1 事务分三层，不是两层
 
-原 D3 假设「手写事务只在服务层多语句单元」，实测不成立：store 自己有 **26 处 `setAutoCommit(false)`**，且存在跨 store 传连接的级联。因此改成三层：
+原 D3 假设「手写事务只在服务层多语句单元」，实测不成立：**13 个 store 里有 23 处 `setAutoCommit(false)`**，另有 1 处跨 store 级联**根本没开事务**（`H2ChatStore.clear`）；再把 `JdbcSkillStore` 用统一 `inTransaction` 承载的 6 个事务体拆开，实际是 **29 个多语句方法**（27 个 L2 + 2 个 L1）。`PayrollDatabase.initialize()` 的种子事务与 `H2ToMysqlMigration` 各 1 处属于引导层/一次性工具，不进 MyBatis，不登记。
 
 | 层 | 适用 | 标注位置 | 判据 |
 |---|---|---|---|
-| **L1 跨 store 级联** | 一个逻辑删除/写入横跨多个 store | 服务层 `@Transactional` | 只有 `H2ChatStore.delete` 这一类 |
-| **L2 store 方法级** | 今天 `setAutoCommit(false)` 的 26 处 | store 公开方法 | 一个方法内多条语句必须同成败 |
+| **L1 跨 store 级联** | 一个逻辑删除横跨多个 store | 服务层 `@Transactional` | 只有 `H2ChatStore.delete` / `clear` |
+| **L2 store 方法级** | 23 处 `setAutoCommit(false)` 拆出的 27 个事务体 | store 公开方法 | 一个方法内多条语句必须同成败 |
 | **L3 单语句** | 其余全部 | 不标注 | Mapper 一条语句，autocommit |
 
-**L1 的唯一样本**：`H2ChatStore.delete` 把同一个 `Connection` 传给 `H2ActionProposalStore` / `H2ChatTurnStore` / `ChatAttachmentStore` 的 `static deleteForSession`，再叠加工具追溯、消息、团队数据和会话本身（[H2ChatStore.java:169-171](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L169)、[:868-870](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L868)）。这是「事务由参数携带」，MyBatis 无法表达，必须**上移为 `ChatDataService.@Transactional`，由它注入 4 个 Mapper**；4 个 `deleteForSession` 改成 Mapper 方法，`static + Connection` 签名删除。这是全项目唯一允许的「store 公开方法搬迁」，在 P2 单独一个提交，先补测试再改。
+**L1 的两个样本**：`H2ChatStore.delete` 与 `clear` 都把同一个 `Connection` 传给 `H2ActionProposalStore` / `H2ChatTurnStore` / `ChatAttachmentStore` 的 `static deleteForSession`，再叠加工具追溯、消息、团队数据和会话本身（[delete:169-171](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L169)、[clear:868-870](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L868)）。这是「事务由参数携带」，MyBatis 无法表达，必须**上移为 `ChatDataService.@Transactional`，由它注入 4 个 Mapper**；4 个 `deleteForSession` 改成 Mapper 方法，`static + Connection` 签名删除。这是全项目仅有的「store 公开方法搬迁」，在 P2 单独一个提交，先补测试再改。
 
-**L2 登记表（P0 首日补全 26 行）**：
+**`clear` 的现状是缺陷，不是等价基线**：它没有 `setAutoCommit(false)`，级联中的每条 `DELETE` 各自提交（[:866](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L866)），中途失败会留下半清空的会话。上移到 L1 后语义由「部分成功」变为「全成全败」，这是**有意的行为变更**，必须由专门的失败注入用例断言，并写进交接文档。
 
-| store | 行 | 单元 | 备注 |
-|---|---|---|---|
-| `DevTaskStore` | [64](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/DevTaskStore.java#L64) | `replacePlan`：`DELETE` 全量 + `executeBatch` 插入 | **删了插不进 = 计划被清空**，P1 必须先加注解 |
-| `DevArtifactStore` | [92](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/DevArtifactStore.java#L92) | 产物 + 版本 | P1 |
-| `H2ChatFeedbackStore` | [38](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatFeedbackStore.java#L38) | `upsert`：先查后写 | P1；结论仍是「写后可读」，查询本身无 `FOR UPDATE` |
-| `H2ChatStore` | [413](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L413) | 追加助手消息 + 工具追溯 | P2 |
-| `H2ChatStore` | [576](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L576) | 批量追溯 | P2 |
-| `H2ChatStore` | [167](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L167) | 会话级联删除 | **L1，上移服务层** |
+**事务登记表（29 行 = 27 L2 + 2 L1，P0 首日产物）**：
 
-其余（`H2ChatTurnStore` ×2、`H2PayrollRunStore` ×2、`H2ApprovalStore` ×3、`H2AdminRepository`、`H2AgentTeamStore`、`H2UserProfileStore` ×3、`JdbcAgentDefinitionRepository` ×3、`ChatAttachmentStore`、`JdbcSkillStore`）同属 L2，按批登记。
+| # | 批次 | store | 方法（行） | 事务内容 | 迁移落点 |
+|---|---|---|---|---|---|
+| 1 | P1 | `H2ChatFeedbackStore` | `upsert`（[38](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatFeedbackStore.java#L38)） | 先查存在性 → INSERT / UPDATE | L2；查询无 `FOR UPDATE`，结论仍是「写后可读」 |
+| 2 | P1 | `DevTaskStore` | `replacePlan`（[64](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/DevTaskStore.java#L64)） | `DELETE` 全量 → `executeBatch` 插入 | L2；**删了插不进 = 计划被清空** |
+| 3 | P1 | `DevArtifactStore` | `save`（[92](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/DevArtifactStore.java#L92)） | `nextVersion` SELECT → INSERT（自增主键） | L2 |
+| 4 | P2 | `H2ChatTurnStore` | `createWithUserMessage`（[62](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatTurnStore.java#L62)） | INSERT 用户消息 → INSERT 轮次 → UPDATE 会话时间 | L2 |
+| 5 | P2 | `H2ChatTurnStore` | `nextFencing`（[197](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatTurnStore.java#L197)） | SELECT 最大值 → UPDATE/INSERT 计数器 → SELECT 回读；`finally` 还原 autoCommit | L2；行锁必须跨语句持有 |
+| 6 | P2 | `H2ChatStore` | `appendAssistant`（[413](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L413)） | INSERT 消息 → 提案 / 追溯 / 引用 | L2 |
+| 7 | P2 | `H2ChatStore` | `appendTraces`（[576](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L576)） | 循环 INSERT 追溯 | L2 |
+| 8 | P2 | `H2ChatStore` | `delete`（[167](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L167)） | 3 个 `deleteForSession` + 工具追溯 / 消息 / 团队 / 会话 | **L1 上移 `ChatDataService`** |
+| 9 | P2 | `H2ChatStore` | `clear`（[866](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ChatStore.java#L866)） | 与 `delete` 同构，**现状无事务** | **L1 上移**；行为由「部分成功」改为「全成全败」 |
+| 10 | P2 | `ChatAttachmentStore` | `bind`（[248](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/ChatAttachmentStore.java#L248)） | 循环条件 UPDATE（`status=READY` → 已绑定） | L2 |
+| 11 | P2 | `H2AgentTeamStore` | `markPrimary`（[138](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2AgentTeamStore.java#L138)） | SELECT 运行 → 清同消息主标记 → 置本次主标记 | L2 |
+| 12 | P2 | `H2PayrollRunStore` | `createDraft`（[49](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2PayrollRunStore.java#L49)） | INSERT 批次（自增）→ 明细 → 失败行 | L2 |
+| 13 | P2 | `H2PayrollRunStore` | `recordEmailResults`（[230](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2PayrollRunStore.java#L230)） | 明细 UPDATE 批量 → `email_deliveries` INSERT 批量 | L2 |
+| 14 | P2 | `H2ApprovalStore` | `createFlow`（[122](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ApprovalStore.java#L122)） | INSERT 链（自增）→ 原子替换节点 | L2 |
+| 15 | P2 | `H2ApprovalStore` | `updateFlow`（[156](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ApprovalStore.java#L156)） | UPDATE 链 → 原子替换节点 | L2 |
+| 16 | P2 | `H2ApprovalStore` | `deleteFlow`（[184](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2ApprovalStore.java#L184)） | DELETE 节点 → DELETE 链（0 行抛业务异常） | L2 |
+| 17 | P2 | `H2AdminRepository` | `updateDepartment`（[236](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2AdminRepository.java#L236)） | UPDATE 员工部门名 → UPDATE `departments` | L2 |
+| 18 | P2 | `H2UserProfileStore` | `upsert`（[145](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2UserProfileStore.java#L145)） | upsert 条目 → 回读 | L2 |
+| 19 | P2 | `H2UserProfileStore` | `purge`（[204](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2UserProfileStore.java#L204)） | DELETE 条目 → DELETE 抽取记录 | L2 |
+| 20 | P2 | `H2UserProfileStore` | `complete`（[480](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/H2UserProfileStore.java#L480)） | 循环 upsert 条目 → 置抽取记录 DONE | L2 |
+| 21 | P2 | `JdbcAgentDefinitionRepository` | `save`（[91](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JdbcAgentDefinitionRepository.java#L91)） | `lockRevisions` → INSERT / UPDATE | L2 |
+| 22 | P2 | `JdbcAgentDefinitionRepository` | `delete`（[126](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JdbcAgentDefinitionRepository.java#L126)） | `lockRevisions` → DELETE | L2 |
+| 23 | P2 | `JdbcAgentDefinitionRepository` | `importIfEmpty`（[168](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/JdbcAgentDefinitionRepository.java#L168)） | `lockRevisions` → 循环 INSERT | L2 |
+| 24 | P4 | `JdbcSkillStore` | `rollback`（[1053](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1053)） | 锁行 → 追加版本 → 重建清单 | L2 |
+| 25 | P4 | `JdbcSkillStore` | `replaceFiles`（[1126](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1126)） | 锁行 → 重建清单与 blob 指针 | L2 |
+| 26 | P4 | `JdbcSkillStore` | `deleteFile`（[1159](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1159)） | 锁行 → 删清单行 → 刷新定义 | L2 |
+| 27 | P4 | `JdbcSkillStore` | `writeFile`（[1196](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1196)） | 锁行 → 删旧行 → 写新行 → 刷新定义 | L2 |
+| 28 | P4 | `JdbcSkillStore` | `delete`（[1303](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1303)） | 删清单 → 删版本 → 删定义 | L2 |
+| 29 | P4 | `JdbcSkillStore` | `write`（[1354](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1354)，私有） | 版本行 + 清单 + 派生列；入口 `create`(:938/:944)、`update`(:969/:980/:991/:1007)、`importProject`(:1224/:1230)、`importProjectForMigration`(:1244) | L2，但**注解不能落在私有方法上**，见下 |
+
+**`JdbcSkillStore` 是唯一需要先拆再标的一行**：事务体里调用的 `writeResources` 会执行 `blobStore.put`（[JdbcSkillStore.java:1803](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1803)），即**当前文件 IO 就在事务内**，回滚后再用 `cleanupBlobs` 补偿。这与 §5.0.3「事务内只允许 DB 调用」冲突；而 `@Transactional` 加在私有 `write` / `importProjectInternal` 上又不会经过代理。P4 开工前必须先拆成「公开入口先落盘 → 独立的 `@Transactional` 组件只登记指针」，拆完后的公开方法清单会多于本表的 6 行，届时修订本表与白名单测试。
+
+**登记表落成测试常量，不从文档里读**：新增测试侧 `TransactionRegistry`（每行带 `batch` 与 `migrated` 标志），`TransactionWhitelistTest` 只比对 `migrated=true` 的行。P0 阶段集合为空——试点两个仓储都是 L3，且**此时给 store 加注解是错的**：Spring 事务绑定的是 `PayrollDatabaseDataSource` 的连接，而 store 还在用 `PayrollDatabase.connection()`（H2 走 `DriverManager` 另开连接），注解不生效，还会白占一条连接。注解必须与各仓储的 Mapper 改造同提交。
 
 **白名单测试**（替代「靠评审」）：扫描 `@Transactional` 注解，方法与上表**逐条相等**即通过；多一个（比如有人顺手给 Mapper 加）或少一个都失败。同时静态检查：L1/L2 方法体内不得出现 `ExecutorService` / SSE 发送 / HTTP 客户端 / 文件 IO。
 
@@ -295,6 +322,23 @@ mybatis:
 
 **MySQL 闸门**：本机无 docker CLI，按 [`mysql-redis-deploy.md`](mysql-redis-deploy.md) 的 compose / 部门库执行一次「启动 + 全量测试 + 审计写入 + 分页查询」；未通过不得进入 P1。
 
+**P0 施工顺序（有依赖，不能并行乱序）**：
+
+| 步 | 内容 | 完成判据 |
+|---|---|---|
+| P0-1 | 根 pom 锁 `mybatis-spring-boot-starter` / `org.mybatis:mybatis` / `mybatis-spring`；联网 `dependency:go-offline`；`mvn -o test` 记录迁移前基线（以当次实际输出为准，须全绿） | 断网后 `mvn -o test` 与基线一致 |
+| P0-2 | `TransactionRegistry` 测试常量（29 行，`migrated=false`）+ `TransactionWhitelistTest` | 集合为空时绿；故意多加一个注解即失败 |
+| P0-3 | `PayrollDatabaseDataSource` 适配器 + `connection()` 获取计数（供 1.2× 指标） | 适配器自测 + 计数在 /actuator 或日志可见 |
+| P0-4 | `DataSourceTransactionManager` + 排除 Boot 的 4 项自动配置 + H2 启动冒烟 | H2 启动、Flyway 只跑一次、健康检查形状不变 |
+| P0-5 | `@MapperScan` + `SqlSessionFactory`（XML 位置、`defaultStatementTimeout=30`、4 类敏感包 WARN）+ 启动断言 `MappedStatement` 数量 | 启动通过；数量断言生效 |
+| P0-6 | 守卫骨架：`MapperXmlParseTest` / `MapperSqlGuardTest` / ArchUnit 白名单（此时 Mapper 仅试点） | 三条规则全绿，含故意违规的负例 |
+| P0-7 | `PayrollMappers.forDatabase(...)` 测试装配工厂（先只装配试点仓储） | 试点测试改用它后断言不变 |
+| P0-8 | 试点迁移 `H2AuditStore` + `H2LlmUsageStore`；`MapperExceptionMappingTest` 先在 H2 绿 | 原测试断言零改动通过 |
+| P0-9 | 三项指标基线：Mapper 调用次数、`connection()` 获取次数、语句 P95 | 写入本文档，作为后续每批闸门 |
+| P0-10 | MySQL 闸门 + 异常类型在 MySQL 上补断言 + D6 回填/upsert 结论写回 §5.2 | 闸门记录留档；P0 收尾评审 |
+
+**P0 期间禁止给未迁移 store 加 `@Transactional`**：Spring 事务绑定的是适配器给出的连接，而这些 store 仍用 `PayrollDatabase.connection()` 自己开连接，注解不生效且会多占一条连接（§5.0.1 末段）。注解与 Mapper 改造必须同提交。
+
 ### 5.3 P1：低风险叶子仓储（5 人日，约 60 条 SQL）
 
 > 人日从 3 上调到 5：本批**并非全是单语句**。`DevTaskStore`（`replacePlan` 先 `DELETE` 再批量插入）、`DevArtifactStore`、`H2ChatFeedbackStore`（`upsert` 先查后写）今天都自带事务，迁移前必须按 §5.0.1 先落 L2 边界，否则 `replacePlan` 失败会把计划清空。
@@ -315,7 +359,7 @@ mybatis:
 | 仓储 | 风险点 | 处理 |
 |---|---|---|
 | `H2ChatTurnStore` | 手工事务 + 租约 + 幂等插入 | `beginTurn` 保持 **L2（store 方法级）**，不迁服务层——迁到服务会把租约获取和幂等插入拉进同一事务；租约仍走 `JobLeaseStore` 的 L3，不进事务；冲突判定按 §5.0.2 |
-| `H2ChatStore` | 4 处自增主键、**3 处事务**、**1 处跨 store 级联删除**、会话/消息分页、JSON 列 | 主键按 D6 模板；`appendAssistantMessage`(:413) 与 `saveTraces`(:576) 为 L2；`delete`(:167) 为 **L1，上移 `ChatDataService`**（§5.0.1）；消息读取保持 L3，禁止把 SSE 推送放事务内 |
+| `H2ChatStore` | 4 处自增主键、**3 处事务**、**1 处跨 store 级联删除**、会话/消息分页、JSON 列 | 主键按 D6 模板；`appendAssistant`(:413) 与 `appendTraces`(:576) 为 L2；`delete`(:167) / `clear`(:866) 为 **L1，上移 `ChatDataService`**（§5.0.1；`clear` 现状无事务）；消息读取保持 L3，禁止把 SSE 推送放事务内 |
 | `ChatAttachmentStore` | 状态机 + 自增主键 + 文件路径 + **L2 事务**（[:248](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/db/ChatAttachmentStore.java#L248)） | 状态更新用带 `WHERE status=?` 的条件更新，返回值判断影响行数；状态机 + 附件行的多语句保持在 L2，文件 IO 留在事务外 |
 | `H2AgentTeamStore` | 2 处自增主键、团队运行聚合查询 | 聚合 SQL 原样迁入 XML，不改查询计划 |
 | `H2PayrollRepository` | 4 处方言（upsert/时间表达式）、薪酬结果批量写 | 方言按 D4 收敛；批量写用专用 BATCH `SqlSessionTemplate` |
@@ -339,7 +383,7 @@ mybatis:
 
 ### 5.6 P4：技能仓储与收尾（4–5 人日，约 17 条 SQL）
 
-- `JdbcSkillStore`：17 条 SQL（全项目单文件最多）+ 手工事务（[JdbcSkillStore.java:1577](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1577)）是最后一块，因为涉及版本表、blob 指针、revision 递增和回滚。按 §5.0.1 保持 **L2（store 方法级）**，不迁服务层：blob 写盘是文件 IO，必须先落盘、再在事务内登记指针；把文件 IO 包进事务会直接违反 §5.0.3。
+- `JdbcSkillStore`：17 条 SQL（全项目单文件最多）+ 手工事务（[JdbcSkillStore.java:1577](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1577)）是最后一块，因为涉及版本表、blob 指针、revision 递增和回滚。按 §5.0.1 保持 **L2**，但**不能直接把注解加到现有公开方法上**：当前 `writeResources` 在事务体内执行 `blobStore.put`（[:1803](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1803)），回滚后再用 `cleanupBlobs` 补偿，也就是文件 IO 今天就在事务里。P4 必须先拆成「公开入口先落盘 → 独立 `@Transactional` 组件只登记指针」，否则注解会把文件 IO 一并包进事务，违反 §5.0.3。
 - 技能 blob upsert 目前用 `dialect(UPSERT_BLOB_H2, UPSERT_BLOB_MYSQL)`（[:1846](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/java/io/agentscope/examples/payroll/skill/JdbcSkillStore.java#L1846)），按 D4 收敛为 `ON DUPLICATE KEY UPDATE`。
 - 收尾：删除仓储层所有 `database.dialect(...)` 调用；`PayrollDatabase.dialect()` 仅保留给内部种子 SQL（P4 评估后再删）；同步更新 [`architecture.md`](architecture.md) §5（「SQL 需双方言可执行」改为「统一 MySQL 方言 + H2 兼容执行 + 双引擎测试」）。
 
@@ -373,7 +417,7 @@ mybatis:
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **事务边界静默消失**（26 处手工事务；`DevTaskStore.replacePlan` 先删后插；`H2ChatStore.delete` 跨 4 个 store 级联） | 失败时数据残缺：计划被清空、会话删除一半、消息无追溯 | §5.0.1 三层 + 26 行登记表 + `TransactionWhitelistTest`；级联删除上移服务层 |
+| **事务边界静默消失**（29 个多语句事务体；`DevTaskStore.replacePlan` 先删后插；`H2ChatStore.delete` / `clear` 跨 4 个 store 级联，其中 `clear` 今天连事务都没有） | 失败时数据残缺：计划被清空、会话删除一半、消息无追溯 | §5.0.1 三层 + 29 行登记表 + `TransactionWhitelistTest`；两个级联上移服务层 |
 | **异常翻译打断 8 处 SQLState `23` 分支** | 租约"未抢到"变成抛异常；幂等插入变成报错 | §5.0.2 类型映射表 + `MapperExceptionMappingTest`（H2/MySQL 双引擎断具体类型） |
 | **测试装配 103 处直接构造** | 「测试不改」是假象，77 个文件需机械改造 | §5.0.5 `PayrollMappers` 工厂 + `..db.support..` 白名单；工作量计入 P0 |
 | Boot 自动配置副作用（Flyway 双跑、健康检查形状变化） | 启动失败或迁移冲突 | P0 显式排除 4 项自动配置 + 启动冒烟；`management.health.db.enabled=false`；启动断言 `MappedStatement` 数量 |
@@ -399,14 +443,14 @@ mybatis:
 | P4 | 技能仓储、方言收尾、文档同步 | 4–5 | 是 |
 | 合计 | | **24–28 人日** | |
 
-前置：P0 开工前需要一次联网依赖拉取（本机 `~/.m2` 无 MyBatis）、一个可用的 MySQL 验证环境，以及 **§5.0.1 的 26 行事务登记表补全**（P0 第一天的产物，未完成不得动仓储代码）。
+前置：P0 开工前需要一次联网依赖拉取（本机 `~/.m2` 无 MyBatis）、一个可用的 MySQL 验证环境，以及 **§5.0.1 的 29 行事务登记表补全**（P0 第一天的产物，未完成不得动仓储代码）。
 
 ## 9. DoD
 
 - [ ] `mybatis-spring-boot-starter` 版本在根 pom 锁定（含 `org.mybatis:mybatis`、`mybatis-spring`），`mvn -o test` 可离线执行。
 - [ ] `PayrollDatabaseDataSource` 通过 `connection()` 委托；非事务路径不改 autoCommit，事务路径由 `DataSourceTransactionManager` 管理。
 - [ ] Boot 的 DataSource / DataSourceTransactionManager / Flyway / SqlInit 自动配置已排除，H2 与 `mysql` profile 均能启动；`MappedStatement` 数量启动断言通过。
-- [ ] §5.0.1 的 26 行事务登记表补全；L2 方法全部带 `@Transactional`，`H2ChatStore.delete` 已上移服务层；`TransactionWhitelistTest` 绿。
+- [ ] §5.0.1 的 29 行事务登记表补全并落成测试侧 `TransactionRegistry`；已迁仓储的 L2 方法全部带 `@Transactional`，`H2ChatStore.delete` / `clear` 已上移服务层（`clear` 的「全成全败」有失败注入用例）；`TransactionWhitelistTest` 绿。
 - [ ] §5.0.2 的 8 处约束冲突判定全部改为异常类型；`MapperExceptionMappingTest` 在 H2/MySQL 均断言到具体子类型。
 - [ ] 显式 `isolation=READ_COMMITTED`；`@Transactional` 方法体内无 Executor/SSE/HTTP/文件 IO（静态检查通过）。
 - [ ] D6 模板落地：只用 `useGeneratedKeys` + `<selectKey>`，无跨 Mapper 的 `LAST_INSERT_ID()`；upsert 结论已写回。
@@ -417,4 +461,4 @@ mybatis:
 - [ ] 指标基线（连接获取次数 ≤1.2×、语句 P95 ≤1.2×）在每批合入前复测。
 - [ ] MySQL 闸门每批执行并留记录；H2/MySQL 同一 SQL 行为一致（D4）。
 - [ ] [`architecture.md`](architecture.md) §5 与 [`mysql-redis-deploy.md`](mysql-redis-deploy.md) 的持久化说明已同步。
-- [ ] 交接文档记录：D6 主键回填最终模板、26 行事务登记表、各批回滚方式、已知差异（如有）。
+- [ ] 交接文档记录：D6 主键回填最终模板、29 行事务登记表、`clear` 语义变更、JdbcSkillStore 的 blob/事务拆分、各批回滚方式、已知差异（如有）。
