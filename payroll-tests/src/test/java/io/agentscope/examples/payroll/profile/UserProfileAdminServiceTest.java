@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.H2UserProfileStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.AuditEntry;
 import io.agentscope.examples.payroll.domain.AuditQuery;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -34,7 +35,7 @@ class UserProfileAdminServiceTest {
     void setUp() {
         database = PayrollDatabase.inMemory("profile-admin-" + System.nanoTime());
         store = new H2UserProfileStore(database);
-        auditStore = new H2AuditStore(database);
+        auditStore = PayrollMappers.forDatabase(database).auditStore();
         service = new UserProfileAdminService(store, new AuditService(auditStore, 180), true);
     }
 

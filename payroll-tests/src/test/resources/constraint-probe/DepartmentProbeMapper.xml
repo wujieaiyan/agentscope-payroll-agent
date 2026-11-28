@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.agentscope.examples.payroll.db.mapper.fixture.DepartmentProbeMapper">
+
+    <insert id="upsertDepartment"
+            parameterType="io.agentscope.examples.payroll.db.mapper.fixture.DepartmentProbeInsert"
+            useGeneratedKeys="true"
+            keyProperty="id">
+        INSERT INTO departments (name, description) VALUES (#{name}, #{description})
+        ON DUPLICATE KEY UPDATE description = VALUES(description)
+    </insert>
+
+    <delete id="deleteDepartment">
+        DELETE FROM departments WHERE name = #{name}
+    </delete>
+
+</mapper>

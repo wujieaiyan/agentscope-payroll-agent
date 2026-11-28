@@ -6,8 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.devteam.DevArtifactType;
 import io.agentscope.examples.payroll.devteam.DevEditSession;
 import io.agentscope.examples.payroll.devteam.DevGuardMonitor;
@@ -58,7 +58,7 @@ class DevSessionFilesystemTest {
                         DevPathPolicy.ROLE_IMPLEMENTER,
                         workspace,
                         new DevArtifactStore(database),
-                        new AuditService(new H2AuditStore(database), 30));
+                        new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30));
         filesystem = new DevSessionFilesystem(DevPathPolicy.ROLE_IMPLEMENTER, root, session);
     }
 

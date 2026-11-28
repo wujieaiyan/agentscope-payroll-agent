@@ -5,9 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.ChatAttachmentStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.H2ChatStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.ChatAttachment;
 import io.agentscope.examples.payroll.domain.ChatAttachmentRef;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -66,7 +66,7 @@ class ChatAttachmentServiceTest {
                         manager,
                         parser,
                         queue,
-                        new AuditService(new H2AuditStore(database), 30),
+                        new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30),
                         tempDir.toString(),
                         2,
                         5 * 1024 * 1024);

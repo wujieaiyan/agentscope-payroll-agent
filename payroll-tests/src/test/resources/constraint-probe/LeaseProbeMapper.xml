@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.agentscope.examples.payroll.db.mapper.fixture.LeaseProbeMapper">
+
+    <insert id="insert">
+        INSERT INTO job_lease (job_name, owner, acquired_at, expires_at)
+        VALUES (#{jobName}, #{owner}, #{acquiredAt}, #{expiresAt})
+    </insert>
+
+    <delete id="delete">
+        DELETE FROM job_lease WHERE job_name = #{jobName}
+    </delete>
+
+</mapper>

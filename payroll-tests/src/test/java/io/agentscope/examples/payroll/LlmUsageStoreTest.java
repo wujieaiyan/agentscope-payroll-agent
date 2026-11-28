@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.H2LlmUsageStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.service.LlmUsageService;
 import io.agentscope.examples.payroll.usage.LlmUsageOverview;
 import io.agentscope.examples.payroll.usage.LlmUsageQuery;
@@ -27,7 +28,7 @@ class LlmUsageStoreTest {
 
     @BeforeEach
     void setUp() {
-        store = new H2LlmUsageStore(PayrollDatabase.inMemory("usage-" + System.nanoTime()));
+        store = PayrollMappers.forDatabase(PayrollDatabase.inMemory("usage-" + System.nanoTime())).llmUsageStore();
         service = new LlmUsageService(store);
     }
 

@@ -5,8 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.H2AdminRepository;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.AuditEntry;
 import io.agentscope.examples.payroll.domain.AuditPage;
 import io.agentscope.examples.payroll.domain.AuditQuery;
@@ -35,7 +35,7 @@ class AuditFilterTest {
     @BeforeEach
     void setUp() {
         PayrollDatabase database = PayrollDatabase.inMemory("audit-filter-" + UUID.randomUUID());
-        auditService = new AuditService(new H2AuditStore(database), 180);
+        auditService = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 180);
         AuthService authService =
                 new AuthService(
                         new H2AdminRepository(database),

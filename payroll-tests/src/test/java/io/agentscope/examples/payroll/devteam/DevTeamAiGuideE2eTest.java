@@ -10,8 +10,8 @@ import io.agentscope.examples.payroll.db.DevApprovalStore;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
 import io.agentscope.examples.payroll.db.DevDeliveryStore;
 import io.agentscope.examples.payroll.db.DevTaskStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.FlowNode;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.team.TeamIntent;
@@ -81,7 +81,7 @@ class DevTeamAiGuideE2eTest {
         DevArtifactStore artifactStore = new DevArtifactStore(database);
         DevApprovalStore approvalStore = new DevApprovalStore(database);
         DevDeliveryStore deliveryStore = new DevDeliveryStore(database);
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
 
         DevTeamSettings settings =
                 DevTeamSettings.of(

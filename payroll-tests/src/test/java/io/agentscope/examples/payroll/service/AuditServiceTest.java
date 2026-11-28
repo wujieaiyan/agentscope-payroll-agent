@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.AuditEntry;
 import io.agentscope.examples.payroll.domain.AuditPage;
 import io.agentscope.examples.payroll.domain.AuditQuery;
@@ -27,7 +28,7 @@ class AuditServiceTest {
     @BeforeEach
     void setUp() {
         PayrollDatabase database = PayrollDatabase.inMemory("audit-" + UUID.randomUUID());
-        store = new H2AuditStore(database);
+        store = PayrollMappers.forDatabase(database).auditStore();
         service = new AuditService(store, 180);
     }
 

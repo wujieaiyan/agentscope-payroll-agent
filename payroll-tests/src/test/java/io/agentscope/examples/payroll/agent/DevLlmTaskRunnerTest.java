@@ -8,8 +8,8 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.model.ChatUsage;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.devteam.DevArtifactType;
 import io.agentscope.examples.payroll.devteam.DevBuildResult;
 import io.agentscope.examples.payroll.devteam.DevGuardMonitor;
@@ -112,7 +112,7 @@ class DevLlmTaskRunnerTest {
     @DisplayName("护栏命中写入审计，未命中不产生噪声")
     void guardBreachIsAudited() {
         PayrollDatabase database = PayrollDatabase.inMemory("dev-guard-audit-" + System.nanoTime());
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
         DevGuardMonitor guard = new DevGuardMonitor();
 
         DevLlmTaskRunner.auditGuardBreach(audit, "n1", "project-implementer", guard);
@@ -133,7 +133,7 @@ class DevLlmTaskRunnerTest {
     @DisplayName("任务 token 用量入审计，模型未返回 usage 时不编造")
     void usageIsAudited() {
         PayrollDatabase database = PayrollDatabase.inMemory("dev-usage-audit-" + System.nanoTime());
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
 
         Msg withoutUsage = Msg.builderForRole(MsgRole.ASSISTANT).textContent("ok").build();
         DevLlmTaskRunner.auditUsage(audit, "n1", "project-implementer", withoutUsage, null);
@@ -161,7 +161,7 @@ class DevLlmTaskRunnerTest {
     void buildResultsAreAudited() {
         PayrollDatabase database =
                 PayrollDatabase.inMemory("dev-build-audit-" + System.nanoTime());
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
 
         DevLlmTaskRunner.auditBuild(
                 audit,

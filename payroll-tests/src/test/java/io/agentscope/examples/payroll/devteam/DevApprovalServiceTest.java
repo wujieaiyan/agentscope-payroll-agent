@@ -8,8 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.agentscope.examples.payroll.db.DevApprovalStore;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
 import io.agentscope.examples.payroll.db.DevTaskStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.service.AuditService;
@@ -35,7 +35,7 @@ class DevApprovalServiceTest {
                         tasks,
                         artifacts,
                         new DevApprovalStore(database),
-                        new AuditService(new H2AuditStore(database), 30));
+                        new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30));
         tasks.replacePlan(
                 "plan-g2",
                 List.of(

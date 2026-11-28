@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 
 import io.agentscope.examples.payroll.db.H2LlmUsageStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.usage.LlmUsageRecord;
 import io.agentscope.examples.payroll.usage.LlmUsageStore;
 import io.agentscope.examples.payroll.web.TooManyRequestsException;
@@ -26,7 +27,7 @@ class TokenBudgetServiceTest {
 
     @BeforeEach
     void setUp() {
-        store = new H2LlmUsageStore(PayrollDatabase.inMemory("token-budget-" + System.nanoTime()));
+        store = PayrollMappers.forDatabase(PayrollDatabase.inMemory("token-budget-" + System.nanoTime())).llmUsageStore();
     }
 
     @Test

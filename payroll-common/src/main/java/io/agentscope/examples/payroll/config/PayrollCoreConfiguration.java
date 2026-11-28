@@ -19,6 +19,8 @@ import io.agentscope.examples.payroll.db.JdbcAgentDefinitionRepository;
 import io.agentscope.examples.payroll.db.ModelCredentialStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
 import io.agentscope.examples.payroll.db.PayrollDatabaseDataSource;
+import io.agentscope.examples.payroll.db.mapper.AuditMapper;
+import io.agentscope.examples.payroll.db.mapper.LlmUsageMapper;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import io.agentscope.examples.payroll.health.PayrollReadinessHealthIndicator;
@@ -1005,8 +1007,8 @@ public class PayrollCoreConfiguration {
     }
 
     @Bean
-    public H2AuditStore auditStore(PayrollDatabase database) {
-        return new H2AuditStore(database);
+    public H2AuditStore auditStore(AuditMapper auditMapper) {
+        return new H2AuditStore(auditMapper);
     }
 
     @Bean
@@ -1018,8 +1020,8 @@ public class PayrollCoreConfiguration {
 
     /** 用量事实表：runtime 写入、Web 读取；同一份存储两端共享。 */
     @Bean
-    public LlmUsageStore llmUsageStore(PayrollDatabase database) {
-        return new H2LlmUsageStore(database);
+    public LlmUsageStore llmUsageStore(LlmUsageMapper llmUsageMapper) {
+        return new H2LlmUsageStore(llmUsageMapper);
     }
 
     @Bean

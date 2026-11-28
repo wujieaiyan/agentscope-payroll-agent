@@ -6,8 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.agentscope.examples.payroll.db.DevApprovalStore;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
 import io.agentscope.examples.payroll.db.DevTaskStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.service.AuditService;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -42,7 +42,7 @@ class DevPatchApprovalFlowTest {
         database = PayrollDatabase.inMemory("dev-patch-g2-" + System.nanoTime());
         tasks = new DevTaskStore(database);
         artifacts = new DevArtifactStore(database);
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
         approvals = new DevApprovalService(tasks, artifacts, new DevApprovalStore(database), audit);
         tasks.replacePlan(
                 "plan-g2",

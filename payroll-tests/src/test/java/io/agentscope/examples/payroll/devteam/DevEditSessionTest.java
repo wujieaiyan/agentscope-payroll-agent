@@ -7,8 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.db.DevArtifactStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.AuditPage;
 import io.agentscope.examples.payroll.domain.AuditQuery;
 import io.agentscope.examples.payroll.domain.PayrollException;
@@ -44,7 +44,7 @@ class DevEditSessionTest {
         workspace = DevWorkspace.clone(source, temp.resolve("work/task-a"));
         PayrollDatabase database = PayrollDatabase.inMemory("dev-edit-" + System.nanoTime());
         artifacts = new DevArtifactStore(database);
-        audit = new AuditService(new H2AuditStore(database), 30);
+        audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
     }
 
     @AfterEach

@@ -11,8 +11,8 @@ import io.agentscope.examples.payroll.db.DevApprovalStore;
 import io.agentscope.examples.payroll.db.DevArtifactStore;
 import io.agentscope.examples.payroll.db.DevDeliveryStore;
 import io.agentscope.examples.payroll.db.DevTaskStore;
-import io.agentscope.examples.payroll.db.H2AuditStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.support.PayrollMappers;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
 import io.agentscope.examples.payroll.service.AuditService;
@@ -59,7 +59,7 @@ class DevDeliveryServiceTest {
                         task("n1", "后端实现", "impl-agent"),
                         task("n2", "前端实现", "fe-agent")));
         artifacts = new DevArtifactStore(database);
-        AuditService audit = new AuditService(new H2AuditStore(database), 30);
+        AuditService audit = new AuditService(PayrollMappers.forDatabase(database).auditStore(), 30);
         approvals =
                 new DevApprovalService(
                         tasks, artifacts, new DevApprovalStore(database), audit);

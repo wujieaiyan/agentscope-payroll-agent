@@ -190,6 +190,10 @@
 
 禁止 `e.getMessage().contains(...)` 之类的判定；消息文本跨引擎不稳定。
 
+**实测结果（P0-8，2026-11-28，H2 2.3 内存库）**：`MapperExceptionMappingTest` 用测试夹具 `LeaseProbeMapper`（XML 放在 `classpath:constraint-probe/`，不进 `MapperSqlGuardTest` 的生产 Mapper 扫描）向 `job_lease` 插入两次同名 `job_name`，第二次抛 `DuplicateKeyException`，且 `assertInstanceOf(DataIntegrityViolationException.class)` 通过——即 H2 上重复键落在 `DataIntegrityViolationException` 分支，业务侧按上表 catch 父类型即可。
+
+**MySQL 实测（P0-10，2026-11-28）**：同一探针在 MySQL 8.0 + connector 9.5 上重复执行，`[MYSQL-GATE] duplicateKey=org.springframework.dao.DuplicateKeyException`，`assertInstanceOf(DataIntegrityViolationException.class)` 同样通过。**两引擎行为一致，类型映射表可直接作为业务判定依据**；闸门细节见 §5.2.2。
+
 #### 5.0.3 隔离级别与锁
 
 - 显式 `@Transactional(isolation = Isolation.READ_COMMITTED)`。MySQL InnoDB 默认 REPEATABLE READ、H2 默认 READ COMMITTED；不写 isolation 时同一方法内二次读在两引擎看到不同快照，双引擎测试会**掩盖**差异。
@@ -204,7 +208,9 @@ D6 的模板收紧为：
 1. 首选 `<insert useGeneratedKeys="true" keyProperty="id">`；
 2. 兜底只允许 `<selectKey order="AFTER">`（与 INSERT 同一 `Statement`/连接）；
 3. **禁止**把 `SELECT LAST_INSERT_ID()` 做成独立 Mapper 方法——无事务时每次调用取不同连接，H2 返回 `0`、MySQL 可能返回别的会话值；
-4. upsert 场景（`ModelCredentialStore` 的 insert-or-update、`JdbcSkillStore` blob upsert）单独实测：MySQL 在 `ON DUPLICATE KEY UPDATE` 的**更新分支**不保证返回自增 id，H2 行为未验证。结论写回 §5.2 的 P0 收尾。
+4. upsert 场景（`ModelCredentialStore` 的 insert-or-update、`JdbcSkillStore` blob upsert）单独实测结论（P0-10，2026-11-28）：MySQL 8.0 + connector 9.5 在 `ON DUPLICATE KEY UPDATE` 的**更新分支**会返回既有行 id（`departments` 探针 `updateBranchRows=2 updateBranchKey=9`），但这是驱动/服务端行为而非 SQL 标准，**模板不依赖它**；两个真实 upsert 目标 `model_credential`（PK `credential_id` VARCHAR）与 `skill_blob`（PK `sha256` CHAR(64)）都是业务主键，id 由调用方给定，与自增回填无关。详见 §5.2.2。
+5. **构造器注入对象的 `javaType` 必须用基本类型别名 `_long` / `_int` / `_boolean`。** `AuditEntry`、`LlmUsageRecord` 是 record，MyBatis 走 `DefaultResultSetHandler.createParameterizedResultObject` → `DefaultObjectFactory.instantiateClass`，用 `getDeclaredConstructor(精确类型)` 匹配；`javaType="long"` 经别名解析成 `java.lang.Long`，匹配不到 `(long, ...)` 构造器，直接抛 `ReflectionException: ... NoSuchMethodException: <init>(java.lang.Long, ...)`。试点实测：`LlmUsageStoreTest` 4 个用例全红，改成 `_long`/`_int`/`_boolean` 后全绿。包装类型字段（如 `Long latencyMs`）仍用普通别名。
+6. 主键回填实测（H2 + MySQL）：试点两表 `audit_log`、`llm_usage` 用 `useGeneratedKeys="true" keyProperty="id"` 在两引擎均正常回填（MySQL 闸门 `auditId=3150`、`usageId=1161`）；载体是可变的 `AuditInsert` / `LlmUsageInsert`，不是 record。upsert 更新分支结论见上一条。
 
 #### 5.0.5 测试装配
 
@@ -308,7 +314,7 @@ mybatis:
 | `MapperSqlGuardTest` | 扫描 `resources/mapper/**` 与 Mapper 注解：出现 `${` 必须在白名单枚举内；出现 `<cache` 直接失败；`SELECT *` 直接失败；出现 `<association select=` / `<collection select=`（嵌套查询，N+1 源）直接失败 |
 | `MapperXmlParseTest` | 启动 `SqlSessionFactory` 并解析全部 XML，防止 XML 语法/namespace 错误到运行期才暴露；同时断言 `MappedStatement` 数量与预期一致 |
 | `MapperSqlParityTest` | 对每条 `MappedStatement` 取 `BoundSql`，在 H2（`MODE=MySQL`）执行一次；MySQL 闸门由部署矩阵脚本执行 |
-| `MapperExceptionMappingTest` | H2 与 MySQL 各触发一次重复键，断言 `DataAccessException` 的**具体子类型**（§5.0.2） |
+| `MapperExceptionMappingTest` + `MySQLGateTest` | H2 由 `MapperExceptionMappingTest`、MySQL 由 `MySQLGateTest`（默认 assume-skip）各触发一次重复键，断言 `DataAccessException` 的**具体子类型**（§5.0.2）；两引擎结果见 §5.2.2 |
 | `TransactionWhitelistTest` | 全项目 `@Transactional` 方法集合与 §5.0.1 登记表逐条相等；方法体内不得出现 Executor/SSE/HTTP/文件 IO |
 | ArchUnit 新规则 | 非 `..db.mapper..` / `..db.support..` 包不得依赖 `org.apache.ibatis..`；`..db.mapper..` 不得依赖 `..service..`；`..service..` / `..web..` 不得依赖 `..db.mapper..` |
 | resultMap 列覆盖（P2） | DOM 解析 XML 收集 `<id>/<result>/<arg column>`，与 H2 执行后的 `ResultSetMetaData` 列集合比对，防「漏写一列 = 静默 null」 |
@@ -320,7 +326,7 @@ mybatis:
 
 **P0 收尾必须写回本文档**：D6 模板（含 upsert 结论，见 §5.0.4）、§5.0.2 的异常类型实测结果、以及三项基线指标（Mapper 调用次数、`connection()` 获取次数、语句 P95 耗时）。没有基线，「性能中性」不可证伪，后续批次不得合入。
 
-**MySQL 闸门**：本机无 docker CLI，按 [`mysql-redis-deploy.md`](mysql-redis-deploy.md) 的 compose / 部门库执行一次「启动 + 全量测试 + 审计写入 + 分页查询」；未通过不得进入 P1。
+**MySQL 闸门**：本机无 docker CLI，按 [`mysql-redis-deploy.md`](mysql-redis-deploy.md) 的 compose / 部门库执行一次「启动 + 全量测试 + 审计写入 + 分页查询」；未通过不得进入 P1。**已于 2026-11-28 对本机 MySQL 8.0 通过，证据见 §5.2.2。**
 
 **P0 施工顺序（有依赖，不能并行乱序）**：
 
@@ -338,6 +344,87 @@ mybatis:
 | P0-10 | MySQL 闸门 + 异常类型在 MySQL 上补断言 + D6 回填/upsert 结论写回 §5.2 | 闸门记录留档；P0 收尾评审 |
 
 **P0 期间禁止给未迁移 store 加 `@Transactional`**：Spring 事务绑定的是适配器给出的连接，而这些 store 仍用 `PayrollDatabase.connection()` 自己开连接，注解不生效且会多占一条连接（§5.0.1 末段）。注解与 Mapper 改造必须同提交。
+
+#### 5.2.1 P0-9 指标基线与复测方法
+
+三项指标各有一个进程内计数器和同名 Micrometer 计量器（`DbMetrics` + `MybatisMetricsInterceptor`，后者作为 `@Component` 被 Boot 自动注册进 `SqlSessionFactory`，测试侧由 `PayrollMappers` 手动挂载同一插件）：
+
+| 指标 | 进程内 API | Micrometer 计量器 | 说明 |
+|---|---|---|---|
+| Mapper 调用次数 | `DbMetrics.mapperCallCount(id)` / `mapperCallsByStatement()` | Counter `payroll.db.mapper.calls`，tag `statement=<短名>` → `payroll_db_mapper_calls_total{statement="AuditMapper.insert"}` | 每次 `Executor.query/update` 计一次；短名去掉 `io.agentscope.examples.payroll.db.mapper.` 前缀 |
+| `connection()` 获取次数 | `DbMetrics.connectionAcquiredCount()` | Counter `payroll.db.connection.acquired` → `payroll_db_connection_acquired_total` | 计的是 `PayrollDatabase.connection()` 调用次数，即适配器真实取连接数 |
+| 语句 P95 | `DbMetrics.statementP95Nanos(id)` | Timer `payroll.db.statement.duration`（publishPercentiles 0.5/0.95/0.99，tag `statement`）→ `payroll_db_statement_duration_seconds{statement="...",quantile="0.95"}` | 环绕 `Executor` 调用的纳秒耗时；进程内另留 2048 样本环形窗口，供无 Prometheus 注册表的纯 JUnit 下确定性取值 |
+
+**基线（2026-11-28，JDK 17.0.12 / H2 2.3 内存库 / Windows 10；`ROUNDS=200`，预热 100 轮后 `DbMetrics.reset()`；连续三次取稳定值）**：
+
+| 语句 | 调用次数 | P95 run1 | P95 run2 | P95 run3 |
+|---|---|---|---|---|
+| `AuditMapper.insert` | 200 | 487us | 621us | 637us |
+| `AuditMapper.find` | 200 | 1510us | 1445us | 1472us |
+| `LlmUsageMapper.insert` | 200 | 382us | 484us | 382us |
+| `LlmUsageMapper.find` | 200 | 1184us | 1074us | 1025us |
+| **合计** | **800** | — | — | — |
+
+连接数：**800 次 `connection()` / 800 次 Mapper 调用，`connectionsPerCall=1.000`**——试点两仓储都在无事务的单语句路径上，一次 `SqlSessionTemplate` 调用开一个 session、取一条连接、用完即还。这条恒等式是后续批次「连接不放大」的参照：若某批把单语句包进事务或拆出二次查询，比值会立刻偏离。
+
+**复测命令**（后续每批在合入前跑同一命令、同一台机器）：
+
+```bash
+mvn -o -B -pl payroll-tests -am test -Dtest=P0MetricsBaselineTest -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+读 surefire 输出里的 `[P0-METRICS]` 行即可；测试本身断言每条语句调用次数恰为 `ROUNDS`、P95 有样本且 < 100ms、且 `connections == totalCalls`，所以装配退化会直接红。
+
+**门槛（§5.7）**：每批与上表比较，`connection()` 获取次数 ≤ 1.2×，语句 P95 不劣化 20%。基线与环境强相关（JIT、磁盘、JVM 参数），只用于同机前后对比，不跨机器引用；换机需重跑并覆盖本节。
+
+#### 5.2.2 P0-10 MySQL 闸门记录
+
+**环境（2026-11-28）**：本机 MySQL 8.0（`127.0.0.1:3306`，库 `payroll`；连接参数的开发默认值见 [application-mysql.yml](file:///D:/workspace/agentscope-payroll-agent/payroll-common/src/main/resources/application-mysql.yml)，可用 `PAYROLL_DB_URL/USER/PASSWORD` 覆盖）；mysql-connector-j 9.5；JDK 17.0.12；Windows 10。本机无 docker CLI、无 mysql CLI，按 §5.2 的「compose 或部门库」二选一，直接对本机 MySQL 实例执行；未使用 root 账号，未在命令或日志中出现任何口令。
+
+**子项一：启动闸门（mysql profile + 真实 fat jar）**
+
+`payroll-backend/target/payroll-backend-exec.jar` 以 `SPRING_PROFILES_ACTIVE=mysql`、`PAYROLL_WEB_PORT=18099`、`PAYROLL_NODE_ID=gate-node` 启动：
+
+| 证据 | 实测 |
+|---|---|
+| Flyway 落库 | `FlywayExecutor - Database: jdbc:mysql://127.0.0.1:3306/payroll?... (MySQL 8.0)`；闸门复跑校验 24 个迁移，`Current version of schema 'payroll': 24`、`Schema is up to date` |
+| 启动耗时 | `Started PayrollWebApplication in 7.216 seconds` |
+| 健康检查 | `GET /api/health` 2 秒内 200，`"db":"UP","redis":"SKIPPED"`（mysql profile 不启用 Redis 自动装配，与 §5.0.3 一致） |
+| MyBatis 启动断言 | `MappedStatementVerifier - MyBatis 启动断言通过：6 条语句 [...]` |
+| 日志噪声 | 仅预期 WARN（未配置 `PAYROLL_AGENT_RUNTIME_URLS/TOKEN`、未配置 `PAYROLL_SECRET_KEY`、TopologyGuard 单节点提示），无异常堆栈 |
+
+**子项二：写路径 + 分页 + 异常类型 + D6/upsert（`MySQLGateTest`）**
+
+默认跳过（CI/离线构建不依赖数据库），显式开启才对 MySQL 跑：
+
+```bash
+# 任选其一开启；已验证命令用环境变量（forked JVM 必然继承）
+PAYROLL_GATE_MYSQL=true mvn -o -B -pl payroll-tests -am test \
+  -Dtest=MySQLGateTest -Dsurefire.failIfNoSpecifiedTests=false
+# 或
+mvn -o -B -pl payroll-tests -am test -Dtest=MySQLGateTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -Dpayroll.gate.mysql=true
+```
+
+| 覆盖项 | 断言 | 实测（`[MYSQL-GATE]`，自适应主键每次运行递增，数值为当次样例） |
+|---|---|---|
+| 审计写入 + 分页 | 写 3 行后首行主键 >0；`page=1,size=2` 得 2 行且都属于本次唯一令牌；`count=3` | `auditId=3150`，分页 2/3、count=3 全绿 |
+| 用量写入 + 读回 | 主键 >0；按 `lastHours` 窗口查回本行 | `usageId=1161` |
+| 约束异常类型 | `job_lease` 同名二次插入抛 `DuplicateKeyException` 且是 `DataIntegrityViolationException` 子类 | `duplicateKey=org.springframework.dao.DuplicateKeyException` |
+| D6 插入分支回填 | `departments` upsert 插入分支 `useGeneratedKeys` 回填 id | `insertBranchId=9` |
+| upsert 更新分支 | 同名二次 upsert 生效，记录 affected rows 与调用方载体 id | `updateBranchRows=2 updateBranchKey=9` |
+
+结果：`Tests run: 1, Failures: 0, Errors: 0, Skipped: 0`（2.07s），BUILD SUCCESS。探针行（审计、用量按唯一令牌；租约、部门按唯一名称）在 finally 里清理，未遗留脏数据。
+
+**子项二补充：全量离线回归**——同日 `mvn -o -B test` 全 8 模块：`Tests run: 1586, Failures: 0, Errors: 0, Skipped: 7`（7 个 skip 含本闸门默认跳过），BUILD SUCCESS，2 分 38 秒。
+
+**子项三：跨引擎结论（回填 §5.0.2 与 §5.0.4）**
+
+1. **异常契约在 MySQL 成立**：重复键同样落到 `DuplicateKeyException`（`DataIntegrityViolationException` 子类），与 H2 一致。§5.0.2 的类型映射表可直接用于业务判定，8 处 SQLState `23` 分支改造无需按引擎分叉。
+2. **D6 主键回填在 MySQL 成立**：`audit_log`、`llm_usage` 的 `useGeneratedKeys` 在 MySQL 同样回填 `id`；载体必须是可变对象（`AuditInsert` / `LlmUsageInsert`），record 无法回填。
+3. **upsert 更新分支**：`departments` 探针显示 MySQL 8.0 + connector 9.5 在 `ON DUPLICATE KEY UPDATE` 的更新分支返回**既有行 id**（`updateBranchKey=7`，与插入分支一致），affected rows=2。但这是驱动/服务端行为，不是 SQL 标准，**迁移代码不得依赖**；且两个真实 upsert 目标（`model_credential` 以 `credential_id` VARCHAR 作 PK、`skill_blob` 以 `sha256` CHAR(64) 作 PK）都是**业务主键**，id 由调用方给定，与自增回填无关。`departments` 探针仅作通用行为留档。
+
+**结论**：§5.2 的 MySQL 闸门通过（启动 + 全量测试 + 审计写入 + 分页查询均绿），具备进入 P1 的条件。`MySQLGateTest` 默认 assume-skip，无 MySQL 的 CI 不会红；有 MySQL 的环境按上表命令复跑即可。
 
 ### 5.3 P1：低风险叶子仓储（5 人日，约 60 条 SQL）
 
