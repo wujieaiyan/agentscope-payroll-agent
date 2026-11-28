@@ -229,6 +229,8 @@ web --(HMAC)--> sandbox --(docker run, 一次性)--> init 容器
 | `PAYROLL_SANDBOX_INIT_TIMEOUT_MS` | `600000` | 初始化超时，硬上限 900000 |
 | `PAYROLL_SANDBOX_INIT_MAX_BYTES` | `2147483648` | 数据目录默认上限，硬上限 5GB |
 | `PAYROLL_SANDBOX_INIT_CONCURRENCY` | `2` | 初始化全局并发 |
+| `PAYROLL_SANDBOX_UPLOAD_MAX_FILE_BYTES` | `209715200` | 数据页上传单文件上限（200 MiB） |
+| `PAYROLL_SANDBOX_UPLOAD_MAX_BYTES` | `1073741824` | 单个技能 `data/` 上传总量上限（1 GiB，硬上限 5 GiB） |
 
 ## 十、分期任务与验收
 

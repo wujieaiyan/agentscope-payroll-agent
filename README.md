@@ -23,6 +23,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | 进程 / 模块 / 路由 / 配置矩阵 |
+| [`docs/architecture-review-2026-11-27.md`](docs/architecture-review-2026-11-27.md) | 最新复审：P0/P1 清单与证据索引 |
+| [`docs/architecture-remediation-2026-11-27.md`](docs/architecture-remediation-2026-11-27.md) | 可交付整改规格 W0–W10 |
 | [`docs/agent-orchestration.md`](docs/agent-orchestration.md) | 流程 DAG 模型与执行语义 |
 | [`docs/scenario-packs.md`](docs/scenario-packs.md) | 场景包接入契约 |
 | [`docs/deployment-matrix.md`](docs/deployment-matrix.md) | profile × 依赖 × 允许组合 |
@@ -523,6 +525,8 @@ docker compose -f docker/docker-compose.yml up -d --build
 | `PAYROLL_SANDBOX_INIT_TIMEOUT_MS` | `600000` | 初始化超时，硬上限 900000 |
 | `PAYROLL_SANDBOX_INIT_MAX_BYTES` | `2147483648` | 数据目录上限，硬上限 5GB |
 | `PAYROLL_SANDBOX_INIT_CONCURRENCY` | `2` | 初始化全局并发 |
+| `PAYROLL_SANDBOX_UPLOAD_MAX_FILE_BYTES` | `209715200` | 数据页上传单文件上限（200 MiB） |
+| `PAYROLL_SANDBOX_UPLOAD_MAX_BYTES` | `1073741824` | 单个技能 `data/` 上传总量上限（1 GiB，硬上限 5 GiB） |
 
 拆分部署时 Web 与 runtime 都要配置 `PAYROLL_SKILL_EXEC_ENABLED`/`PAYROLL_SANDBOX_URL`/
 `PAYROLL_SANDBOX_TOKEN`：runtime 负责注册 `skill_run` 并生成提案，确认后的实际执行在 Web 节点完成。

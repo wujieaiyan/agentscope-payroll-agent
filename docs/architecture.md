@@ -109,6 +109,7 @@ Controller 只在 `web` / `kb`；平台包（`skill/model/usage/memory/profile/t
 | 主题 | 文档 |
 | --- | --- |
 | 复审与整改 | `architecture-review.md`、`architecture-remediation-spec.md` |
+| 2026-11-27 复审（最新） | `architecture-review-2026-11-27.md`、`architecture-remediation-2026-11-27.md` |
 | 流程编排 | `agent-orchestration.md` |
 | 场景包接入 | `scenario-packs.md` |
 | 部署矩阵 | `deployment-matrix.md` |

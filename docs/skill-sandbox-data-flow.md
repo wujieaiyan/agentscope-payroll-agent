@@ -6,12 +6,13 @@
 
 ## 1. 结论先行
 
-沙箱采用**两段式一次性容器**模型：
+沙箱采用**两段式一次性容器**模型，`data/` 是技能唯一的数据目录：
 
 - **初始化阶段**：起一个**允许联网**、`data/` 可写的一次性容器，执行技能包里的 `setup.sh`，由脚本自己把数据下载到 `/skill/data`（宿主机 `<skillRoot>/<skillId>/data`）。初始化结束后只保留 `data/`。
 - **执行阶段**：起一个**禁网**、只读、非 root 的一次性容器，把同一份 `data/` **只读**挂到 `/data`，脚本通过 `/data` 读取，脚本本体挂到 `/src`。
+- **人工上传**：管理台上传的文件直接写入同一个 `<skillRoot>/<id>/data`，与 setup 产物同目录、同一份运行期挂载。上传不要求技能声明 `setup`，只要求 db 技能源与沙箱网关启用；重建 / 删除数据会把上传文件一并清空。
 
-沙箱服务自身**不下载任何数据，也不访问 Nacos / Web 接口**；它只做校验、限流、调度 `docker run`。所有输入（脚本正文、初始化包）都随 HTTP 请求体传入，因此可复现、可审计。
+沙箱服务自身**不下载任何数据，也不访问 Nacos / Web 接口**；它只做校验、限流、调度 `docker run`。所有输入（脚本正文、初始化包、人工上传文件）都随 HTTP 请求体传入，因此可复现、可审计。
 
 ## 2. 拓扑与职责边界
 
@@ -48,7 +49,9 @@
 
 ### 3.3 内部 HMAC 通道
 
-`SandboxClient.send()` 对 `token + "\n" + timestamp + "\n" + METHOD + "\n" + path + "\n" + body` 签名，携带 `X-Payroll-Timestamp`、`X-Payroll-Internal`；两侧时钟偏移上限均为 120 秒（`payroll-common/.../service/SandboxClient.java:214-240`，`payroll-sandbox/.../SandboxController.java:44-52`）。沙箱未配置令牌时直接 503，不做匿名放行。
+签名串为 `timestamp + "\n" + METHOD + "\n" + path + "\n" + body`，密钥为 `PAYROLL_SANDBOX_TOKEN`（`payroll-protocol/.../service/InternalAuth.java:19-68`），请求携带 `X-Payroll-Timestamp`、`X-Payroll-Internal`；两侧时钟偏移上限均为 120 秒。沙箱未配置令牌时直接 503，不做匿名放行。
+
+浏览与上传接口的 query 参与签名：`path / depth / maxBytes / overwrite / size / sha256` 按 key 字典序、值按 UTF-8 百分号编码拼进 `path`（`SkillDataProtocol.treePath / filePath / uploadPath / deletePath`）。上传正文本身**不参与签名**，完整性由签名内的 `size` 与 `sha256` 在沙箱侧二次校验，避免大文件进入 HMAC 计算。
 
 ### 3.4 沙箱侧二次校验与限流
 
@@ -72,11 +75,11 @@
 | 用户 | `65534:65534`，`--cap-drop ALL`，`no-new-privileges` | 非 root，无提权路径 |
 | 资源 | `--memory 256m`、`--cpus 1`、`--pids-limit 64` | 防资源耗尽 |
 | 脚本 | 宿主机临时目录 → `/src`，只读 | 脚本包每次重新写入，不落持久盘 |
-| 数据 | `<skillRoot>/<id>/data` → `/data`，只读，目录存在才挂 | 只读消费初始化数据 |
+| 数据 | `<skillRoot>/<id>/data` → `/data`，只读，目录存在才挂 | 只读消费 setup 产物与人工上传文件 |
 | 超时 | 上限 10 秒；超时按容器名 `docker kill` | CLI 被杀也不残留容器 |
 | 输出 | stdout/stderr 各限 8KB，超限置 `truncated=true` | 防上下文与日志被刷爆 |
 
-数据目录路径**只由已校验的 skillId 推导**，不接受请求传入（`DockerSandboxRunner.java:188`），用于防目录穿越。
+数据目录路径**只由已校验的 skillId 推导**，不接受请求传入（`DockerSandboxRunner.java:188-192`），用于防目录穿越。
 
 ## 4. 数据如何“下载”（初始化链路）
 
@@ -88,18 +91,18 @@
 |---|---|---|
 | `/api/admin/skills/{id}/data` | GET | 查询状态、数据体积、`log_tail` |
 | `/api/admin/skills/{id}/data/init` | POST | 提交初始化；已 READY 时需 `overwrite=true` |
-| `/api/admin/skills/{id}/data` | DELETE | 删除工作区 |
+| `/api/admin/skills/{id}/data` | DELETE | 删除工作区（含人工上传文件） |
 
-实现见 `payroll-backend/.../web/SkillAdminController.java:381`（查询）、`:392`（初始化）、`:456`（删除）。setup 路径优先取 frontmatter `setup`，否则回退根目录 `setup.sh`（`:396-400`）。初始化期间前端每 2.5 秒轮询，直到状态不再是 `INITIALIZING`（`frontend/src/views/admin/SkillsView.vue:206-226`）。
+实现见 `payroll-backend/.../web/SkillAdminController.java:672`（查询）、`:688`（初始化）、`:753`（删除）。初始化必须声明 setup：优先取 frontmatter `setup`，否则回退包内 `setup.sh`，两者都没有时 `POST /data/init` 直接返回业务错误（`:694-699`）。初始化期间前端轮询，直到状态不再是 `INITIALIZING`。
 
 ### 4.2 包落盘：pkg + data
 
 沙箱把请求中的文件写入工作区（`SkillWorkspaceService`）：
 
 ```
-<skillRoot>/<skillId>/pkg     临时包：SKILL.md / PROMPT.md / setup.sh / scripts/**
-<skillRoot>/<skillId>/data    持久数据，初始化后唯一保留的目录
-<skillRoot>/<skillId>/state   状态文件（INITIALIZING / READY / FAILED + 日志尾部）
+<skillRoot>/<skillId>/pkg      临时包：SKILL.md / PROMPT.md / setup.sh / scripts/**
+<skillRoot>/<skillId>/data     持久数据：setup 产物 + 管理台上传文件，重建会清空
+<skillRoot>/<skillId>/state    状态文件（INITIALIZING / READY / FAILED + 日志尾部）
 ```
 
 - `execute()` 在 `finally` 中删除 `pkg`，只留 `data/`（`SkillWorkspaceService.java:207-241`）；
@@ -152,7 +155,78 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
 2. 状态写 `READY`，记录 `setupPath / exit_code / size_bytes / log_tail / started_at / finished_at`；
 3. 执行阶段 `require_data=true` 时先读状态文件，非 READY 直接 409 `DATA_NOT_READY`；工具层翻译为“请先在技能管理台执行初始化”（`SandboxService.java:67-80`，`SkillRunTools.java:151-158`）。
 
-## 5. 完整数据流
+## 5. 人工上传（写入 data/）
+
+管理台上传的文件直接落进 `data/`——与「重建数据」的产物同一个目录、同一份运行期只读挂载。这里不要求技能声明 setup：没有 setup 的技能也可以先上传文件，运行期脚本同样能在 `/data` 下读到。
+
+### 5.1 目录与挂载
+
+```
+<skillRoot>/<id>/
+└── data/        # setup 产物 + 管理台上传文件；重建 / 删除会一起清空
+```
+
+| 阶段 | 宿主机 | 容器内 | 权限 |
+|---|---|---|---|
+| 初始化 | `<skillRoot>/<id>/data` | `/skill/data` | 可写（setup 写入） |
+| 执行 | `<skillRoot>/<id>/data` | `/data` | 只读（`DockerSandboxRunner` 数据挂载） |
+
+- 上传与 setup 写的是同一个目录：先初始化再上传、或先上传再初始化（重建会清空）都成立，最终内容以最后一次操作为准。
+- `data/` 不存在时（没有 setup 产物也没有上传过），浏览接口按空目录返回，页面可直接开始上传；首次上传会自动创建目录。
+- 执行容器只在 `data/` 目录存在时挂载 `/data`；两者都只读，脚本不能修改数据。
+
+### 5.2 Web → 沙箱上传链路
+
+```
+浏览器（数据页「上传」按钮）
+  └─ POST /api/admin/skills/{id}/data/file?path=...    （session + skill:manage）
+      └─ SkillAdminController：权限、参数、暂存临时文件并计算 SHA-256、审计
+          └─ SandboxClient：HMAC 签名 + 流式转发（application/octet-stream）
+              └─ SandboxDataController：验签、错误映射
+                  └─ SandboxDataWriteService：路径护栏、配额、写临时文件、校验大小与摘要、原子替换
+```
+
+- 正文不整体进内存：Web 先落到临时文件并算摘要（`SkillAdminController.stage`，`:1674-1701`），再以流（`Files.newInputStream`）转发；沙箱按 64 KiB 缓冲边写边校验。
+- 上传以 `size` + `sha256` 声明为准，沙箱侧重新计算，不一致返回 400 且不留下半成品（`.upload-*.part` 会被删除）。
+- 同名默认 409；`overwrite=true` 才替换。删除同样是签名请求。
+
+管理台接口（`SkillAdminController.java:786-912`）：
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/admin/skills/{id}/data/tree` | GET | 浏览 data/ 目录树（懒展开，默认 depth=1） |
+| `/api/admin/skills/{id}/data/file` | GET | 预览文本文件（不落正文审计） |
+| `/api/admin/skills/{id}/data/file` | POST | multipart 上传，`path` 可选、`overwrite` 默认 false |
+| `/api/admin/skills/{id}/data/file` | DELETE | 删除单个文件 |
+
+门控 `requireDataBrowsable` / `requireDataWritable`（`SkillAdminController.java:1644-1672`）：只要求 db 技能源且沙箱网关启用；**不要求声明 setup，也不要求 data/ 已初始化**。不满足时返回业务错误，前端在数据页签内显示原因。初始化中（`INITIALIZING`）的写操作由沙箱返回 409 BUSY。
+
+### 5.3 限额与护栏
+
+| 项 | 值（可配） | 实现 |
+|---|---|---|
+| 单文件 | 200 MiB（`PAYROLL_SANDBOX_UPLOAD_MAX_FILE_BYTES`） | `SandboxDataWriteService.upload`、`SkillAdminController.stage` |
+| 单技能总量 | 1 GiB（`PAYROLL_SANDBOX_UPLOAD_MAX_BYTES`），硬顶 5 GiB | 同上，写入前按现有体积预检 |
+| 文件数 | 5000 | `SkillDataProtocol.MAX_UPLOAD_FILES` |
+| 路径 | 相对路径；禁 `..`、绝对路径、反斜杠、控制字符、符号链接 | `SkillDataProtocol.requireUploadFile`、`SandboxDataWriteService.prepareTarget/resolveExisting` |
+| 类型 | 拒绝可执行/脚本扩展名 `.sh/.bash/.bat/.cmd/.exe/.dll/.so/.dylib/.com/.scr/.msi/.ps1/.jar` | `SkillDataProtocol.requireUploadFile` |
+| 覆盖 | 同名默认 409，需 `overwrite=true` | `SandboxDataWriteService.DataWriteConflictException` → 409 |
+
+上传与 setup 共用 `data/` 配额：重置数据会同时释放两者的占用。
+
+### 5.4 审计
+
+- `skill.data.upload`：`skillId / path / sizeBytes / sha256 / overwritten / 版本号`；
+- `skill.data.upload.delete`：删除前记 `path / sizeBytes / sha256 / 版本号`；
+- 预览复用既有 `skill.data.read`，不记正文。
+
+### 5.5 与初始化的关系
+
+- 数据页只有一个 `data/` 区：上传文件与 setup 产物并列展示，重建 / 删除数据会清空包括上传文件在内的全部内容，页面文案与二次确认都会提示这一点。
+- 需要长期保留的人工数据应放在技能包的其他资源（如 `references/`）或先由 setup 拉取，而不是指望重建后仍然存在。
+- 技能脚本统一从 `/data` 读取；不存在 `/data/_imports` 这类第二挂载点。
+
+## 6. 完整数据流
 
 ```
 ① 技能包（代码）
@@ -167,7 +241,9 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
                                 容器内 /data（只读）
                                         ▲ bind
 ③ 数据：<skillRoot>/<id>/data ──────────┘
-
+        ▲                    ▲
+        │ setup 写入          │ 人工上传写入
+        │                    │
 ②' 初始化：包文件 ──HMAC──▶ sandbox ──写──▶ <skillRoot>/<id>/pkg
                                         │ bind：/skill（可写）、/skill/data（可写）
                                         ▼
@@ -178,11 +254,16 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
                                         │ pkg 删除
                                         ▼
                                      READY
+
+④ 人工上传：multipart ──▶ Web 暂存 + SHA-256 ──HMAC（size/sha256 入签名）──▶ sandbox
+                                        │ 流式写入临时文件 + 校验 + 原子替换
+                                        ▼
+                              <skillRoot>/<id>/data（与 setup 产物同目录）
 ```
 
-要点：**代码（脚本）每次执行都重新传输，数据（大文件）只下载一次**。这避免了每次执行搬运大量数据，也避免沙箱持有访问内网仓库的凭据。
+要点：**代码（脚本）每次执行都重新传输，数据只落一次 `<skillRoot>/<id>/data`**——setup 负责从外部下载，人工上传负责补文件，运行期都经同一个只读 `/data` 消费。这避免了每次执行搬运大量数据，也避免沙箱持有访问内网仓库的凭据。
 
-## 6. 状态机与接口
+## 7. 状态机与接口
 
 内部接口（HMAC 保护）：
 
@@ -192,6 +273,10 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
 | `/internal/skills/{id}` | GET | 查询状态 + 实时 data 体积 |
 | `/internal/skills/{id}` | DELETE | 删除工作区（初始化中返回 BUSY） |
 | `/internal/sandbox/execute` | POST | 执行脚本 |
+| `/internal/skills/{id}/data/tree` | GET | 浏览 data/ 目录树 |
+| `/internal/skills/{id}/data/file` | GET | 预览 data/ 文本文件 |
+| `/internal/skills/{id}/data/file` | POST | 上传数据文件（正文流式，不参与签名） |
+| `/internal/skills/{id}/data/file` | DELETE | 删除数据文件 |
 
 状态与 HTTP 映射：
 
@@ -200,25 +285,30 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
 | `INITIALIZING` | 200 | 初始化进行中 |
 | `READY` | 200 | 数据就绪 |
 | `FAILED` | 200 | 初始化失败，`message` / `log_tail` 给原因 |
-| `BUSY` | 429 | 并发或同技能互斥 |
-| `INVALID` | 400 | 参数非法 |
+| `BUSY` | 429 / 409 | 执行并发超限 429；数据读写遇初始化中 409 |
+| `INVALID` | 400 | 参数非法（含路径越界、摘要不一致、禁止扩展名） |
+| `CONFLICT` | 409 | 上传文件同名且未声明覆盖 |
+| `LIMIT` | 413 | 超过单文件或总量限额 |
+| `NOT_FOUND` | 404 | 数据文件 / 目录不存在 |
 | `DATA_NOT_READY` | 409 | 声明了 setup 但数据非 READY |
 | `NOT_CONFIGURED` / `UNAVAILABLE` | 503 | 未配置令牌 / 服务不可用 |
 
 **残留自愈**：进程重启导致 `INITIALIZING` 成为孤儿时，超过 `initTimeoutMs + 60s` 的状态查询会将其标记为 FAILED「初始化任务已中断（沙箱重启或进程退出）」（`SkillWorkspaceService.java:165-180`）。
 
-## 7. 部署要点
+## 8. 部署要点
 
-摘自 `docker/docker-compose.yml:274-296` 与 `SandboxSettings.java:23-35`：
+摘自 `docker/docker-compose.yml:274-296` 与 `SandboxSettings.java:23-40`：
 
 1. sandbox 容器必须挂载 `/var/run/docker.sock`；它自身不执行用户脚本，只调用 `docker` CLI。
 2. `PAYROLL_SANDBOX_WORK_DIR` 与 `PAYROLL_SANDBOX_SKILL_ROOT` 在宿主机与 sandbox 容器内必须是**同一绝对路径**，否则宿主机 Docker 看不到 bind 源目录（`SandboxSettings.java:114-117`）。
 3. 需先构建两个镜像：`payroll-sandbox-runtime:local`、`payroll-sandbox-init:local`。
 4. `PAYROLL_SANDBOX_TOKEN` 在 Web / runtime 与 sandbox 三处必须一致；不配置时整体 fail-closed。
 5. 关键环境变量：`PAYROLL_SANDBOX_URL`、`PAYROLL_SKILL_EXEC_ENABLED`、`PAYROLL_SANDBOX_MAX_CONCURRENCY`、`PAYROLL_SANDBOX_INIT_TIMEOUT_MS`、`PAYROLL_SANDBOX_INIT_MAX_BYTES`、`PAYROLL_SANDBOX_INIT_CONCURRENCY`。
-6. 本机直接运行（非容器）时，Windows 文件系统不支持 POSIX 权限设置，相关调用会被忽略；隔离仍由 `--user 65534` 与只读挂载保证。
+6. 上传限额：`PAYROLL_SANDBOX_UPLOAD_MAX_FILE_BYTES`（默认 200 MiB）、`PAYROLL_SANDBOX_UPLOAD_MAX_BYTES`（默认 1 GiB，硬顶 5 GiB）；调大总量上限不会放宽单文件上限。
+7. `data/` 同时承载 setup 产物与上传文件，需为每个技能预留磁盘；建议按「技能数 × 1 GiB」估算宿主机容量。
+8. 本机直接运行（非容器）时，Windows 文件系统不支持 POSIX 权限设置，相关调用会被忽略；隔离仍由 `--user 65534` 与只读挂载保证。
 
-## 8. 排障速查
+## 9. 排障速查
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
@@ -229,23 +319,34 @@ curl -fsSL https://example.com/pack.json -o /skill/data/pack.json
 | “沙箱内部签名校验失败” | 令牌不一致或时钟偏移超 120 秒 | 对齐令牌与 NTP |
 | 状态长期 `INITIALIZING` | 多为进程重启留下的孤儿 | 等待超时窗口自动转 FAILED 后重建 |
 | “初始化容器启动失败” | 退出码 125，stderr 首行给出 docker 原因 | 检查镜像名与 docker.sock |
+| 上传返回 409 / “数据文件已存在” | 同名文件已存在，未声明覆盖 | 前端确认覆盖后带 `overwrite=true` 重传 |
+| 上传返回 413 / “总量上限” | 超过单文件、单技能总量或文件数上限 | 清理旧文件或调整 `PAYROLL_SANDBOX_UPLOAD_MAX_*` |
+| 上传返回 400 / “摘要与声明不一致” | Web 暂存内容与声明的 `size`/`sha256` 不符 | 检查上传中断或代理改写正文；重试 |
+| “当前来源不提供技能数据目录” | 技能不是 db 源 | 切换到 db 技能源 |
+| “沙箱服务未启用” | 网关未启用或令牌缺失 | 检查 `PAYROLL_SKILL_EXEC_ENABLED` / `PAYROLL_SANDBOX_URL` / `PAYROLL_SANDBOX_TOKEN` |
+| 重建后上传文件消失 | 上传与 setup 共用 `data/`，重建会清空 | 属预期行为；需要保留的文件请另行备份 |
 
-## 9. 代码索引
+## 10. 代码索引
 
 | 主题 | 文件与方法 |
 |---|---|
 | 执行协议与限额 | `payroll-protocol/.../sandbox/SandboxProtocol.java:17-135` |
 | 初始化协议与限额 | `payroll-protocol/.../sandbox/SkillInitProtocol.java:15-207` |
+| 数据浏览/上传/删除协议 | `payroll-protocol/.../sandbox/SkillDataProtocol.java:23-207` |
 | 工具与确认 | `payroll-common/.../agent/SkillRunTools.java:95-178` |
 | 提案执行器 | `payroll-backend/.../backend/SkillRunActionContributor.java:64-114` |
-| HMAC 客户端 | `payroll-common/.../service/SandboxClient.java:63-240` |
+| HMAC 客户端 | `payroll-common/.../service/SandboxClient.java:63-293` |
+| 数据网关/客户端 | `payroll-common/.../service/SandboxGateway.java:54-96`、`SandboxClient.java:194-293` |
 | 执行接口 | `payroll-sandbox/.../SandboxController.java:35-62` |
 | 校验与限流 | `payroll-sandbox/.../SandboxService.java:27-126` |
-| 执行容器 | `payroll-sandbox/.../DockerSandboxRunner.java:42-192` |
-| 初始化容器 | `payroll-sandbox/.../DockerSkillInitRunner.java:46-207` |
+| 执行容器 | `payroll-sandbox/.../DockerSandboxRunner.java:42-234` |
+| 初始化容器 | `payroll-sandbox/.../DockerSkillInitRunner.java:46-231` |
 | 工作区生命周期 | `payroll-sandbox/.../SkillWorkspaceService.java:68-241, 349-370` |
 | 初始化接口 | `payroll-sandbox/.../SandboxSkillController.java:38-93` |
-| 管理台数据 API | `payroll-backend/.../web/SkillAdminController.java:381-483` |
-| 数据页签前端 | `frontend/src/views/admin/SkillsView.vue:206-271` |
+| 数据读取服务 | `payroll-sandbox/.../SandboxDataService.java:90-205` |
+| 数据写入服务 | `payroll-sandbox/.../SandboxDataWriteService.java:40-112` |
+| 数据内部接口 | `payroll-sandbox/.../SandboxDataController.java:38-183` |
+| 管理台数据 API | `payroll-backend/.../web/SkillAdminController.java:672-912, 1644-1701` |
+| 数据页签前端 | `frontend/src/views/admin/skills/SkillDataPanel.vue`、`SkillDataBrowser.vue` |
 | 部署编排 | `docker/docker-compose.yml:274-296` |
 | 运行/初始化镜像 | `docker/sandbox-runtime.Dockerfile`、`docker/sandbox-init.Dockerfile` |
