@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -102,6 +103,46 @@ class NacosAgentRegistryTest {
                         .orElseThrow();
         assertEquals("个税专家", reloaded.name());
         assertEquals(AgentDefinition.STATUS_OFFLINE, reloaded.status());
+    }
+
+    @Test
+    @DisplayName("旧表单未携带 tools 时保留已有声明，显式清空才移除")
+    void updateKeepsDeclaredToolsUnlessCleared() throws IOException {
+        nacos = new FakeNacos();
+        NacosAgentRegistry registry = registry(true);
+        AgentDefinition saved =
+                registry.save(
+                        new AgentDefinition(
+                                null,
+                                "工具顾问",
+                                "🧾",
+                                "只读政策",
+                                List.of("税务"),
+                                List.of(RoleSkills.ACCOUNTANT),
+                                AgentDefinition.VISIBILITY_PUBLIC,
+                                AgentDefinition.STATUS_ONLINE,
+                                null,
+                                null,
+                                null,
+                                List.of(),
+                                List.of("get_payroll_policy"),
+                                AgentModelSettings.none()),
+                        "admin");
+        assertEquals(List.of("get_payroll_policy"), saved.tools());
+
+        AgentDefinition kept = registry.save(newAgent(saved.id(), "工具顾问"), "admin");
+        assertEquals(List.of("get_payroll_policy"), kept.tools());
+        assertEquals(
+                List.of("get_payroll_policy"),
+                registry(true).list().stream()
+                        .filter(agent -> agent.id().equals(saved.id()))
+                        .findFirst()
+                        .orElseThrow()
+                        .tools());
+
+        AgentDefinition cleared =
+                registry.save(newAgent(saved.id(), "工具顾问"), "admin", null, true, false);
+        assertTrue(cleared.tools().isEmpty());
     }
 
     @Test

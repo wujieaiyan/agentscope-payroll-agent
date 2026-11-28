@@ -255,7 +255,7 @@ public final class NacosAgentRegistry {
      */
     public synchronized AgentDefinition save(
             AgentDefinition input, String operator, boolean keepModelWhenEmpty) {
-        return save(input, operator, null, keepModelWhenEmpty);
+        return save(input, operator, null, keepModelWhenEmpty, true);
     }
 
     /** @param expectedRevision agents 文档指纹；null/空白跳过校验（滚动发布兼容） */
@@ -264,6 +264,19 @@ public final class NacosAgentRegistry {
             String operator,
             String expectedRevision,
             boolean keepModelWhenEmpty) {
+        return save(input, operator, expectedRevision, keepModelWhenEmpty, true);
+    }
+
+    /**
+     * @param keepToolsWhenEmpty 旧表单不携带 tools 字段，提交空列表时保留已有声明，
+     *     避免一次编辑把工具白名单静默清空；显式清空需调用方传 false。
+     */
+    public synchronized AgentDefinition save(
+            AgentDefinition input,
+            String operator,
+            String expectedRevision,
+            boolean keepModelWhenEmpty,
+            boolean keepToolsWhenEmpty) {
         requireDefinitionsWritable();
         Snapshot<AgentDefinition> current = reloadForWrite();
         requireRevision(current.revision(), expectedRevision, DATA_ID);
@@ -295,6 +308,9 @@ public final class NacosAgentRegistry {
                     input.capabilities().isEmpty()
                             ? existing.capabilities()
                             : input.capabilities(),
+                    keepToolsWhenEmpty && input.tools().isEmpty()
+                            ? existing.tools()
+                            : input.tools(),
                     keepModelWhenEmpty && input.model().isEmpty()
                             ? existing.model()
                             : input.model());
@@ -316,6 +332,7 @@ public final class NacosAgentRegistry {
                     now,
                     now,
                     input.capabilities(),
+                    input.tools(),
                     input.model());
             agents.add(saved);
         }
@@ -350,6 +367,39 @@ public final class NacosAgentRegistry {
             }
         }
         return removed;
+    }
+
+    /**
+     * 版本时间线：只有 DB 源有历史，Nacos 源返回空列表（前端据此隐藏回滚入口）。
+     */
+    public synchronized List<AgentDefinitionRepository.Version> versions(String id) {
+        return dbSource ? definitionRepository.versions(id) : List.of();
+    }
+
+    /**
+     * 回滚到指定版本：仓储追加新版本行并切换定义行，这里负责缓存失效与变更通知。
+     * 仅 DB 源支持；Nacos 源没有历史，直接拒绝而不是静默成功。
+     */
+    public synchronized AgentDefinition rollback(
+            String id, int versionNo, String expectedRevision, String operator) {
+        requireDefinitionsWritable();
+        if (!dbSource) {
+            throw new PayrollException("当前为 Nacos 存储源，不支持版本回滚");
+        }
+        Snapshot<AgentDefinition> current = reloadForWrite();
+        requireRevision(current.revision(), expectedRevision, DATA_ID);
+        AgentDefinition restored =
+                definitionRepository.rollback(id, versionNo, current.revision(), operator);
+        invalidateCache();
+        List<AgentDefinition> agents = new ArrayList<>(current.items());
+        for (int i = 0; i < agents.size(); i++) {
+            if (agents.get(i).id().equals(id)) {
+                agents.set(i, restored);
+                break;
+            }
+        }
+        notifyNacos(agents);
+        return restored;
     }
 
     /** 定义写权限：DB 模式不依赖 Nacos；运行时设置仍单独要求 Nacos 可用。 */

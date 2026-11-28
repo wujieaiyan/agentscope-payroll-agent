@@ -146,6 +146,34 @@ class DynamicSkillWiringTest {
     }
 
     @Test
+    @DisplayName("声明的业务工具优先于技能映射，未声明才回退")
+    void declaredToolsOverrideSkillMapping() {
+        AgentDefinition declared =
+                new AgentDefinition(
+                        "agent-test",
+                        "测试智能体",
+                        "🤖",
+                        "",
+                        List.of(),
+                        List.of(RoleSkills.CALCULATOR),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        "tester",
+                        null,
+                        null,
+                        List.of(),
+                        List.of("generate_payslip"),
+                        io.agentscope.examples.payroll.model.AgentModelSettings.none());
+
+        // 绑定计算技能时旧映射给 7 个工具；声明后以声明为唯一白名单。
+        assertEquals(Set.of("generate_payslip"), PayrollAgentFactory.allowedTools(declared));
+        assertTrue(
+                PayrollAgentFactory.allowedTools(agentDefinition(List.of(RoleSkills.CALCULATOR)))
+                        .size()
+                        > 1);
+    }
+
+    @Test
     @DisplayName("绑定计算技能的智能体走三段流水线，其余按技能单兵作答")
     void pipelineDependsOnBoundSkills() {
         assertTrue(PayrollAgentFactory.isPipeline(null));
@@ -178,6 +206,67 @@ class DynamicSkillWiringTest {
                         () -> PayrollAgentFactory.boundSkills(
                                 new BuiltInSkillRepository(), empty));
         assertTrue(emptyError.getMessage().contains("未绑定技能"), emptyError.getMessage());
+    }
+
+    @Test
+    @DisplayName("统一装配器：预算内注入正文与参考文件提示，并注册 skill_read")
+    void wireSkillsInjectsBodyAndRegistersReadTool() {
+        AgentSkill skill =
+                new AgentSkill(
+                        "ai-coding",
+                        "编码规范",
+                        "## 绝对规则\n只输出代码，不解释。",
+                        Map.of("references/faq.md", "# FAQ\n示例"),
+                        "nacos");
+        Toolkit toolkit = new Toolkit();
+
+        String prompt =
+                PayrollAgentFactory.wireSkills(
+                        List.of(skill), toolkit, 128_000, 1_000, "编码");
+
+        assertTrue(prompt.contains("已加载角色技能"), prompt);
+        assertTrue(prompt.contains("### ai-coding_nacos"), prompt);
+        assertTrue(prompt.contains("只输出代码，不解释。"), prompt);
+        assertTrue(prompt.contains("技能参考文件"), prompt);
+        assertTrue(prompt.contains("references/faq.md"), prompt);
+        assertTrue(hasTool(toolkit, SkillReadTools.SKILL_READ), "应注册 skill_read");
+        // 第二级加载由 scoped 仓库内建，装配器不再注册加载工具。
+        assertFalse(hasTool(toolkit, "load_skill_through_path"));
+    }
+
+    @Test
+    @DisplayName("统一装配器：预算耗尽时正文退化为目录行，不静默丢弃")
+    void wireSkillsFallsBackToCatalogWhenBudgetExhausted() {
+        AgentSkill skill =
+                new AgentSkill(
+                        "ai-coding", "编码规范", "## 绝对规则\n只输出代码，不解释。", Map.of(), "nacos");
+        Toolkit toolkit = new Toolkit();
+
+        String prompt = PayrollAgentFactory.wireSkills(
+                List.of(skill), toolkit, 1_000, 100, "");
+
+        assertTrue(prompt.contains("其他可用技能（正文未注入）"), prompt);
+        assertFalse(prompt.contains("只输出代码，不解释。"), prompt);
+        assertFalse(hasTool(toolkit, SkillReadTools.SKILL_READ), "无参考文件时不应注册 skill_read");
+    }
+
+    @Test
+    @DisplayName("统一装配器：没有参考文件时不注册 skill_read")
+    void wireSkillsSkipsReadToolWithoutResources() {
+        AgentSkill skill =
+                new AgentSkill("ai-coding", "编码规范", "正文", Map.of(), "nacos");
+        Toolkit toolkit = new Toolkit();
+
+        String prompt =
+                PayrollAgentFactory.wireSkills(
+                        List.of(skill), toolkit, 128_000, 1_000, null);
+
+        assertFalse(hasTool(toolkit, SkillReadTools.SKILL_READ));
+        assertFalse(prompt.contains("技能参考文件"), prompt);
+    }
+
+    private static boolean hasTool(Toolkit toolkit, String name) {
+        return toolkit.getToolSchemas().stream().anyMatch(schema -> schema.getName().equals(name));
     }
 
     private static AgentDefinition agentDefinition(List<String> skillIds) {

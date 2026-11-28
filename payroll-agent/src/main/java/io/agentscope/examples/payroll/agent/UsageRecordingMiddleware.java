@@ -13,6 +13,7 @@ import io.agentscope.examples.payroll.service.TurnMetrics;
 import io.agentscope.examples.payroll.usage.LlmUsageRecord;
 import io.agentscope.examples.payroll.usage.LlmUsageRecorder;
 import io.agentscope.examples.payroll.usage.UsageModelCatalog;
+import io.opentelemetry.api.trace.Span;
 import java.time.LocalDateTime;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -39,13 +40,17 @@ final class UsageRecordingMiddleware implements MiddlewareBase {
             RuntimeContext ctx,
             ModelCallInput input,
             Function<ModelCallInput, Flux<AgentEvent>> next) {
+        Call call = new Call(agent, ctx, input);
+        Span span = GenAiTelemetry.startModelCall(agent, ctx, input.model());
+        AtomicBoolean spanEnded = new AtomicBoolean(false);
         AtomicLong startNanos = new AtomicLong(-1);
         AtomicBoolean recorded = new AtomicBoolean(false);
         Flux<AgentEvent> stream;
         try {
             stream = next.apply(input);
         } catch (RuntimeException e) {
-            record(new Call(agent, ctx, input), startNanos, null, e);
+            record(call, startNanos, null, e);
+            GenAiTelemetry.endModelCall(span, spanEnded, null, e);
             throw e;
         }
         return stream.doOnSubscribe(s -> startNanos.compareAndSet(-1, System.nanoTime()))
@@ -53,15 +58,19 @@ final class UsageRecordingMiddleware implements MiddlewareBase {
                         event -> {
                             if (event instanceof ModelCallEndEvent end
                                     && recorded.compareAndSet(false, true)) {
-                                record(new Call(agent, ctx, input), startNanos, end, null);
+                                record(call, startNanos, end, null);
+                                GenAiTelemetry.endModelCall(
+                                        span, spanEnded, end == null ? null : end.getUsage(), null);
                             }
                         })
                 .doOnError(
                         error -> {
                             if (recorded.compareAndSet(false, true)) {
-                                record(new Call(agent, ctx, input), startNanos, null, error);
+                                record(call, startNanos, null, error);
+                                GenAiTelemetry.endModelCall(span, spanEnded, null, error);
                             }
-                        });
+                        })
+                .doFinally(signal -> GenAiTelemetry.endModelCall(span, spanEnded, null, null));
     }
 
     private void record(Call call, AtomicLong startNanos, ModelCallEndEvent end, Throwable error) {

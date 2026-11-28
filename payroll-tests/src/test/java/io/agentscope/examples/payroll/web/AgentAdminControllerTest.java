@@ -19,6 +19,8 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AuthUser;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
+import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import io.agentscope.examples.payroll.service.AuditService;
 import io.agentscope.examples.payroll.service.AuthService;
 import io.agentscope.examples.payroll.skill.NacosAgentRegistry;
@@ -96,6 +98,121 @@ class AgentAdminControllerTest {
         assertEquals(List.of(RoleSkills.CALCULATOR), saved.skillIds());
         assertEquals(AgentDefinition.VISIBILITY_PUBLIC, saved.visibility());
         assertEquals(AgentDefinition.STATUS_OFFLINE, saved.status());
+    }
+
+    @Test
+    @DisplayName("版本列表透传注册表结果")
+    void listsVersions() {
+        AgentDefinition target = agent("agent-1", "顾问", AgentDefinition.STATUS_ONLINE);
+        when(registry.list()).thenReturn(List.of(target));
+        List<AgentDefinitionRepository.Version> versions =
+                List.of(
+                        new AgentDefinitionRepository.Version(
+                                2, "改名", "admin", LocalDateTime.now(), true));
+        when(registry.versions("agent-1")).thenReturn(versions);
+
+        ApiResponse response = controller.versions("agent-1");
+
+        assertEquals(versions, response.data());
+    }
+
+    @Test
+    @DisplayName("回滚写入审计并返回恢复后的定义")
+    void rollbackWritesAudit() {
+        AgentDefinition before = agent("agent-1", "新名称", AgentDefinition.STATUS_ONLINE);
+        AgentDefinition restored = agent("agent-1", "旧名称", AgentDefinition.STATUS_ONLINE);
+        when(registry.list()).thenReturn(List.of(before));
+        when(registry.rollback("agent-1", 1, "rev-x", "system")).thenReturn(restored);
+
+        ApiResponse response = controller.rollback("agent-1", 1, "rev-x", request);
+
+        assertSame(restored, response.data());
+        verify(auditService)
+                .record("agent.rollback", "agent_definition", "agent-1", before, restored);
+    }
+
+    @Test
+    @DisplayName("未知业务工具被拒绝，且不落库")
+    void rejectsUnknownDeclaredTool() {
+        AgentDefinition input =
+                new AgentDefinition(
+                        null,
+                        "工具顾问",
+                        "🤖",
+                        "",
+                        List.of(),
+                        List.of(RoleSkills.ACCOUNTANT),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        List.of("drop_table"),
+                        AgentModelSettings.none());
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.create(input, null, request));
+
+        assertTrue(error.getMessage().contains("未知业务工具"), error.getMessage());
+        verify(registry, never()).save(any(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    @DisplayName("上线但未绑定技能在保存前被闸门拒绝")
+    void rejectsOnlineAgentWithoutSkills() {
+        AgentDefinition input =
+                new AgentDefinition(
+                        null,
+                        "空技能顾问",
+                        "🤖",
+                        "",
+                        List.of(),
+                        List.of(),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        null,
+                        null,
+                        null);
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> controller.create(input, null, request));
+
+        assertTrue(error.getMessage().contains("必须绑定至少一个技能"), error.getMessage());
+        verify(registry, never()).save(any(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    @DisplayName("声明的业务工具去空白去重后保存")
+    void savesNormalizedDeclaredTools() {
+        when(registry.save(any(), any(), any(), anyBoolean()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        AgentDefinition input =
+                new AgentDefinition(
+                        null,
+                        "工具顾问",
+                        "🤖",
+                        "",
+                        List.of(),
+                        List.of(RoleSkills.ACCOUNTANT),
+                        "PUBLIC",
+                        "ONLINE",
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        List.of(" get_payroll_policy ", "get_payroll_policy"),
+                        AgentModelSettings.none());
+
+        controller.create(input, null, request);
+
+        ArgumentCaptor<AgentDefinition> captor = ArgumentCaptor.forClass(AgentDefinition.class);
+        verify(registry).save(captor.capture(), eq("system"), isNull(), eq(true));
+        assertEquals(List.of("get_payroll_policy"), captor.getValue().tools());
     }
 
     @Test
@@ -210,11 +327,13 @@ class AgentAdminControllerTest {
                                         "missing",
                                         agent(null, "顾问", null),
                                         true,
+                                        false,
                                         null,
                                         request));
 
         assertTrue(error.getMessage().contains("智能体不存在"), error.getMessage());
-        verify(registry, never()).save(any(), any(), any(), anyBoolean());
+        verify(registry, never())
+                .save(any(), any(), any(), anyBoolean(), anyBoolean());
     }
 
     @Test
@@ -223,13 +342,15 @@ class AgentAdminControllerTest {
         AgentDefinition before = agent("agent-1", "旧名称", AgentDefinition.STATUS_ONLINE);
         AgentDefinition after = agent("agent-1", "新名称", AgentDefinition.STATUS_OFFLINE);
         when(registry.list()).thenReturn(List.of(before));
-        when(registry.save(any(), eq("system"), any(), eq(false))).thenReturn(after);
+        when(registry.save(any(), eq("system"), any(), eq(false), anyBoolean()))
+                .thenReturn(after);
 
         ApiResponse response =
                 controller.update(
                         "agent-1",
                         agent(null, "新名称", AgentDefinition.STATUS_OFFLINE),
                         true,
+                        false,
                         null,
                         request);
 
@@ -274,6 +395,12 @@ class AgentAdminControllerTest {
         assertEquals("http://nacos/payroll-agent", meta.get("location"));
         assertEquals("agent-1", meta.get("activeAgentId"));
         assertTrue(meta.get("tags").toString().contains("税务"), meta.toString());
+        assertEquals(
+                io.agentscope.examples.payroll.agent.BuiltinToolCatalog.TOOL_NAMES.stream()
+                        .sorted()
+                        .toList(),
+                meta.get("tools"),
+                "meta 必须暴露与控制台校验同一份工具目录");
     }
 
     @Test

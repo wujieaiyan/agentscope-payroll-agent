@@ -152,25 +152,28 @@ public final class PayrollAgentFactory {
     private static final String ACTIVE_AGENT_RESPONSIBILITY =
             PromptLibrary.get("active-agent-responsibility");
 
-    private static String calculatorPrompt(String skillId) {
+    private static String calculatorPrompt(String skillId, String skillPrompt) {
         return COMMON_RULES
                 + "\n"
                 + SKILL_BOOT_RULE.formatted(skillId)
+                + skillPrompt
                 + PIPELINE_INTERACTION_RULES
                 + CALCULATOR_RESPONSIBILITY;
     }
 
-    private static String validatorPrompt(String skillId) {
+    private static String validatorPrompt(String skillId, String skillPrompt) {
         return COMMON_RULES
                 + "\n"
                 + SKILL_BOOT_RULE.formatted(skillId)
+                + skillPrompt
                 + VALIDATOR_RESPONSIBILITY;
     }
 
-    private static String accountantPrompt(String skillId) {
+    private static String accountantPrompt(String skillId, String skillPrompt) {
         return COMMON_RULES
                 + "\n"
                 + SKILL_BOOT_RULE.formatted(skillId)
+                + skillPrompt
                 + ACCOUNTANT_RESPONSIBILITY;
     }
 
@@ -430,6 +433,8 @@ public final class PayrollAgentFactory {
                 + "|"
                 + agent.capabilities()
                 + "|"
+                + agent.tools()
+                + "|"
                 + settingsFingerprint(agent.model())
                 + "|"
                 + skillFingerprint(agent.skillIds());
@@ -535,9 +540,33 @@ public final class PayrollAgentFactory {
                 SkillRepositories.activeSkill(skillRepository, RoleSkills.VALIDATOR);
         AgentSkill accountantSkill =
                 SkillRepositories.activeSkill(skillRepository, RoleSkills.ACCOUNTANT);
+        int[] skillBudget = skillBudgetParams(null);
         Toolkit calculatorTools = toolkit(tools, CALCULATOR_TOOLS, "计算", calculatorSkill);
         calculatorTools.registerTool(new ConfirmationTools());
         calculatorTools.registerTool(new QuestionTools());
+        String calculatorSkillPrompt =
+                wireSkills(
+                        List.of(calculatorSkill),
+                        calculatorTools,
+                        skillBudget[0],
+                        skillBudget[1],
+                        "薪酬计算");
+        Toolkit validatorTools = toolkit(tools, VALIDATOR_TOOLS, "验证", validatorSkill);
+        String validatorSkillPrompt =
+                wireSkills(
+                        List.of(validatorSkill),
+                        validatorTools,
+                        skillBudget[0],
+                        skillBudget[1],
+                        "薪酬验证");
+        Toolkit accountantTools = new Toolkit();
+        String accountantSkillPrompt =
+                wireSkills(
+                        List.of(accountantSkill),
+                        accountantTools,
+                        skillBudget[0],
+                        skillBudget[1],
+                        "薪酬核算");
         List<McpClientWrapper> mcpClients =
                 McpToolRegistrar.registerAll(
                         calculatorTools,
@@ -556,7 +585,7 @@ public final class PayrollAgentFactory {
                 createAgent(
                         "PayrollCalculatorAgent",
                         "薪酬计算智能体：理解诉求并调用确定性工具完成核算，产出可复核的计算记录",
-                        calculatorPrompt(calculatorSkill.getSkillId()),
+                        calculatorPrompt(calculatorSkill.getSkillId(), calculatorSkillPrompt),
                         model,
                         calculatorTools,
                         12,
@@ -565,18 +594,18 @@ public final class PayrollAgentFactory {
                 createAgent(
                         "PayrollValidatorAgent",
                         "薪酬验证智能体：独立调用发薪前校验工具，复核勾稽关系与风险项",
-                        validatorPrompt(validatorSkill.getSkillId()),
+                        validatorPrompt(validatorSkill.getSkillId(), validatorSkillPrompt),
                         model,
-                        toolkit(tools, VALIDATOR_TOOLS, "验证", validatorSkill),
+                        validatorTools,
                         8,
                         skillRepository,
                         RoleSkills.VALIDATOR),
                 createAgent(
                         "PayrollAccountantAgent",
                         "薪酬核算智能体：汇总计算与验证记录，生成最终可审计答复",
-                        accountantPrompt(accountantSkill.getSkillId()),
+                        accountantPrompt(accountantSkill.getSkillId(), accountantSkillPrompt),
                         model,
-                        new Toolkit(),
+                        accountantTools,
                         4,
                         skillRepository,
                         RoleSkills.ACCOUNTANT),
@@ -602,17 +631,16 @@ public final class PayrollAgentFactory {
         AgentSkill primary = skills.get(0);
         boolean payrollRole = isPayrollRole(agent.skillIds());
         Optional<String> devRole = devRole(agent);
-        Set<String> allowed = flowTools(agent.skillIds());
+        Set<String> allowed = flowTools(agent);
         Toolkit toolkit = toolkit(tools, allowed, agent.name(), primary);
-        if (SkillReadTools.hasResources(skills)) {
-            toolkit.registerTool(new SkillReadTools(skills));
-        }
-        SandboxGateway sandboxGateway = sandboxGateway();
-        boolean scriptsRunnable = SkillRunTools.available(skills, sandboxGateway);
-        if (scriptsRunnable) {
-            toolkit.registerTool(
-                    new SkillRunTools(skills, sandboxGateway, skillExecutionTimeoutMs()));
-        }
+        int[] skillBudget = skillBudgetParams(agent);
+        String skillPrompt =
+                wireSkills(
+                        skills,
+                        toolkit,
+                        skillBudget[0],
+                        skillBudget[1],
+                        skillFocus(agent));
         KbSkillGateway kbGateway = kbSearch ? kbGateway() : null;
         if (kbGateway != null) {
             toolkit.registerTool(new KbQueryTools(kbGateway));
@@ -626,12 +654,9 @@ public final class PayrollAgentFactory {
                         toolkit,
                         McpServerConfig.fromEnvironment(),
                         McpToolRegistrar.defaultFactory());
-        String prompt = flowNodePrompt(agent, skills);
+        String prompt = flowNodePrompt(agent, skills, skillPrompt);
         if (kbGateway != null) {
             prompt = prompt + "\n" + KB_SEARCH_GUIDANCE;
-        }
-        if (scriptsRunnable) {
-            prompt = prompt + "\n" + SkillRunTools.guidance(skills, skillExecutionTimeoutMs());
         }
         Path projectRoot = devRole.isPresent() ? devProjectRoot() : null;
         prompt = withDevBriefing(prompt, devRole.orElse(null));
@@ -643,9 +668,10 @@ public final class PayrollAgentFactory {
                         model,
                         toolkit,
                         12,
-                        // 自定义角色：技能正文已注入提示词，不再注册动态加载工具。
-                        payrollRole ? skillRepository : null,
-                        payrollRole ? agent.skillIds() : List.of(),
+                        // 统一契约（S3）：技能正文按预算预注入，scoped 仓库始终传入，
+                        // load_skill_through_path 作为目录中未注入技能的兜底入口。
+                        skillRepository,
+                        agent.skillIds(),
                         devRole.orElse(null),
                         projectRoot,
                         devRole.isPresent() ? devContextBudget() : null);
@@ -752,18 +778,16 @@ public final class PayrollAgentFactory {
             HarnessAgent summarizer) {
         List<AgentSkill> boundSkills = boundSkills(skillRepository, activeAgent);
         AgentSkill primary = boundSkills.get(0);
-        Set<String> allowed = allowedTools(activeAgent.skillIds());
+        Set<String> allowed = allowedTools(activeAgent);
         Toolkit toolkit = toolkit(tools, allowed, activeAgent.name(), primary);
-        if (SkillReadTools.hasResources(boundSkills)) {
-            toolkit.registerTool(new SkillReadTools(boundSkills));
-        }
-        SandboxGateway sandboxGateway = sandboxGateway();
-        boolean scriptsRunnable = SkillRunTools.available(boundSkills, sandboxGateway);
-        if (scriptsRunnable) {
-            toolkit.registerTool(
-                    new SkillRunTools(
-                            boundSkills, sandboxGateway, skillExecutionTimeoutMs()));
-        }
+        int[] skillBudget = skillBudgetParams(activeAgent);
+        String skillPrompt =
+                wireSkills(
+                        boundSkills,
+                        toolkit,
+                        skillBudget[0],
+                        skillBudget[1],
+                        skillFocus(activeAgent));
         KbSkillGateway kbGateway = kbGateway();
         // 知识库管理/写工具只给显式声明 kb:config 的智能体，其余智能体不注册，避免越权写入口与工具集膨胀。
         boolean kbConfig = kbGateway != null && kbConfigAgent(activeAgent);
@@ -791,7 +815,7 @@ public final class PayrollAgentFactory {
                 toolkit.getToolNames(),
                 kbTools != null,
                 kbRead);
-        StringBuilder prompt = new StringBuilder(activeAgentPrompt(activeAgent, boundSkills));
+        StringBuilder prompt = new StringBuilder(activeAgentPrompt(activeAgent, skillPrompt));
         if (kbRead) {
             prompt.append('\n').append(KB_SEARCH_GUIDANCE);
         }
@@ -799,9 +823,6 @@ public final class PayrollAgentFactory {
             prompt.append('\n').append(KB_CONFIG_GUIDANCE);
         }
         String promptText = prompt.toString();
-        if (scriptsRunnable) {
-            promptText = promptText + "\n" + SkillRunTools.guidance(boundSkills, skillExecutionTimeoutMs());
-        }
         Optional<String> devRole = devRole(activeAgent);
         Path projectRoot = devRole.isPresent() ? devProjectRoot() : null;
         promptText = withDevBriefing(promptText, devRole.orElse(null));
@@ -813,9 +834,10 @@ public final class PayrollAgentFactory {
                         model,
                         toolkit,
                         12,
-                        // 技能正文已预加载，移除 load_skill_through_path，避免小模型编造技能 id。
-                        null,
-                        List.of(),
+                        // 统一契约（S3）：正文已按预算预注入，scoped 仓库仍传入，
+                        // load_skill_through_path 只作为目录中未注入技能的兜底入口。
+                        skillRepository,
+                        activeAgent.skillIds(),
                         devRole.orElse(null),
                         projectRoot,
                         devRole.isPresent() ? devContextBudget() : null);
@@ -863,6 +885,28 @@ public final class PayrollAgentFactory {
         return skills;
     }
 
+    /**
+     * 声明了 {@code tools} 的智能体以声明为唯一白名单；未声明时沿用技能映射，
+     * 保证存量定义行为不变。
+     */
+    static Set<String> allowedTools(AgentDefinition agent) {
+        Set<String> declared = declaredTools(agent);
+        return declared.isEmpty() ? allowedTools(agent.skillIds()) : declared;
+    }
+
+    /** 流程节点同上：声明优先，未声明才按技能映射。 */
+    private static Set<String> flowTools(AgentDefinition agent) {
+        Set<String> declared = declaredTools(agent);
+        return declared.isEmpty() ? flowTools(agent.skillIds()) : declared;
+    }
+
+    private static Set<String> declaredTools(AgentDefinition agent) {
+        if (agent == null || agent.tools().isEmpty()) {
+            return Set.of();
+        }
+        return new LinkedHashSet<>(agent.tools());
+    }
+
     static Set<String> allowedTools(List<String> skillIds) {
         Set<String> allowed = new LinkedHashSet<>();
         for (String skillId : skillIds) {
@@ -892,19 +936,20 @@ public final class PayrollAgentFactory {
     }
 
     /** 流程节点沿用角色提示词，避免把“第 2/3 环”误当成独立核算智能体。 */
-    private static String flowNodePrompt(AgentDefinition agent, List<AgentSkill> skills) {
+    private static String flowNodePrompt(
+            AgentDefinition agent, List<AgentSkill> skills, String skillPrompt) {
         List<String> skillIds = agent.skillIds();
         String skillId = skills.get(0).getSkillId();
         if (skillIds.contains(RoleSkills.VALIDATOR)) {
-            return validatorPrompt(skillId);
+            return validatorPrompt(skillId, skillPrompt);
         }
         if (skillIds.contains(RoleSkills.ACCOUNTANT)) {
-            return accountantPrompt(skillId);
+            return accountantPrompt(skillId, skillPrompt);
         }
         if (skillIds.contains(RoleSkills.CALCULATOR)) {
-            return calculatorPrompt(skillId);
+            return calculatorPrompt(skillId, skillPrompt);
         }
-        return activeAgentPrompt(agent, skills);
+        return activeAgentPrompt(agent, skillPrompt);
     }
 
     /**
@@ -920,11 +965,16 @@ public final class PayrollAgentFactory {
     /** 按已解析模型窗口构建提示词：预算不足时技能正文降级为目录，技能不会静默消失。 */
     static String activeAgentPrompt(
             AgentDefinition agent, List<AgentSkill> skills, int contextWindow, int numPredict) {
+        return activeAgentPrompt(
+                agent, skillContract(skills, contextWindow, numPredict, skillFocus(agent)));
+    }
+
+    /** 技能片段由统一装配器产出（预算内预注入 + 目录 + 资源指引），此处只拼职责。 */
+    static String activeAgentPrompt(AgentDefinition agent, String skillPrompt) {
         String description = agent.description() == null ? "" : agent.description();
         return GENERAL_RULES
                 + "\n"
-                + skillBlock(skills, contextWindow, numPredict, skillFocus(agent))
-                + SkillReadTools.guidance(skills)
+                + skillPrompt
                 + ACTIVE_AGENT_RESPONSIBILITY.formatted(agent.name(), description);
     }
 
@@ -979,6 +1029,31 @@ public final class PayrollAgentFactory {
                 result.injectedIds(),
                 result.catalogIds());
         return result.block();
+    }
+
+    /**
+     * 统一技能装配（S3）：预算内预注入正文 + 目录，资源/脚本工具在同一处注册，
+     * 返回要拼进系统提示词的技能片段。scoped 仓库由调用方随 {@code createAgent} 传入，
+     * 因此 {@code load_skill_through_path} 对所有智能体都可用，只作目录中未注入技能的兜底。
+     */
+    static String wireSkills(
+            List<AgentSkill> skills, Toolkit toolkit, int contextWindow, int numPredict, String focus) {
+        if (SkillReadTools.hasResources(skills)) {
+            toolkit.registerTool(new SkillReadTools(skills));
+        }
+        String prompt = skillContract(skills, contextWindow, numPredict, focus);
+        SandboxGateway sandbox = sandboxGateway();
+        if (SkillRunTools.available(skills, sandbox)) {
+            toolkit.registerTool(new SkillRunTools(skills, sandbox, skillExecutionTimeoutMs()));
+            prompt = prompt + "\n" + SkillRunTools.guidance(skills, skillExecutionTimeoutMs());
+        }
+        return prompt;
+    }
+
+    /** 两级加载的第一级：预算内正文 + 目录；第二级 load_skill 由 scoped 仓库提供。 */
+    private static String skillContract(
+            List<AgentSkill> skills, int contextWindow, int numPredict, String focus) {
+        return skillBlock(skills, contextWindow, numPredict, focus) + SkillReadTools.guidance(skills);
     }
 
     /** 薪酬三个内置角色需要动态技能来激活业务工具，自定义角色则改为正文预注入。 */
@@ -1284,6 +1359,13 @@ public final class PayrollAgentFactory {
             if (!allowed.contains(name)) {
                 toolkit.removeTool(name);
             }
+        }
+        // 声明合法但运行期没有对应实现（例如 Nacos JSON 绕过控制台校验）时只告警，
+        // 不因单个工具缺失拒绝整个智能体。
+        Set<String> missing = new LinkedHashSet<>(allowed);
+        missing.removeAll(toolkit.getToolNames());
+        if (!missing.isEmpty()) {
+            log.warn("[多智能体] {}智能体声明了未注册的业务工具：{}", role, missing);
         }
         log.info(
                 "[多智能体] {}智能体工具集：{}（加载 {} 后启用）",

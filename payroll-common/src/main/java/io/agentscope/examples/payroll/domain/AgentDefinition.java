@@ -22,6 +22,7 @@ public record AgentDefinition(
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
         List<String> capabilities,
+        List<String> tools,
         AgentModelSettings model) {
 
     public static final String VISIBILITY_PUBLIC = "PUBLIC";
@@ -38,7 +39,40 @@ public record AgentDefinition(
         tags = tags == null ? List.of() : List.copyOf(tags);
         skillIds = skillIds == null ? List.of() : List.copyOf(skillIds);
         capabilities = capabilities == null ? List.of() : List.copyOf(capabilities);
+        tools = tools == null ? List.of() : List.copyOf(tools);
         model = model == null ? AgentModelSettings.none() : model;
+    }
+
+    /** 兼容未声明 tools 的存量配置与调用方。 */
+    public AgentDefinition(
+            String id,
+            String name,
+            String avatar,
+            String description,
+            List<String> tags,
+            List<String> skillIds,
+            String visibility,
+            String status,
+            String createdBy,
+            LocalDateTime createdAt,
+            LocalDateTime updatedAt,
+            List<String> capabilities,
+            AgentModelSettings model) {
+        this(
+                id,
+                name,
+                avatar,
+                description,
+                tags,
+                skillIds,
+                visibility,
+                status,
+                createdBy,
+                createdAt,
+                updatedAt,
+                capabilities,
+                List.of(),
+                model);
     }
 
     /** 兼容未声明 model 的存量配置与调用方。 */
@@ -68,6 +102,7 @@ public record AgentDefinition(
                 createdAt,
                 updatedAt,
                 capabilities,
+                List.of(),
                 AgentModelSettings.none());
     }
 
@@ -96,6 +131,7 @@ public record AgentDefinition(
                 createdBy,
                 createdAt,
                 updatedAt,
+                List.of(),
                 List.of(),
                 AgentModelSettings.none());
     }

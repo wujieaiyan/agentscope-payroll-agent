@@ -2,6 +2,8 @@ package io.agentscope.examples.payroll.web;
 
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
+import io.agentscope.examples.payroll.agent.AgentPublishGate;
+import io.agentscope.examples.payroll.agent.BuiltinToolCatalog;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
@@ -179,6 +181,7 @@ public class AgentAdminController {
                 .collect(Collectors.toCollection(java.util.TreeSet::new));
         meta.put("tags", tags);
         meta.put("activeAgentId", registry.activeAgentId());
+        meta.put("tools", BuiltinToolCatalog.TOOL_NAMES.stream().sorted().toList());
         return ApiResponse.ok(meta);
     }
 
@@ -299,13 +302,15 @@ public class AgentAdminController {
             @PathVariable String id,
             @RequestBody AgentDefinition input,
             @RequestParam(name = "clearModel", defaultValue = "false") boolean clearModel,
+            @RequestParam(name = "clearTools", defaultValue = "false") boolean clearTools,
             @RequestParam(name = "revision", required = false) String revision,
             HttpServletRequest request) {
         AuditContext.markRevision(revision);
         AgentDefinition before = find(id);
         AgentDefinition validated = validate(input, id);
         AgentDefinition saved =
-                registry.save(validated, operator(request), revision, !clearModel);
+                registry.save(
+                        validated, operator(request), revision, !clearModel, !clearTools);
         auditService.record("agent.update", "agent_definition", saved.id(), before, saved);
         if (!before.model().equals(saved.model())) {
             auditService.record(
@@ -331,6 +336,29 @@ public class AgentAdminController {
         auditService.record(
                 "agent.delete", "agent_definition", id, before, Map.of("deleted", id));
         return ApiResponse.ok(Map.of("deleted", id));
+    }
+
+    /** 版本时间线（S2）：current 标记当前生效版本，回滚入口按它置灰。 */
+    @GetMapping("/{id}/versions")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse versions(@PathVariable String id) {
+        find(id);
+        return ApiResponse.ok(registry.versions(id));
+    }
+
+    /** 回滚到指定版本：追加新版本行、历史不改，写后运行期缓存失效。 */
+    @PostMapping("/{id}/rollback")
+    @RequirePermission(Permissions.AGENT_MANAGE)
+    public ApiResponse rollback(
+            @PathVariable String id,
+            @RequestParam("versionNo") int versionNo,
+            @RequestParam(name = "revision", required = false) String revision,
+            HttpServletRequest request) {
+        AuditContext.markRevision(revision);
+        AgentDefinition before = find(id);
+        AgentDefinition restored = registry.rollback(id, versionNo, revision, operator(request));
+        auditService.record("agent.rollback", "agent_definition", id, before, restored);
+        return ApiResponse.ok(restored);
     }
 
     private AgentDefinition find(String id) {
@@ -388,21 +416,26 @@ public class AgentAdminController {
             }
         }
         List<String> capabilities = normalizeCapabilities(input.capabilities());
+        List<String> tools = BuiltinToolCatalog.normalize(input.tools());
         AgentModelSettings model = validateModel(input.model());
-        return new AgentDefinition(
-                forcedId,
-                name,
-                avatar,
-                description,
-                tags,
-                skillIds,
-                visibility,
-                status,
-                input.createdBy(),
-                input.createdAt(),
-                input.updatedAt(),
-                capabilities,
-                model);
+        AgentDefinition definition =
+                new AgentDefinition(
+                        forcedId,
+                        name,
+                        avatar,
+                        description,
+                        tags,
+                        skillIds,
+                        visibility,
+                        status,
+                        input.createdBy(),
+                        input.createdAt(),
+                        input.updatedAt(),
+                        capabilities,
+                        tools,
+                        model);
+        AgentPublishGate.check(definition);
+        return definition;
     }
 
     /** 智能体级模型只覆盖控制面；连接必须存在且启用，数值范围与连接保存保持一致。 */

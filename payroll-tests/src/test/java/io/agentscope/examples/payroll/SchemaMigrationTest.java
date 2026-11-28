@@ -24,7 +24,7 @@ class SchemaMigrationTest {
     void h2AppliesSharedMigrations() throws Exception {
         PayrollDatabase database = PayrollDatabase.inMemory("schema-" + System.nanoTime());
         try (Connection connection = database.connection()) {
-            assertEquals(52, tableCount(connection));
+            assertEquals(53, tableCount(connection));
             assertColumn(connection, "chat_messages", "routing_json");
             assertColumn(connection, "chat_messages", "citations_json");
             assertColumn(connection, "chat_messages", "turn_id");
@@ -67,7 +67,7 @@ class SchemaMigrationTest {
         try (Connection connection = second.connection()) {
             assertTrue(seeded > 0, "演示员工应在首次初始化时写入");
             assertEquals(seeded, scalar(connection, "SELECT COUNT(*) FROM employees"));
-            assertEquals(24, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
+            assertEquals(25, scalar(connection, "SELECT COUNT(*) FROM " + HISTORY
                     + " WHERE \"version\" IS NOT NULL"));
         }
     }
@@ -107,11 +107,13 @@ class SchemaMigrationTest {
             assertTable(connection, "skill_version");
             assertTable(connection, "skill_resource");
             assertTable(connection, "skill_blob");
-            assertEquals(52, tableCount(connection));
+            assertTable(connection, "agent_version");
+            assertEquals(53, tableCount(connection));
             assertHistoryVersion(connection, "21");
             assertHistoryVersion(connection, "22");
             assertHistoryVersion(connection, "23");
             assertHistoryVersion(connection, "24");
+            assertHistoryVersion(connection, "25");
         }
     }
 
@@ -125,7 +127,12 @@ class SchemaMigrationTest {
         try (Connection connection = java.sql.DriverManager.getConnection(url, "sa", "");
                 Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE app_users (user_id BIGINT AUTO_INCREMENT PRIMARY KEY)");
-            statement.execute("CREATE TABLE agent_definition (id VARCHAR(128) PRIMARY KEY)");
+            // 与 V21 真实结构一致：V25 的升级基线回填要读 payload_json / updated_by / updated_at，
+            // 半迁移库的 agent_definition 只可能是 V21 建过的那一张，不会是只剩主键的空壳。
+            statement.execute(
+                    "CREATE TABLE agent_definition (id VARCHAR(128) PRIMARY KEY,"
+                            + " payload_json LONGTEXT NOT NULL, revision BIGINT NOT NULL,"
+                            + " updated_by VARCHAR(128), updated_at TIMESTAMP NOT NULL)");
             statement.execute(
                     "CREATE TABLE skill_definition (skill_id VARCHAR(64) PRIMARY KEY,"
                             + " name VARCHAR(128) NOT NULL, description VARCHAR(512)"
@@ -158,10 +165,12 @@ class SchemaMigrationTest {
         try (Connection connection = database.connection()) {
             assertTable(connection, "skill_resource");
             assertTable(connection, "skill_blob");
-            assertEquals(52, tableCount(connection));
+            assertTable(connection, "agent_version");
+            assertEquals(53, tableCount(connection));
             assertHistoryVersion(connection, "22");
             assertHistoryVersion(connection, "23");
             assertHistoryVersion(connection, "24");
+            assertHistoryVersion(connection, "25");
         }
     }
 

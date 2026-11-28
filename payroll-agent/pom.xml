@@ -25,6 +25,11 @@
             <artifactId>langgraph4j-core</artifactId>
             <version>${langgraph4j.version}</version>
         </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${opentelemetry.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
+import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -116,6 +117,75 @@ class JdbcAgentDefinitionRepositoryTest {
         assertTrue(repository.delete("agent-a", current));
         assertFalse(repository.delete("agent-a", current));
         assertTrue(repository.find("agent-a").isEmpty());
+    }
+
+    @Test
+    @DisplayName("每次保存追加版本，回滚追加新版本并恢复旧内容")
+    void versionsAppendAndRollbackRestoresPayload() throws Exception {
+        String base = repository.load().revision();
+        repository.save(agent("agent-a", "v1 名字"), "admin", base, "首次创建");
+        String afterCreate = repository.load().revision();
+        repository.save(agent("agent-a", "v2 名字"), "admin", afterCreate, "改名");
+
+        List<AgentDefinitionRepository.Version> versions = repository.versions("agent-a");
+        assertEquals(
+                List.of(2, 1),
+                versions.stream().map(AgentDefinitionRepository.Version::versionNo).toList());
+        assertTrue(versions.get(0).current());
+        assertEquals("改名", versions.get(0).changeNote());
+        assertEquals("admin", versions.get(0).createdBy());
+        assertFalse(versions.get(1).current());
+
+        String beforeRollback = repository.load().revision();
+        AgentDefinition restored = repository.rollback("agent-a", 1, beforeRollback, "auditor");
+        assertEquals("v1 名字", restored.name());
+        assertEquals("v1 名字", repository.find("agent-a").orElseThrow().name());
+        assertEquals(3, rowRevision("agent-a"));
+
+        List<AgentDefinitionRepository.Version> after = repository.versions("agent-a");
+        assertEquals(3, after.get(0).versionNo());
+        assertEquals("回滚到 v1", after.get(0).changeNote());
+        assertEquals("auditor", after.get(0).createdBy());
+        assertTrue(after.get(0).current());
+        assertFalse(after.get(1).current());
+    }
+
+    @Test
+    @DisplayName("回滚不存在的版本直接拒绝，定义不变")
+    void rollbackRejectsMissingVersion() {
+        repository.save(agent("agent-a", "当前"), "admin", null);
+        String current = repository.load().revision();
+
+        PayrollException error =
+                assertThrows(
+                        PayrollException.class,
+                        () -> repository.rollback("agent-a", 9, current, "admin"));
+
+        assertTrue(error.getMessage().contains("没有版本 v9"), error.getMessage());
+        assertEquals("当前", repository.find("agent-a").orElseThrow().name());
+    }
+
+    @Test
+    @DisplayName("回滚携带过期 revision 返回 409，不覆盖新内容")
+    void rollbackChecksRevision() {
+        repository.save(agent("agent-a", "v1"), "admin", null, "创建");
+        String stale = repository.load().revision();
+        repository.save(agent("agent-a", "v2"), "admin", stale, "改名");
+
+        assertThrows(
+                PayrollConflictException.class,
+                () -> repository.rollback("agent-a", 1, stale, "admin"));
+        assertEquals("v2", repository.find("agent-a").orElseThrow().name());
+    }
+
+    @Test
+    @DisplayName("删除定义同时清理版本历史，重建同 id 不会串出旧版本")
+    void deleteClearsVersions() {
+        repository.save(agent("agent-a", "旧"), "admin", null);
+        String current = repository.load().revision();
+
+        assertTrue(repository.delete("agent-a", current));
+        assertTrue(repository.versions("agent-a").isEmpty());
     }
 
     @Test

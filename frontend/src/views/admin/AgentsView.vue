@@ -6,7 +6,7 @@ import { toast } from '../../stores/toast';
 const rows = ref([]);
 const revision = ref('');
 const settingsRevision = ref('');
-const meta = ref({ writable: false, location: '-' });
+const meta = ref({ writable: false, location: '-', tools: [] });
 const skillOptions = ref([]);
 const skillKeyword = ref('');
 const SKILL_CHIP_LIMIT = 60;
@@ -44,6 +44,7 @@ function blank() {
     description: '',
     tagsText: '',
     skillIds: [],
+    tools: [],
     visibility: 'PUBLIC',
     status: 'ONLINE',
     inheritModel: true,
@@ -130,6 +131,7 @@ function editAgent(row) {
     ...row,
     tagsText: (row.tags || []).join(', '),
     skillIds: [...(row.skill_ids || row.skillIds || [])],
+    tools: [...(row.tools || [])],
     inheritModel: !model.connectionId,
     modelConnectionId: model.connectionId || '',
     modelName: model.model || '',
@@ -155,6 +157,22 @@ function toggleSkill(id) {
   else form.skillIds.push(id);
 }
 
+const toolOptions = computed(() => meta.value.tools || []);
+
+const publishBlocked = computed(
+  () => form.status === 'ONLINE' && form.skillIds.length === 0
+);
+
+function toggleTool(name) {
+  const index = form.tools.indexOf(name);
+  if (index >= 0) form.tools.splice(index, 1);
+  else form.tools.push(name);
+}
+
+function toolCount(row) {
+  return (row.tools || []).length;
+}
+
 function withRevision(path, value) {
   if (!value) return path;
   const joiner = path.includes('?') ? '&' : '?';
@@ -172,6 +190,10 @@ async function handleWriteError(error) {
 
 async function save() {
   if (saving.value) return;
+  if (publishBlocked.value) {
+    toast('上线智能体必须绑定至少一个技能', 'error');
+    return;
+  }
   saving.value = true;
   try {
     const body = {
@@ -184,6 +206,7 @@ async function save() {
         .map((item) => item.trim())
         .filter(Boolean),
       skillIds: form.skillIds,
+      tools: form.tools,
       visibility: form.visibility,
       status: form.status,
       model: form.inheritModel
@@ -198,9 +221,10 @@ async function save() {
           },
     };
     if (editing.value) {
+      // 表单始终携带完整 tools 状态，显式 clearTools 让「清空全部工具」真实生效。
       await api(
         withRevision(
-          `/api/admin/agents/${encodeURIComponent(body.id)}?clearModel=${form.inheritModel}`,
+          `/api/admin/agents/${encodeURIComponent(body.id)}?clearModel=${form.inheritModel}&clearTools=true`,
           revision.value
         ),
         { method: 'PUT', body }
@@ -236,6 +260,63 @@ async function remove(row) {
   } catch (error) {
     await handleWriteError(error);
   }
+}
+
+const history = reactive({ open: false, agent: null, rows: [], loading: false });
+
+async function openHistory(row) {
+  history.open = true;
+  history.agent = row;
+  history.rows = [];
+  history.loading = true;
+  try {
+    const data = await api(`/api/admin/agents/${encodeURIComponent(row.id)}/versions`);
+    history.rows = Array.isArray(data) ? data : [];
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    history.loading = false;
+  }
+}
+
+function closeHistory() {
+  history.open = false;
+  history.agent = null;
+  history.rows = [];
+}
+
+async function rollbackTo(version) {
+  const agent = history.agent;
+  if (!agent || version.current) return;
+  if (
+    !window.confirm(
+      `把「${agent.name}」回滚到 v${version.versionNo}？会新增一条版本记录，历史不会删除。`
+    )
+  ) {
+    return;
+  }
+  try {
+    await api(
+      withRevision(
+        `/api/admin/agents/${encodeURIComponent(agent.id)}/rollback?versionNo=${version.versionNo}`,
+        revision.value
+      ),
+      { method: 'POST' }
+    );
+    toast(`已回滚到 v${version.versionNo}`, 'success');
+    closeHistory();
+    await load();
+  } catch (error) {
+    await handleWriteError(error);
+  }
+}
+
+function timeText(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleString('zh-CN', { hour12: false });
 }
 
 async function activate(row) {
@@ -387,6 +468,7 @@ onMounted(load);
         <div class="agent-tags">
           <span v-for="tag in row.tags || []" :key="tag" class="tag">{{ tag }}</span>
           <span class="tag">技能 {{ skillCount(row) }}</span>
+          <span v-if="toolCount(row)" class="tag">工具 {{ toolCount(row) }}</span>
           <span class="tag">模型 {{ modelSummary(row) }}</span>
         </div>
         <p class="agent-desc">{{ row.description || '（无描述）' }}</p>
@@ -404,6 +486,7 @@ onMounted(load);
             >
               设为全局
             </button>
+            <button class="subtle sm" @click="openHistory(row)">历史</button>
             <button class="subtle sm" :disabled="!meta.writable" @click="editAgent(row)">编辑</button>
             <button class="subtle sm" :disabled="!meta.writable" @click="remove(row)">删除</button>
           </div>
@@ -455,6 +538,57 @@ onMounted(load);
       </div>
     </div>
 
+    <div v-if="history.open" class="modal-mask" @click.self="closeHistory">
+      <div class="modal">
+        <div class="modal-head">
+          <h3>版本历史 · {{ history.agent?.name }}</h3>
+          <button class="subtle sm" @click="closeHistory">关闭</button>
+        </div>
+        <div class="modal-body">
+          <p class="hint">
+            每次保存都会追加一条版本；回滚是「新增一条旧内容的版本」，历史行不会删除。
+          </p>
+          <div v-if="history.loading" class="empty">加载中…</div>
+          <div v-else-if="!history.rows.length" class="empty">暂无版本记录</div>
+          <div v-else class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>版本</th>
+                  <th>变更说明</th>
+                  <th>操作人</th>
+                  <th>时间</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="version in history.rows" :key="version.versionNo">
+                  <td class="mono">v{{ version.versionNo }}</td>
+                  <td>{{ version.changeNote || '—' }}</td>
+                  <td>{{ version.createdBy || '—' }}</td>
+                  <td>{{ timeText(version.createdAt) }}</td>
+                  <td>
+                    <span v-if="version.current" class="badge green">当前</span>
+                    <button
+                      v-else
+                      class="subtle sm"
+                      :disabled="!meta.writable"
+                      @click="rollbackTo(version)"
+                    >
+                      回滚到此版本
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="ghost" @click="closeHistory">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="showForm" class="modal-mask" @click.self="showForm = false">
       <div class="modal">
         <div class="modal-head">
@@ -498,6 +632,9 @@ onMounted(load);
               <input v-model="form.tagsText" placeholder="薪酬, 核算" />
             </label>
           </div>
+          <p v-if="publishBlocked" class="error-text" style="margin-top: 6px">
+            上线智能体必须绑定至少一个技能：请先选择技能，或把状态改为离线。
+          </p>
           <div>
             <div class="muted" style="margin-bottom: 6px">绑定技能（已选 {{ form.skillIds.length }}）</div>
             <input
@@ -520,6 +657,26 @@ onMounted(load);
                 还有 {{ hiddenSkillCount }} 个未展示，请输入关键字继续过滤
               </span>
             </div>
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom: 6px">
+              业务工具（已选 {{ form.tools.length }}）
+            </div>
+            <div class="toolbar">
+              <button
+                v-for="name in toolOptions"
+                :key="name"
+                class="chip"
+                :class="{ 'badge blue': form.tools.includes(name) }"
+                @click="toggleTool(name)"
+              >
+                {{ name }}
+              </button>
+              <span v-if="!toolOptions.length" class="muted">工具目录未加载</span>
+            </div>
+            <p class="hint" style="margin-top: 6px">
+              声明后只有这些业务工具对该智能体可见；不声明时沿用技能映射。工具由技能激活，因此声明工具必须绑定技能。
+            </p>
           </div>
           <div>
             <div class="muted" style="margin-bottom: 6px">模型</div>
@@ -590,7 +747,7 @@ onMounted(load);
         </div>
         <div class="modal-foot">
           <button class="ghost" @click="showForm = false">取消</button>
-          <button class="primary" :disabled="saving" @click="save">
+          <button class="primary" :disabled="saving || publishBlocked" @click="save">
             {{ saving ? '保存中…' : '保存' }}
           </button>
         </div>
