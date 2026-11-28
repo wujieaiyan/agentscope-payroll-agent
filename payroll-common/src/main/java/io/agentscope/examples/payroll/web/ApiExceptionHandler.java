@@ -6,6 +6,7 @@ import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollForbiddenException;
 import io.agentscope.examples.payroll.domain.PayrollGoneException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
+import io.agentscope.examples.payroll.domain.PayrollTooLargeException;
 import io.agentscope.examples.payroll.domain.PayrollUnavailableException;
 import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
 import io.agentscope.examples.payroll.support.AuditContext;
@@ -53,6 +54,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(PayrollGoneException.class)
     public ResponseEntity<ApiResponse> handleGone(PayrollGoneException e) {
         return error(HttpStatus.GONE, e.getMessage());
+    }
+
+    @ExceptionHandler(PayrollTooLargeException.class)
+    public ResponseEntity<ApiResponse> handleTooLarge(PayrollTooLargeException e) {
+        return error(HttpStatus.PAYLOAD_TOO_LARGE, e.getMessage());
     }
 
     @ExceptionHandler(PayrollException.class)

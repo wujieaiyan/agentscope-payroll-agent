@@ -2,16 +2,21 @@ package io.agentscope.examples.payroll.sandbox;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
- * 技能数据浏览契约：目录树 / 文件预览的路径、参数上限与 HMAC 规范串。
+ * 技能数据契约：目录树 / 文件预览 / 人工上传 / 删除的路径、参数上限与 HMAC 规范串。
  *
  * <p>查询参数会进入 HMAC 签名，因此客户端与沙箱必须用同一方法生成路径：
  * 参数按 key 字典序、值按 UTF-8 百分号编码，空路径也保留 {@code path=}，
  * 避免两侧各自拼接导致签名不一致或参数被篡改。
+ *
+ * <p>人工上传与初始化脚本写同一个 {@code data/} 目录，因此重建数据会连同上
+ * 传文件一起清空；上传只允许普通数据文件，禁止可执行扩展名。
  */
 public final class SkillDataProtocol {
 
@@ -33,6 +38,21 @@ public final class SkillDataProtocol {
     public static final String QUERY_PATH = "path";
     public static final String QUERY_DEPTH = "depth";
     public static final String QUERY_MAX_BYTES = "maxBytes";
+    public static final String QUERY_OVERWRITE = "overwrite";
+    public static final String QUERY_SHA256 = "sha256";
+    public static final String QUERY_SIZE = "size";
+
+    /** 人工上传与 setup 产物共用 data/：单文件 200 MiB，默认总量 1 GiB、硬顶 5 GiB。 */
+    public static final long MAX_UPLOAD_FILE_BYTES = 200L * 1024 * 1024;
+    public static final long MAX_UPLOAD_TOTAL_BYTES = 1024L * 1024 * 1024;
+    public static final long HARD_MAX_UPLOAD_TOTAL_BYTES = 5L * 1024 * 1024 * 1024;
+    public static final int MAX_UPLOAD_FILES = 5000;
+
+    private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
+    private static final Set<String> FORBIDDEN_UPLOAD_SUFFIXES =
+            Set.of(
+                    "sh", "bash", "bat", "cmd", "exe", "dll", "so", "dylib", "com", "scr", "msi",
+                    "ps1", "jar");
 
     private SkillDataProtocol() {
     }
@@ -66,6 +86,68 @@ public final class SkillDataProtocol {
                                 relative,
                                 QUERY_MAX_BYTES,
                                 Integer.toString(effectiveMaxBytes)));
+    }
+
+    /**
+     * 上传规范路径：与预览共用 {@code /data/file}，path、覆盖标志、声明大小与摘要全部参与签名，
+     * 避免只签 path 时被篡改大小或摘要。
+     */
+    public static String uploadPath(
+            String skillId, String path, boolean overwrite, long size, String sha256) {
+        String id = SkillInitProtocol.requireSkillId(skillId);
+        String relative = requireUploadFile(path, "数据文件");
+        long effectiveSize = requireUploadSize(size);
+        String digest = requireSha256(sha256);
+        return base(id, FILE_SUFFIX)
+                + canonicalQuery(
+                        Map.of(
+                                QUERY_PATH,
+                                relative,
+                                QUERY_OVERWRITE,
+                                Boolean.toString(overwrite),
+                                QUERY_SIZE,
+                                Long.toString(effectiveSize),
+                                QUERY_SHA256,
+                                digest));
+    }
+
+    /** 删除规范路径：与预览共用 {@code /data/file}，按方法区分 GET/DELETE。 */
+    public static String deletePath(String skillId, String path) {
+        String id = SkillInitProtocol.requireSkillId(skillId);
+        String relative = requireUploadFile(path, "数据文件");
+        return base(id, FILE_SUFFIX) + canonicalQuery(Map.of(QUERY_PATH, relative));
+    }
+
+    /** 可写文件路径：非空，且禁止上传可执行或脚本类型。 */
+    public static String requireUploadFile(String value, String label) {
+        String path = requireDataPath(value, label);
+        if (path.isEmpty()) {
+            throw new IllegalArgumentException(label + "路径必填");
+        }
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        int dot = name.lastIndexOf('.');
+        String suffix = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        if (FORBIDDEN_UPLOAD_SUFFIXES.contains(suffix)) {
+            throw new IllegalArgumentException(
+                    label + "不允许可执行或脚本类型（." + suffix + "）：" + path);
+        }
+        return path;
+    }
+
+    public static long requireUploadSize(long size) {
+        if (size < 1 || size > MAX_UPLOAD_FILE_BYTES) {
+            throw new IllegalArgumentException(
+                    "单文件大小需在 1–" + MAX_UPLOAD_FILE_BYTES + " 字节之间：" + size);
+        }
+        return size;
+    }
+
+    public static String requireSha256(String value) {
+        String digest = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        if (!SHA256.matcher(digest).matches()) {
+            throw new IllegalArgumentException("内容摘要必须是 64 位十六进制 SHA-256");
+        }
+        return digest;
     }
 
     public static String base(String skillId, String suffix) {

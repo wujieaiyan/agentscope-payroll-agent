@@ -27,11 +27,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * 技能数据只读浏览：目录树与文本预览。
+ * 技能数据浏览：目录树与文本预览。
  *
  * <p>只访问 {@code <skillRoot>/<id>/data}，路径由技能 ID 推导并逐段校验：
  * 规范化后必须在根目录内，最终 realpath 也必须在根目录内，任何符号链接与非常规文件一律拒绝。
- * 初始化中返回 409，避免读到半成品；失败状态仍允许浏览残留数据，便于排障。
+ * 数据既可能来自 setup 产物，也可能来自人工上传，因此未初始化但有文件的目录同样可浏览；
+ * 初始化中返回 409，避免读到半成品。
  */
 @Service
 public class SandboxDataService {
@@ -91,17 +92,12 @@ public class SandboxDataService {
         String relative = SkillDataProtocol.requireDataPath(path, "数据目录");
         int levels = SkillDataProtocol.requireDepth(depth);
         requireBrowsable(id);
-        Path dataDir = settings.skillDataDir(id);
-        Path rootReal = requireRoot(dataDir);
-        Path dir = resolve(dataDir, rootReal, relative);
-        if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
-            throw new NoSuchFileException(label(relative));
+        Path root = settings.skillDataDir(id);
+        if (relative.isEmpty() && !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+            // 还没有 setup 产物或人工上传：data/ 尚未创建，按空目录返回，页面可直接开始上传。
+            return new TreeResult(id, "", List.of(), false, SkillDataProtocol.MAX_ENTRIES);
         }
-        List<Entry> entries = new ArrayList<>();
-        boolean[] truncated = {false};
-        collect(dir, relative, levels, entries, truncated);
-        return new TreeResult(id, relative, List.copyOf(entries), truncated[0],
-                SkillDataProtocol.MAX_ENTRIES);
+        return treeAt(root, id, relative, levels);
     }
 
     public FileResult file(String skillId, String path, Integer maxBytes) throws IOException {
@@ -112,9 +108,28 @@ public class SandboxDataService {
         }
         int limit = SkillDataProtocol.requireMaxBytes(maxBytes);
         requireBrowsable(id);
-        Path dataDir = settings.skillDataDir(id);
-        Path rootReal = requireRoot(dataDir);
-        Path target = resolve(dataDir, rootReal, relative);
+        return fileAt(settings.skillDataDir(id), relative, limit);
+    }
+
+    /** 通用目录树：调用方已验证相对路径与状态门禁。 */
+    TreeResult treeAt(Path root, String skillId, String relative, int levels)
+            throws IOException {
+        Path rootReal = requireRoot(root);
+        Path dir = resolve(root, rootReal, relative);
+        if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            throw new NoSuchFileException(label(relative));
+        }
+        List<Entry> entries = new ArrayList<>();
+        boolean[] truncated = {false};
+        collect(dir, relative, levels, entries, truncated);
+        return new TreeResult(skillId, relative, List.copyOf(entries), truncated[0],
+                SkillDataProtocol.MAX_ENTRIES);
+    }
+
+    /** 通用文件预览；调用方负责路径规则与状态门禁。 */
+    FileResult fileAt(Path root, String relative, int limit) throws IOException {
+        Path rootReal = requireRoot(root);
+        Path target = resolve(root, rootReal, relative);
         if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalArgumentException("只能预览普通文件：" + relative);
         }
@@ -181,16 +196,11 @@ public class SandboxDataService {
         }
     }
 
-    private void requireBrowsable(String skillId) throws NoSuchFileException {
+    private void requireBrowsable(String skillId) {
         SkillInitStatus state = workspace.status(skillId);
         String status = state == null ? null : state.status();
         if (SkillInitStatus.INITIALIZING.equals(status)) {
             throw new DataNotReadyException("技能数据正在初始化，请等待完成后再浏览");
-        }
-        if (status == null
-                || SkillInitStatus.UNKNOWN.equals(status)
-                || SkillInitStatus.INVALID.equals(status)) {
-            throw new NoSuchFileException("技能数据未初始化");
         }
     }
 

@@ -1,5 +1,6 @@
 package io.agentscope.payroll.sandbox;
 
+import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -19,6 +20,8 @@ public class SandboxSettings {
     private final int initTimeoutMs;
     private final long initMaxBytes;
     private final int initConcurrency;
+    private final long uploadMaxFileBytes;
+    private final long uploadMaxBytes;
 
     public SandboxSettings() {
         this(
@@ -31,7 +34,9 @@ public class SandboxSettings {
                 env("PAYROLL_SANDBOX_INIT_IMAGE", "payroll-sandbox-init:local"),
                 intEnv("PAYROLL_SANDBOX_INIT_TIMEOUT_MS", SkillInitProtocol.DEFAULT_TIMEOUT_MS),
                 longEnv("PAYROLL_SANDBOX_INIT_MAX_BYTES", SkillInitProtocol.DEFAULT_MAX_BYTES),
-                intEnv("PAYROLL_SANDBOX_INIT_CONCURRENCY", 2));
+                intEnv("PAYROLL_SANDBOX_INIT_CONCURRENCY", 2),
+                longEnv("PAYROLL_SANDBOX_UPLOAD_MAX_FILE_BYTES", SkillDataProtocol.MAX_UPLOAD_FILE_BYTES),
+                longEnv("PAYROLL_SANDBOX_UPLOAD_MAX_BYTES", SkillDataProtocol.MAX_UPLOAD_TOTAL_BYTES));
     }
 
     public SandboxSettings(
@@ -50,7 +55,9 @@ public class SandboxSettings {
                 "payroll-sandbox-init:local",
                 SkillInitProtocol.DEFAULT_TIMEOUT_MS,
                 SkillInitProtocol.DEFAULT_MAX_BYTES,
-                2);
+                2,
+                SkillDataProtocol.MAX_UPLOAD_FILE_BYTES,
+                SkillDataProtocol.MAX_UPLOAD_TOTAL_BYTES);
     }
 
     public SandboxSettings(
@@ -64,6 +71,34 @@ public class SandboxSettings {
             int initTimeoutMs,
             long initMaxBytes,
             int initConcurrency) {
+        this(
+                token,
+                dockerBinary,
+                scriptImage,
+                maxConcurrency,
+                workDir,
+                skillRoot,
+                initImage,
+                initTimeoutMs,
+                initMaxBytes,
+                initConcurrency,
+                SkillDataProtocol.MAX_UPLOAD_FILE_BYTES,
+                SkillDataProtocol.MAX_UPLOAD_TOTAL_BYTES);
+    }
+
+    public SandboxSettings(
+            String token,
+            String dockerBinary,
+            String scriptImage,
+            int maxConcurrency,
+            String workDir,
+            String skillRoot,
+            String initImage,
+            int initTimeoutMs,
+            long initMaxBytes,
+            int initConcurrency,
+            long uploadMaxFileBytes,
+            long uploadMaxBytes) {
         this.token = token == null ? "" : token.trim();
         this.dockerBinary =
                 dockerBinary == null || dockerBinary.isBlank() ? "docker" : dockerBinary.trim();
@@ -89,6 +124,14 @@ public class SandboxSettings {
                                 : initMaxBytes,
                         SkillInitProtocol.HARD_MAX_BYTES);
         this.initConcurrency = Math.max(1, initConcurrency);
+        this.uploadMaxFileBytes =
+                Math.min(
+                        Math.max(1, uploadMaxFileBytes),
+                        SkillDataProtocol.MAX_UPLOAD_FILE_BYTES);
+        this.uploadMaxBytes =
+                Math.min(
+                        Math.max(this.uploadMaxFileBytes, uploadMaxBytes),
+                        SkillDataProtocol.HARD_MAX_UPLOAD_TOTAL_BYTES);
     }
 
     public boolean configured() {
@@ -140,6 +183,14 @@ public class SandboxSettings {
         return initConcurrency;
     }
 
+    public long uploadMaxFileBytes() {
+        return uploadMaxFileBytes;
+    }
+
+    public long uploadMaxBytes() {
+        return uploadMaxBytes;
+    }
+
     /** 技能工作区目录；ID 需先经协议校验。 */
     public Path skillDir(String skillId) {
         Path root = Paths.get(skillRoot).toAbsolutePath().normalize();
@@ -154,6 +205,7 @@ public class SandboxSettings {
     public Path skillDataDir(String skillId) {
         return skillDir(skillId).resolve("data");
     }
+
 
     private static String resolveSkillRoot(String configured, String workDir) {
         if (configured != null && !configured.isBlank()) {

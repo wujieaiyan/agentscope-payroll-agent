@@ -13,6 +13,9 @@ async function setup(page, options = {}) {
 
 const row = (page, id) => page.getByRole('row', { name: new RegExp(id) });
 
+const dataBrowser = (page) =>
+  page.locator('.data-browser').filter({ has: page.getByRole('tree', { name: 'data/ 目录树' }) });
+
 test.describe('技能列表', () => {
   test('统计行、需处理行与行菜单的危险动作门禁', async ({ page }) => {
     await setup(page);
@@ -83,7 +86,7 @@ test.describe('技能列表', () => {
     await expect(page).toHaveURL(/sort=id/);
     await expect(page.locator('tbody tr').first()).toContainText('payroll-policy-notes');
 
-    await page.locator('h1').click();
+    await page.locator('.page-head h2').click();
     await page.keyboard.press('/');
     await expect(search).toBeFocused();
   });
@@ -161,9 +164,9 @@ test.describe('技能工作台', () => {
     await page.goto('/platform/skills/poetry-skills');
     await page.getByRole('tab', { name: '数据' }).click();
 
-    const browser = page.locator('.data-browser');
+    const browser = dataBrowser(page);
     await expect(browser).toContainText('只读');
-    const tree = browser.getByRole('tree', { name: 'data 目录树' });
+    const tree = browser.getByRole('tree', { name: 'data/ 目录树' });
     await expect(tree.locator('.tree-row')).toHaveCount(3);
     await expect(tree).toContainText('poets');
 
@@ -185,16 +188,72 @@ test.describe('技能工作台', () => {
     await setup(page, { dataEmpty: true });
     await page.goto('/platform/skills/poetry-skills');
     await page.getByRole('tab', { name: '数据' }).click();
-    await expect(page.locator('.data-browser')).toContainText('目录为空');
+    await expect(dataBrowser(page)).toContainText('目录为空');
 
     await page.unrouteAll({ behavior: 'ignoreErrors' });
     await setup(page, { dataTreeBusy: true });
     await page.goto('/platform/skills/poetry-skills');
     await page.getByRole('tab', { name: '数据' }).click();
-    await expect(page.locator('.data-browser .browser-error')).toContainText(
-      '技能数据正在初始化，完成后可浏览'
+    await expect(dataBrowser(page).locator('.browser-error')).toContainText(
+      '技能数据正在初始化，请稍后重试'
     );
-    await expect(page.locator('.data-browser .tree-list')).toHaveCount(0);
+    await expect(dataBrowser(page).locator('.tree-list')).toHaveCount(0);
+  });
+
+  test('data/ 上传写入同一目录（含同名冲突）并可删除', async ({ page }) => {
+    const mock = await setup(page);
+    await page.goto('/platform/skills/poetry-skills');
+    await page.getByRole('tab', { name: '数据' }).click();
+
+    const browser = dataBrowser(page);
+    await expect(browser).toContainText('运行期只读');
+    await expect(browser).toContainText('重建数据会清空此目录');
+    const tree = browser.getByRole('tree', { name: 'data/ 目录树' });
+    await expect(tree.locator('.tree-row')).toHaveCount(3);
+    await expect(browser).toContainText('data/');
+
+    const hiddenInput = browser.locator('.hidden-input');
+    await hiddenInput.setInputFiles({
+      name: 'manual.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('x,y\n1,2\n'),
+    });
+    await expect(browser.getByRole('status')).toContainText('已上传 1 个文件到 data/');
+    await expect(tree.getByRole('treeitem', { name: /manual\.csv/ })).toBeVisible();
+    expect(mock.calls.dataUpload.at(-1)).toMatchObject({
+      id: 'poetry-skills',
+      path: 'manual.csv',
+      overwrite: false,
+    });
+
+    await hiddenInput.setInputFiles({
+      name: 'manual.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('x,y\n1,2\n'),
+    });
+    await expect(browser.locator('.browser-error')).toContainText('同名文件已存在');
+
+    await browser.getByRole('checkbox', { name: '覆盖同名' }).check();
+    await hiddenInput.setInputFiles({
+      name: 'upload.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('x,y\n1,2\n'),
+    });
+    await expect(browser.getByRole('status')).toContainText('已上传 1 个文件');
+    await expect(tree.getByRole('treeitem', { name: /upload\.csv/ })).toBeVisible();
+    expect(mock.calls.dataUpload.at(-1)).toMatchObject({
+      id: 'poetry-skills',
+      path: 'upload.csv',
+      overwrite: true,
+    });
+
+    await tree.getByRole('treeitem', { name: /upload\.csv/ }).click();
+    await browser.getByRole('button', { name: '删除文件' }).click();
+    const dialog = page.getByRole('dialog', { name: '删除数据文件' });
+    await dialog.getByRole('button', { name: '删除文件' }).click();
+    await expect(browser.getByRole('status')).toContainText('已删除 data/upload.csv');
+    await expect(tree.getByRole('treeitem', { name: /upload\.csv/ })).toHaveCount(0);
+    expect(mock.calls.dataDelete[0]).toMatchObject({ id: 'poetry-skills', path: 'upload.csv' });
   });
 
   test('/references 深链重定向到文件页签', async ({ page }) => {

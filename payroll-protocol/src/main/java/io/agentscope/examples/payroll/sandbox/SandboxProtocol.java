@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
 public final class SandboxProtocol {
 
     public static final String PATH = "/internal/sandbox/execute";
-    /** 执行容器内技能数据目录，只读挂载；脚本通过该绝对路径读取初始化后的数据。 */
+    /** 执行容器内技能数据目录，只读挂载；脚本通过该绝对路径读取 setup 产物与人工上传文件。 */
     public static final String DATA_MOUNT = "/data";
     public static final int DEFAULT_TIMEOUT_MS = 10_000;
     public static final int MAX_TIMEOUT_MS = 10_000;

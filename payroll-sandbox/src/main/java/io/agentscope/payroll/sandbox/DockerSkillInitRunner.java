@@ -158,7 +158,8 @@ public class DockerSkillInitRunner implements SkillInitRunner {
     }
 
     private List<String> command(
-            String containerName, Path packageDir, Path dataDir, String setupPath) {
+            String containerName, Path packageDir, Path dataDir, String setupPath)
+            throws IOException {
         List<String> command = new ArrayList<>();
         command.add(settings.dockerBinary());
         command.addAll(
@@ -196,10 +197,8 @@ public class DockerSkillInitRunner implements SkillInitRunner {
                         "type=bind,source=" + packageDir.toAbsolutePath() + ",target=/skill",
                         "--mount",
                         "type=bind,source=" + dataDir.toAbsolutePath()
-                                + ",target=/skill/data",
-                        "-w",
-                        "/skill",
-                        settings.initImage()));
+                                + ",target=/skill/data"));
+        command.addAll(List.of("-w", "/skill", settings.initImage()));
         command.addAll(
                 SkillInitProtocol.interpreters(setupPath, setupContent(packageDir, setupPath)));
         command.add("/skill/" + setupPath);

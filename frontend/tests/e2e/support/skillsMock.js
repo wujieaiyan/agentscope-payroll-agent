@@ -145,9 +145,12 @@ export function createSkillsMock(options = {}) {
     dataInit: [],
     dataTree: [],
     dataFile: [],
+    dataUpload: [],
+    dataDelete: [],
     rollbacks: [],
   };
   const createdSkills = new Map();
+  let uploadedFiles = [];
 
   async function reply(route, payload) {
     await route.fulfill(payload);
@@ -429,13 +432,16 @@ export function createSkillsMock(options = {}) {
   };
 
   function dataTreePayload(id, path) {
-    return {
-      skillId: id,
-      path,
-      entries: state.dataEmpty ? [] : DATA_TREE[path] || [],
-      truncated: false,
-      entryLimit: 500,
-    };
+    if (state.dataEmpty) {
+      return { skillId: id, path, entries: [], truncated: false, entryLimit: 500 };
+    }
+    const entries = [...(DATA_TREE[path] || [])];
+    if (!path) {
+      uploadedFiles.forEach((file) => {
+        if (!entries.some((entry) => entry.path === file.path)) entries.push({ ...file });
+      });
+    }
+    return { skillId: id, path, entries, truncated: false, entryLimit: 500 };
   }
 
   function dataFilePayload(path) {
@@ -449,7 +455,11 @@ export function createSkillsMock(options = {}) {
         mime: 'image/png',
       };
     }
-    const content = path === 'poets/li-bai.md' ? '# 李白\n静夜思。\n' : '{\n  "poets": ["li-bai"]\n}\n';
+    let content;
+    if (path === 'poets/li-bai.md') content = '# 李白\n静夜思。\n';
+    else if (path === 'index.json') content = '{\n  "poets": ["li-bai"]\n}\n';
+    else content = `文件 ${path}\n`;
+    const csv = path.endsWith('.csv');
     return {
       path,
       size: content.length,
@@ -458,7 +468,7 @@ export function createSkillsMock(options = {}) {
       encoding: 'utf-8',
       truncated: false,
       content,
-      mime: path.endsWith('.md') ? 'text/markdown' : 'application/json',
+      mime: csv ? 'text/csv' : path.endsWith('.md') ? 'text/markdown' : 'application/json',
     };
   }
 
@@ -638,6 +648,45 @@ export function createSkillsMock(options = {}) {
           return reply(route, fail(409, '技能数据正在初始化，请等待完成后再浏览'));
         }
         return reply(route, ok(dataTreePayload(id, relative)));
+      }
+      if (method === 'POST') {
+        const overwrite = url.searchParams.get('overwrite') === 'true';
+        calls.dataUpload.push({ id, path: relative, overwrite });
+        const existing = [...(DATA_TREE[''] || []), ...uploadedFiles].some(
+          (entry) => entry.path === relative
+        );
+        if (existing && !overwrite) {
+          return reply(route, fail(409, `数据文件已存在，请确认覆盖：${relative}`));
+        }
+        const name = relative.split('/').pop();
+        uploadedFiles = uploadedFiles.filter((entry) => entry.path !== relative);
+        uploadedFiles.push({
+          name,
+          path: relative,
+          type: 'file',
+          size: 12,
+          modifiedAt: UPDATED_AT,
+          isText: true,
+        });
+        return reply(
+          route,
+          ok({
+            originalName: name,
+            path: relative,
+            size: 12,
+            modifiedAt: UPDATED_AT,
+            sha256: 'a'.repeat(64),
+            overwritten: existing,
+          })
+        );
+      }
+      if (method === 'DELETE') {
+        calls.dataDelete.push({ id, path: relative });
+        uploadedFiles = uploadedFiles.filter((entry) => entry.path !== relative);
+        return reply(
+          route,
+          ok({ path: relative, size: 0, modifiedAt: UPDATED_AT, sha256: null, overwritten: false })
+        );
       }
       calls.dataFile.push({ id, path: relative });
       return reply(route, ok(dataFilePayload(relative)));

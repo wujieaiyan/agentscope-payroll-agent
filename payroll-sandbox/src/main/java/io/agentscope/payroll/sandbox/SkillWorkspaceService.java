@@ -181,6 +181,11 @@ public class SkillWorkspaceService {
         return stale;
     }
 
+    /**
+     * 删除初始化产物：清理 {@code data/}、临时包与状态文件，技能目录空了才一起删除。
+     *
+     * <p>人工上传也写入 {@code data/}，随重建/删除一起清空；目录内其他残留按普通文件保留。
+     */
     public SkillInitStatus delete(String skillId) {
         String id;
         try {
@@ -191,7 +196,12 @@ public class SkillWorkspaceService {
         if (running.contains(id)) {
             return SkillInitStatus.busy(id, "该技能正在初始化，无法删除工作区");
         }
-        deleteRecursively(skillDir(id));
+        Path skillDir = skillDir(id);
+        deleteRecursively(skillDir.resolve(DATA_DIR));
+        deleteRecursively(skillDir.resolve(PACKAGE_DIR));
+        deleteQuietly(skillDir.resolve(SkillInitState.STATE_FILE));
+        deleteQuietly(skillDir.resolve(SkillInitState.STATE_FILE + ".tmp"));
+        deleteIfEmpty(skillDir);
         return new SkillInitStatus(
                 SkillInitStatus.UNKNOWN,
                 id,
@@ -447,6 +457,29 @@ public class SkillWorkspaceService {
         } catch (IOException | UnsupportedOperationException e) {
             // Windows 磁盘不支持 POSIX 权限
         }
+    }
+
+    private static void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException e) {
+            log.debug("[技能初始化] 状态文件清理失败：{}", file);
+        }
+    }
+
+    /** 导入区为空时连技能目录一起收掉，保持“删除即回到未知”的语义。 */
+    private static void deleteIfEmpty(Path dir) {
+        if (!Files.isDirectory(dir)) {
+            return;
+        }
+        try (Stream<Path> children = Files.list(dir)) {
+            if (children.findAny().isPresent()) {
+                return;
+            }
+        } catch (IOException e) {
+            return;
+        }
+        deleteQuietly(dir);
     }
 
     static void deleteRecursively(Path root) {

@@ -225,6 +225,28 @@ class SkillWorkspaceServiceTest {
         assertEquals(SkillInitStatus.UNKNOWN, service.status("poetry").status());
     }
 
+    @Test
+    @DisplayName("删除数据清空 data/（含上传文件），其他残留按普通目录保留，清空后才删除技能目录")
+    void deleteClearsDataDir() throws Exception {
+        SkillWorkspaceService service = service(skipRunner(new AtomicBoolean()), 2);
+        Path skillDir = temp.resolve("skills/poetry");
+        Files.createDirectories(skillDir.resolve("data/reports"));
+        Files.writeString(skillDir.resolve("data/reports/a.csv"), "y,m");
+        Path legacy = skillDir.resolve("imports");
+        Files.createDirectories(legacy);
+        Files.writeString(legacy.resolve("manual.csv"), "y,m");
+
+        assertEquals(SkillInitStatus.UNKNOWN, service.delete("poetry").status());
+
+        assertFalse(Files.exists(skillDir.resolve("data")));
+        assertEquals("y,m", Files.readString(legacy.resolve("manual.csv")));
+
+        Files.delete(legacy.resolve("manual.csv"));
+        Files.delete(legacy);
+        service.delete("poetry");
+        assertFalse(Files.exists(skillDir));
+    }
+
     private SkillWorkspaceService service(SkillInitRunner runner, int concurrency) {
         return new SkillWorkspaceService(settings(concurrency), runner);
     }

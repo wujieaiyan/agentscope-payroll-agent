@@ -7,6 +7,7 @@ import io.agentscope.examples.payroll.domain.AgentDefinition;
 import io.agentscope.examples.payroll.domain.AppUser;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
+import io.agentscope.examples.payroll.domain.PayrollTooLargeException;
 import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
 import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
@@ -35,13 +36,18 @@ import io.agentscope.examples.payroll.skill.SkillVersionContent;
 import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -795,28 +801,7 @@ public class SkillAdminController {
         } catch (IllegalStateException | UnsupportedOperationException e) {
             throw new SandboxUnavailableException(e.getMessage(), e);
         }
-        List<Map<String, Object>> entries = new ArrayList<>();
-        if (tree.entries() != null) {
-            for (SandboxGateway.DataEntry entry : tree.entries()) {
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("name", entry.name());
-                item.put("path", entry.path());
-                item.put("type", entry.type());
-                item.put("size", entry.size());
-                item.put("modifiedAt", entry.modifiedAt());
-                if (entry.isText() != null) {
-                    item.put("isText", entry.isText());
-                }
-                entries.add(item);
-            }
-        }
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("skillId", detail.id());
-        result.put("path", tree.path());
-        result.put("entries", entries);
-        result.put("truncated", tree.truncated());
-        result.put("entryLimit", tree.entryLimit());
-        return ApiResponse.ok(result);
+        return ApiResponse.ok(treeMap(detail.id(), tree));
     }
 
     /** 预览 data/ 中的单个文本文件；二进制只回元数据，读取行为记入审计（不含正文）。 */
@@ -847,21 +832,83 @@ public class SkillAdminController {
         after.put("truncated", file.truncated());
         after.put("isText", file.isText());
         auditService.record("skill.data.read", "skill", detail.id(), null, after);
+        return ApiResponse.ok(fileMap(file));
+    }
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("path", file.path());
-        result.put("size", file.size());
-        result.put("modifiedAt", file.modifiedAt());
-        result.put("isText", file.isText());
-        if (file.encoding() != null) {
-            result.put("encoding", file.encoding());
+    /**
+     * 上传文件到 data/——与「重建数据」写入的是同一个目录。正文先落临时文件并计算 SHA-256，
+     * 再用摘要与长度签名转发给沙箱，避免为计算摘要把大文件整体读进内存。
+     * 初始化进行中由沙箱返回 409；重建会清空 data/，包括这里上传的文件。
+     */
+    @PostMapping("/{id}/data/file")
+    @RequirePermission(Permissions.SKILL_MANAGE)
+    public ApiResponse uploadDataFile(
+            @PathVariable String id,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(name = "path", required = false) String path,
+            @RequestParam(name = "overwrite", required = false) Boolean overwrite) {
+        SkillDetail detail = store.detail(id);
+        requireDataWritable(detail);
+        if (file == null || file.isEmpty()) {
+            throw new PayrollException("请选择要上传的文件");
         }
-        result.put("truncated", file.truncated());
-        if (file.content() != null) {
-            result.put("content", file.content());
+        String relative =
+                SkillDataProtocol.requireUploadFile(
+                        path == null || path.isBlank() ? file.getOriginalFilename() : path,
+                        "数据文件");
+        Path temp = null;
+        try {
+            temp = Files.createTempFile("payroll-data-upload-", ".bin");
+            DigestResult staged = stage(file, temp);
+            SandboxGateway.DataWrite result;
+            try (InputStream body = Files.newInputStream(temp)) {
+                result =
+                        gateway.uploadDataFile(
+                                detail.id(),
+                                relative,
+                                Boolean.TRUE.equals(overwrite),
+                                staged.size(),
+                                staged.sha256(),
+                                body);
+            }
+            Map<String, Object> after = new LinkedHashMap<>();
+            after.put("skillId", detail.id());
+            after.put("path", result.path());
+            after.put("sizeBytes", result.size());
+            after.put("sha256", result.sha256());
+            after.put("overwritten", result.overwritten());
+            putVersion(after, detail);
+            auditService.record("skill.data.upload", "skill", detail.id(), null, after);
+            return ApiResponse.ok(dataWriteMap(result, file.getOriginalFilename()));
+        } catch (IOException e) {
+            throw new PayrollException("保存上传文件失败：" + e.getMessage());
+        } finally {
+            if (temp != null) {
+                try {
+                    Files.deleteIfExists(temp);
+                } catch (IOException ignored) {
+                    // 临时文件清理失败不影响上传结果。
+                }
+            }
         }
-        result.put("mime", file.mime());
-        return ApiResponse.ok(result);
+    }
+
+    /** 删除 data/ 中的单个文件；与上传共用路径，重建同样会清掉这些文件。 */
+    @DeleteMapping("/{id}/data/file")
+    @RequirePermission(Permissions.SKILL_MANAGE)
+    public ApiResponse deleteDataFile(
+            @PathVariable String id, @RequestParam(name = "path", required = false) String path) {
+        SkillDetail detail = store.detail(id);
+        requireDataWritable(detail);
+        SandboxGateway.DataWrite deleted = gateway.deleteDataFile(detail.id(), path);
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("skillId", detail.id());
+        before.put("path", deleted.path());
+        before.put("sizeBytes", deleted.size());
+        before.put("sha256", deleted.sha256());
+        putVersion(before, detail);
+        auditService.record("skill.data.upload.delete", "skill", detail.id(), before, null);
+        return ApiResponse.ok(dataWriteMap(deleted, null));
     }
 
     @DeleteMapping("/{id}")
@@ -1594,14 +1641,13 @@ public class SkillAdminController {
         return SkillInitRequirements.setupPath(setupCommand(detail.metadata()), paths);
     }
 
-    /** 数据浏览前置：只有 db 源、声明了 setup 且沙箱启用的技能才有 data/ 可看。 */
+    /**
+     * 数据浏览前置：只有 db 源、沙箱启用的技能才有 data/ 可看。技能未声明 setup 时也允许浏览——
+     * 人工上传的文件就落在同一个 data/ 目录里。
+     */
     private void requireDataBrowsable(SkillDetail detail) {
         if (detail.source() != null && !"db".equalsIgnoreCase(detail.source())) {
             throw new PayrollException("当前来源不提供数据状态，无法浏览 data/");
-        }
-        if (setupPathOf(detail) == null) {
-            throw new PayrollException(
-                    "该技能未声明初始化脚本（frontmatter setup 或 setup.sh），无需浏览数据");
         }
         if (!gateway.enabled()) {
             throw new PayrollException(
@@ -1612,6 +1658,107 @@ public class SkillAdminController {
     private static String setupCommand(Map<String, Object> metadata) {
         Object raw = metadata == null ? null : metadata.get("setup");
         return raw == null ? null : String.valueOf(raw);
+    }
+
+    /** 数据写入前置：db 源且沙箱启用；不要求声明 setup，也不要求 data/ 已初始化。 */
+    private void requireDataWritable(SkillDetail detail) {
+        if (detail.source() != null && !"db".equalsIgnoreCase(detail.source())) {
+            throw new PayrollException("当前来源不提供技能数据目录，请先切换到 db 源技能");
+        }
+        if (!gateway.enabled()) {
+            throw new PayrollException(
+                    "沙箱服务未启用，无法上传技能数据（检查 PAYROLL_SKILL_EXEC_ENABLED / PAYROLL_SANDBOX_URL / PAYROLL_SANDBOX_TOKEN）");
+        }
+    }
+
+    /** 把上传内容写到临时文件并计算长度与 SHA-256；超过单文件上限立即失败。 */
+    private static DigestResult stage(MultipartFile file, Path target) throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("当前运行时缺少 SHA-256 实现", e);
+        }
+        long total = 0;
+        byte[] buffer = new byte[64 * 1024];
+        try (InputStream in = file.getInputStream();
+                OutputStream out = Files.newOutputStream(target)) {
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                total += read;
+                if (total > SkillDataProtocol.MAX_UPLOAD_FILE_BYTES) {
+                    throw new PayrollTooLargeException(
+                            "单文件上限 " + SkillDataProtocol.MAX_UPLOAD_FILE_BYTES + " 字节，请压缩后重试");
+                }
+                digest.update(buffer, 0, read);
+                out.write(buffer, 0, read);
+            }
+        }
+        if (total == 0) {
+            throw new PayrollException("上传文件内容为空");
+        }
+        return new DigestResult(total, HexFormat.of().formatHex(digest.digest()));
+    }
+
+    private record DigestResult(long size, String sha256) {
+    }
+
+    private static Map<String, Object> treeMap(String skillId, SandboxGateway.DataTree tree) {
+        List<Map<String, Object>> entries = new ArrayList<>();
+        if (tree.entries() != null) {
+            for (SandboxGateway.DataEntry entry : tree.entries()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("name", entry.name());
+                item.put("path", entry.path());
+                item.put("type", entry.type());
+                item.put("size", entry.size());
+                item.put("modifiedAt", entry.modifiedAt());
+                if (entry.isText() != null) {
+                    item.put("isText", entry.isText());
+                }
+                entries.add(item);
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("skillId", skillId);
+        result.put("path", tree.path());
+        result.put("entries", entries);
+        result.put("truncated", tree.truncated());
+        result.put("entryLimit", tree.entryLimit());
+        return result;
+    }
+
+    private static Map<String, Object> fileMap(SandboxGateway.DataFile file) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("path", file.path());
+        result.put("size", file.size());
+        result.put("modifiedAt", file.modifiedAt());
+        result.put("isText", file.isText());
+        if (file.encoding() != null) {
+            result.put("encoding", file.encoding());
+        }
+        result.put("truncated", file.truncated());
+        if (file.content() != null) {
+            result.put("content", file.content());
+        }
+        result.put("mime", file.mime());
+        return result;
+    }
+
+    private static Map<String, Object> dataWriteMap(
+            SandboxGateway.DataWrite file, String originalName) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (originalName != null) {
+            result.put("originalName", originalName);
+        }
+        result.put("path", file.path());
+        result.put("size", file.size());
+        result.put("modifiedAt", file.modifiedAt());
+        if (file.sha256() != null) {
+            result.put("sha256", file.sha256());
+        }
+        result.put("overwritten", file.overwritten());
+        return result;
     }
 
     private static Map<String, Object> dataMap(

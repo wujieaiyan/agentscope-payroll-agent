@@ -148,10 +148,12 @@ class SandboxDataServiceTest {
     }
 
     @Test
-    @DisplayName("未初始化 404 语义，初始化中 409 语义，失败状态仍可排障")
+    @DisplayName("未初始化但有文件仍可浏览，初始化中 409，失败状态仍可排障")
     void mapsWorkspaceStates() throws Exception {
         when(workspace.status(SKILL)).thenReturn(SkillInitStatus.unknown(SKILL));
-        assertThrows(NoSuchFileException.class, () -> service.tree(SKILL, null, 1));
+        assertEquals(1, service.tree(SKILL, null, 1).entries().size());
+        assertThrows(
+                NoSuchFileException.class, () -> service.tree(SKILL, "missing", 1));
 
         when(workspace.status(SKILL))
                 .thenReturn(SkillInitStatus.initializing(SKILL, "setup.sh", 1L));
@@ -167,12 +169,16 @@ class SandboxDataServiceTest {
     }
 
     @Test
-    @DisplayName("状态就绪但 data 目录缺失时仍返回 404")
-    void missingDataDirIsNotFound() throws Exception {
+    @DisplayName("data 目录尚未创建时返回空树，页面可直接开始上传")
+    void missingDataDirIsEmptyTree() throws Exception {
         Files.delete(dataDir().resolve("reports"));
         Files.delete(dataDir());
 
-        assertThrows(NoSuchFileException.class, () -> service.tree(SKILL, null, 1));
+        SandboxDataService.TreeResult tree = service.tree(SKILL, null, 1);
+
+        assertEquals("", tree.path());
+        assertTrue(tree.entries().isEmpty());
+        assertFalse(tree.truncated());
     }
 
     @Test
@@ -201,6 +207,24 @@ class SandboxDataServiceTest {
                 tree.entries().stream().map(SandboxDataService.Entry::name).toList());
         assertEquals("ok", service.file(SKILL, "正常.txt", null).content());
         assertEquals("x", service.file(SKILL, "with space.txt", null).content());
+    }
+
+    @Test
+    @DisplayName("旧版 imports 目录不再特殊处理，按普通目录列出")
+    void legacyImportsDirIsOrdinary() throws Exception {
+        Path legacy = dataDir().resolve("imports");
+        Files.createDirectories(legacy);
+        Files.writeString(legacy.resolve("manual.csv"), "y,m");
+        Files.writeString(dataDir().resolve("a.txt"), "a");
+
+        SandboxDataService.TreeResult tree = service.tree(SKILL, null, 2);
+
+        assertTrue(
+                tree.entries().stream()
+                        .anyMatch(entry -> "imports/manual.csv".equals(entry.path())));
+        assertTrue(
+                tree.entries().stream()
+                        .anyMatch(entry -> "a.txt".equals(entry.path())));
     }
 
     private Path dataDir() {

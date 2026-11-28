@@ -50,6 +50,29 @@ public interface SandboxGateway {
         throw new UnsupportedOperationException("当前沙箱客户端不支持技能数据浏览");
     }
 
+    /**
+     * 上传一个文件到技能 {@code data/}；实现方必须校验 {@code size} 与 {@code sha256}
+     * 与正文一致，返回落盘后的元数据。正文流由调用方负责关闭。
+     */
+    default DataWrite uploadDataFile(
+            String skillId,
+            String path,
+            boolean overwrite,
+            long size,
+            String sha256,
+            java.io.InputStream body) {
+        throw new UnsupportedOperationException("当前沙箱客户端不支持数据文件上传");
+    }
+
+    /** 删除 {@code data/} 中的单个文件；未实现时同上。 */
+    default DataWrite deleteDataFile(String skillId, String path) {
+        throw new UnsupportedOperationException("当前沙箱客户端不支持数据文件删除");
+    }
+
+    record DataWrite(
+            String path, long size, long modifiedAt, String sha256, boolean overwritten) {
+    }
+
     record DataEntry(
             String name, String path, String type, long size, long modifiedAt, Boolean isText) {
     }

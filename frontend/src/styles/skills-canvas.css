@@ -4,11 +4,6 @@
    ================================================================== */
 
 .skills-canvas {
-  --primary: #2f6feb;
-  --primary-dark: #2457c4;
-  --primary-soft: #edf3ff;
-  --primary-tint: #f4f8ff;
-
   width: 100%;
   max-width: 1280px;
   margin: 0 auto;
@@ -18,33 +13,15 @@
   gap: 16px;
 }
 
-/* -------------------------------------------------- 页头 / 汇总行 */
-
-.skills-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.skills-head h1 {
+/* 列表页沿用管理台内置列表的画布：占满内容区，页头/工具栏/表格/分页全用标准页原语。 */
+.skills-canvas.skills-list-page {
+  max-width: 1400px;
   margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.25;
-  color: var(--text);
+  padding: 0;
 }
-.skills-head .skills-sub {
-  margin: 6px 0 0;
-  font-size: 13px;
-  color: var(--muted);
-}
-.skills-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
+
+/* -------------------------------------------------- 按钮图标 */
+
 .skills-canvas button.primary svg,
 .skills-canvas button.ghost svg,
 .skills-canvas .link-btn svg {
@@ -118,16 +95,6 @@
 
 /* -------------------------------------------------- 面板 / 工具栏 */
 
-.skills-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-.skills-panel--flush {
-  overflow: hidden;
-}
-
 .panel-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -165,38 +132,8 @@
   padding: 0;
 }
 
-.skills-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  flex-wrap: wrap;
-}
 .skills-toolbar .spacer {
   flex: 1;
-}
-.skills-search {
-  position: relative;
-  flex: 0 1 300px;
-  min-width: 250px;
-}
-.skills-search input {
-  width: 100%;
-  padding-left: 30px;
-}
-.skills-search .search-icon {
-  position: absolute;
-  left: 9px;
-  top: 50%;
-  width: 15px;
-  height: 15px;
-  transform: translateY(-50%);
-  color: var(--faint);
-  pointer-events: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
 }
 .skills-toolbar select {
   min-width: 104px;
@@ -211,25 +148,26 @@
 .skills-chips {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 .skills-chips button {
-  height: 28px;
+  height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs, 6px);
   background: var(--surface);
   color: var(--text-soft);
   font-size: 12.5px;
   cursor: pointer;
 }
 .skills-chips button:hover {
-  border-color: var(--border-strong);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 .skills-chips button.active {
   background: var(--primary-soft);
-  border-color: #d5e2fb;
+  border-color: var(--primary);
   color: var(--primary-dark);
   font-weight: 600;
 }
@@ -306,57 +244,21 @@
 
 /* -------------------------------------------------- 列表表格 */
 
-.skills-table-wrap {
-  border-top: 1px solid var(--border);
-}
-table.skills-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 13px;
-}
-table.skills-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  padding: 9px 14px;
-  text-align: left;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--muted);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-table.skills-table thead th.col-skill {
+table.skills-table th.col-skill {
   min-width: 330px;
 }
-table.skills-table thead th.col-actions {
-  width: 120px;
-  text-align: right;
-}
-table.skills-table tbody td {
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-table.skills-table tbody tr:last-child td {
-  border-bottom: none;
+table.skills-table th.col-actions {
+  width: 136px;
 }
 table.skills-table tbody tr {
   cursor: pointer;
 }
-table.skills-table tbody tr:hover {
-  background: var(--surface-2);
-}
 table.skills-table tbody tr.row-attention {
   background: #fffdf8;
+  box-shadow: inset 3px 0 0 var(--st-warn);
 }
 table.skills-table tbody tr.row-attention:hover {
   background: var(--st-warn-soft);
-}
-table.skills-table td.col-actions {
-  text-align: right;
 }
 table.skills-table td.num {
   font-variant-numeric: tabular-nums;
@@ -444,45 +346,20 @@ a.link-btn {
 
 /* -------------------------------------------------- 分页 */
 
-.skills-pager {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  font-size: 12.5px;
-  color: var(--muted);
-}
 .skills-pages {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 .skills-pages button {
-  min-width: 28px;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.skills-pages button:hover {
-  background: var(--surface-3);
+  min-width: 32px;
+  font-variant-numeric: tabular-nums;
 }
 .skills-pages button.active {
   background: var(--primary-soft);
-  border-color: #d5e2fb;
+  border-color: var(--primary);
   color: var(--primary-dark);
   font-weight: 600;
-}
-.skills-pages button:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 .skills-pages .gap {
   padding: 0 4px;
@@ -620,10 +497,7 @@ a.link-btn {
   .skill-editor-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-  .skills-table-wrap {
-    overflow-x: auto;
-  }
-  table.skills-table thead th.col-skill {
+  table.skills-table th.col-skill {
     min-width: 260px;
   }
 }

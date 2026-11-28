@@ -1,7 +1,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
-import { api } from '../../../api/http';
+import { api, uploadForm } from '../../../api/http';
 import { formatSize, formatTimestamp } from '../../../utils/format';
+import ConfirmDialog from '../../../components/ui/ConfirmDialog.vue';
 
 const PREVIEW_BYTES = 256 * 1024;
 
@@ -10,6 +11,8 @@ const props = defineProps({
   status: { type: String, default: 'UNKNOWN' },
   sandboxEnabled: { type: Boolean, default: true },
 });
+
+const emit = defineEmits(['changed']);
 
 const children = ref({});
 const expanded = ref(new Set(['']));
@@ -23,8 +26,16 @@ const fileLoading = ref(false);
 const fileError = ref('');
 const treeRef = ref(null);
 
+const uploadInput = ref(null);
+const uploading = ref(false);
+const overwrite = ref(false);
+const uploadNote = ref('');
+const uploadError = ref('');
+const deleteTarget = ref(null);
+const deleting = ref(false);
+
 const canBrowse = computed(
-  () => props.sandboxEnabled && (props.status === 'READY' || props.status === 'FAILED')
+  () => props.sandboxEnabled && props.status !== 'INITIALIZING'
 );
 const rootEntries = computed(() => children.value[''] || []);
 const rootLoading = computed(() => Boolean(loadingDirs.value['']));
@@ -38,6 +49,13 @@ const selectedSegments = computed(() =>
 const treeTruncatedHint = computed(() =>
   treeTruncated.value ? '目录项过多，仅显示前 500 项，请缩小范围' : ''
 );
+const rootLabel = 'data/';
+const uploadDir = computed(() => {
+  if (!selectedPath.value) return '';
+  const node = visibleNodes.value.find((item) => item.path === selectedPath.value);
+  if (node && node.type === 'dir') return node.path;
+  return selectedPath.value.split('/').slice(0, -1).join('/');
+});
 
 function flatten(path, depth = 0) {
   const list = [];
@@ -51,15 +69,17 @@ function flatten(path, depth = 0) {
 }
 
 function friendlyError(error) {
-  if (error?.status === 409) return '技能数据正在初始化，完成后可浏览';
+  if (error?.status === 409) return '技能数据正在初始化，请稍后重试';
   if (error?.status === 404) return '技能数据或该路径不存在';
   if (error?.status === 503) return '沙箱服务暂时不可用，请稍后重试';
   return error?.message || '加载失败';
 }
 
-function treeUrl(path) {
-  const query = new URLSearchParams({ path, depth: '1' });
-  return `/api/admin/skills/${encodeURIComponent(props.skillId)}/data/tree?${query}`;
+function browseUrl(kind, path) {
+  const query = new URLSearchParams({ path });
+  if (kind === 'tree') query.set('depth', '1');
+  else query.set('maxBytes', String(PREVIEW_BYTES));
+  return `/api/admin/skills/${encodeURIComponent(props.skillId)}/data/${kind}?${query}`;
 }
 
 async function loadDir(path, force = false) {
@@ -67,7 +87,7 @@ async function loadDir(path, force = false) {
   if (!force && children.value[path]) return;
   loadingDirs.value = { ...loadingDirs.value, [path]: true };
   try {
-    const data = await api(treeUrl(path));
+    const data = await api(browseUrl('tree', path));
     children.value = { ...children.value, [path]: data?.entries || [] };
     if (path === '') {
       treeTruncated.value = Boolean(data?.truncated);
@@ -93,6 +113,8 @@ async function reset() {
   selectedPath.value = '';
   file.value = null;
   fileError.value = '';
+  uploadNote.value = '';
+  uploadError.value = '';
   await loadDir('', true);
 }
 
@@ -114,13 +136,7 @@ async function openFile(entry) {
   fileError.value = '';
   fileLoading.value = true;
   try {
-    const query = new URLSearchParams({
-      path: entry.path,
-      maxBytes: String(PREVIEW_BYTES),
-    });
-    file.value = await api(
-      `/api/admin/skills/${encodeURIComponent(props.skillId)}/data/file?${query}`
-    );
+    file.value = await api(browseUrl('file', entry.path));
   } catch (error) {
     fileError.value = friendlyError(error);
   } finally {
@@ -160,6 +176,88 @@ function onSkillChange() {
   reset();
 }
 
+function pickFiles() {
+  if (!canBrowse.value || uploading.value) return;
+  uploadError.value = '';
+  uploadNote.value = '';
+  uploadInput.value?.click();
+}
+
+function uploadMessage(error) {
+  if (error?.status === 409) return '同名文件已存在；勾选「覆盖同名」后重试';
+  if (error?.status === 413) return error.message || '文件超过大小上限';
+  if (error?.status === 400) return error.message || '文件名或内容不合法';
+  return error?.message || '上传失败';
+}
+
+async function onUploadPicked(event) {
+  const picked = Array.from(event.target.files || []);
+  event.target.value = '';
+  if (!picked.length) return;
+  const dir = uploadDir.value;
+  uploading.value = true;
+  uploadError.value = '';
+  uploadNote.value = '';
+  const failed = [];
+  let uploaded = 0;
+  for (const raw of picked) {
+    const target = dir ? `${dir}/${raw.name}` : raw.name;
+    const query = new URLSearchParams({ path: target });
+    if (overwrite.value) query.set('overwrite', 'true');
+    const form = new FormData();
+    form.append('file', raw);
+    try {
+      await uploadForm(
+        `/api/admin/skills/${encodeURIComponent(props.skillId)}/data/file?${query}`,
+        form
+      );
+      uploaded += 1;
+    } catch (error) {
+      failed.push(`${raw.name}：${uploadMessage(error)}`);
+    }
+  }
+  uploading.value = false;
+  if (uploaded) {
+    uploadNote.value = `已上传 ${uploaded} 个文件到 data/${dir ? `/${dir}` : ''}`;
+    await loadDir(dir, true);
+    emit('changed');
+  }
+  if (failed.length) uploadError.value = failed.join('；');
+}
+
+function askDelete() {
+  if (!selectedPath.value || deleting.value) return;
+  deleteTarget.value = selectedPath.value;
+}
+
+async function confirmDelete() {
+  if (!deleteTarget.value || deleting.value) return;
+  const path = deleteTarget.value;
+  const dir = path.split('/').slice(0, -1).join('/');
+  deleting.value = true;
+  try {
+    const query = new URLSearchParams({ path });
+    await api(`/api/admin/skills/${encodeURIComponent(props.skillId)}/data/file?${query}`, {
+      method: 'DELETE',
+    });
+    deleteTarget.value = null;
+    if (selectedPath.value === path) {
+      selectedPath.value = '';
+      file.value = null;
+      fileError.value = '';
+    }
+    uploadError.value = '';
+    uploadNote.value = `已删除 data/${path}`;
+    await loadDir(dir, true);
+    emit('changed');
+  } catch (error) {
+    uploadError.value = `删除失败：${error?.message || '未知错误'}`;
+    deleteTarget.value = null;
+  } finally {
+    deleting.value = false;
+  }
+}
+
 watch(
   () => [props.skillId, canBrowse.value],
   ([id, browse], previous) => {
@@ -176,39 +274,64 @@ watch(
     <header class="browser-head">
       <div>
         <h4>数据文件</h4>
-        <p class="browser-sub">只读浏览沙箱 data/；内容由初始化脚本生成，不可在此修改。</p>
+        <p class="browser-sub">
+          可上传文件到 data/，与初始化脚本写入的是同一目录；运行期只读挂载到 /data。
+          重建数据会清空此目录（含上传文件）。
+        </p>
       </div>
       <div class="browser-actions">
+        <label class="overwrite-toggle">
+          <input v-model="overwrite" type="checkbox" :disabled="uploading" />
+          覆盖同名
+        </label>
+        <button class="primary sm" :disabled="!canBrowse || uploading" @click="pickFiles">
+          {{ uploading ? '上传中…' : '上传文件' }}
+        </button>
+        <input
+          ref="uploadInput"
+          class="hidden-input"
+          type="file"
+          multiple
+          @change="onUploadPicked"
+        />
         <button class="subtle sm" :disabled="!canBrowse || rootLoading" @click="reset">
           刷新
         </button>
-        <span class="readonly-pill">只读</span>
+        <span class="readonly-pill">运行期只读</span>
       </div>
     </header>
 
+    <p class="upload-target">
+      上传到 <code class="mono">data/{{ uploadDir }}</code>
+    </p>
+    <p v-if="uploadNote" class="browser-hint" role="status">{{ uploadNote }}</p>
+    <p v-if="uploadError" class="browser-error" role="alert">{{ uploadError }}</p>
+
     <div v-if="!sandboxEnabled" class="browser-note" role="status">
-      沙箱未启用，无法浏览技能数据。
+      沙箱未启用，无法浏览或上传技能数据。
     </div>
     <div v-else-if="status === 'INITIALIZING'" class="browser-note" role="status">
-      技能数据正在初始化，完成后会自动出现文件树。
+      技能数据正在初始化，完成后可继续浏览与上传。
     </div>
     <div v-else-if="status === 'UNKNOWN'" class="browser-note" role="status">
-      技能数据尚未初始化。请先在上方执行「初始化数据」。
+      尚未初始化数据；上传的文件会直接写入 data/，脚本运行时可读到。
     </div>
     <div v-else-if="status === 'FAILED'" class="browser-note warn" role="status">
-      上次初始化失败，以下为残留数据，仅供参考。
+      上次初始化失败，以下为残留数据，仅供参考；上传仍会写入 data/。
     </div>
 
     <div v-if="canBrowse" class="browser-grid">
-      <div ref="treeRef" class="tree-pane" role="tree" aria-label="data 目录树" @keydown="onTreeKeydown">
+      <div ref="treeRef" class="tree-pane" role="tree" :aria-label="`${rootLabel} 目录树`" @keydown="onTreeKeydown">
         <div v-if="treeError" class="browser-error" role="alert">
           <span>{{ treeError }}</span>
           <button class="subtle sm" @click="reset">重试</button>
         </div>
         <div v-else-if="!rootLoaded" class="browser-empty">加载中…</div>
         <template v-else>
-          <div class="tree-root mono">data/</div>
-          <p v-if="!rootEntries.length" class="browser-empty">目录为空</p>
+          <div class="tree-root mono">{{ rootLabel }}</div>
+          <p v-if="!rootEntries.length" class="browser-empty">
+            目录为空，点击右上角「上传文件」写入 data/
+          </p>
           <ul v-else class="tree-list">
             <li
               v-for="node in visibleNodes"
@@ -256,6 +379,14 @@ watch(
             <span>{{ formatTimestamp(file.modifiedAt) }}</span>
             <span class="mono">{{ file.mime }}</span>
             <span v-if="!file.isText" class="badge">二进制</span>
+            <button
+              v-if="file"
+              class="subtle sm danger-text"
+              :disabled="deleting"
+              @click="askDelete"
+            >
+              删除文件
+            </button>
           </div>
           <p v-if="file.truncated" class="browser-hint warn">
             仅预览前 {{ formatSize(PREVIEW_BYTES) }}，完整文件未加载。
@@ -267,6 +398,19 @@ watch(
         </template>
       </div>
     </div>
+
+    <ConfirmDialog
+      :open="Boolean(deleteTarget)"
+      title="删除数据文件"
+      confirm-text="删除文件"
+      :danger="true"
+      :busy="deleting"
+      @update:open="deleteTarget = null"
+      @confirm="confirmDelete"
+    >
+      <p class="mono">data/{{ deleteTarget }}</p>
+      <p>删除后运行期容器将不再看到该文件，且不可恢复。</p>
+    </ConfirmDialog>
   </section>
 </template>
 
@@ -310,6 +454,22 @@ watch(
   background: var(--surface-3);
   color: var(--muted);
   font-size: 11px;
+}
+.overwrite-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+.hidden-input {
+  display: none;
+}
+.upload-target {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 .browser-note {
   padding: 8px 12px;
@@ -465,6 +625,10 @@ watch(
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--muted);
+}
+.danger-text {
+  margin-left: auto;
+  color: var(--st-bad, #c92a2a);
 }
 .preview-pre {
   margin: 10px 0 0;

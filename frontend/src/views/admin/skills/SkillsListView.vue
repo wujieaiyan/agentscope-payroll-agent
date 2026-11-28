@@ -432,25 +432,19 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="page skills-canvas">
-    <header class="skills-head">
+  <div class="page skills-canvas skills-list-page">
+    <div class="page-head">
       <div>
-        <h1>技能</h1>
-        <p class="skills-sub">让智能体按固定流程和资料工作。保存即生成版本，可随时回滚。</p>
+        <h2>技能</h2>
+        <p>让智能体按固定流程和资料工作。保存即生成版本，可随时回滚。</p>
       </div>
-      <div class="skills-head-actions">
-        <button class="ghost" type="button" :disabled="!writable" @click="goImport">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 15V4M8 8l4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
-          </svg>
-          导入
-        </button>
+      <div class="toolbar">
+        <button class="ghost" type="button" :disabled="!writable" @click="goImport">导入</button>
         <button class="primary" type="button" :disabled="!writable" @click="goCreate">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
           新建技能
         </button>
       </div>
-    </header>
+    </div>
 
     <div v-if="loaded && !writable" class="skills-readonly" role="status">
       当前技能存储只读，可以浏览与打开技能，新增、导入、编辑与删除均不可用。
@@ -483,290 +477,285 @@ onUnmounted(() => {
       </span>
     </div>
 
-    <div class="skills-panel">
-      <div class="skills-toolbar">
-        <label class="skills-search">
-          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.2-3.2" />
-          </svg>
-          <input
-            ref="searchEl"
-            v-model="keywordInput"
-            class="search"
-            type="search"
-            placeholder="搜索名称、ID 或说明"
-            aria-label="搜索技能"
-            @input="onKeywordInput"
-            @keyup.enter="commitKeyword"
-          />
-          <kbd>/</kbd>
-        </label>
+    <div class="toolbar skills-toolbar">
+      <input
+        ref="searchEl"
+        v-model="keywordInput"
+        class="skills-search-input"
+        type="search"
+        placeholder="搜索名称、ID 或说明"
+        aria-label="搜索技能"
+        style="width: 220px"
+        @input="onKeywordInput"
+        @keyup.enter="commitKeyword"
+      />
 
-        <div class="skills-chips" role="group" aria-label="类型筛选">
-          <button
-            v-for="chip in viewChips"
-            :key="chip.key"
-            type="button"
-            :class="{ active: queryView === chip.key }"
-            :aria-pressed="queryView === chip.key"
-            @click="setView(chip.key)"
-          >
-            {{ chip.label }}<span class="count">{{ chip.count }}</span>
-          </button>
-        </div>
-
-        <div class="spacer"></div>
-
-        <select
-          :value="queryDataStatus"
-          aria-label="数据状态"
-          @change="setDataStatus($event.target.value)"
+      <div class="skills-chips" role="group" aria-label="类型筛选">
+        <button
+          v-for="chip in viewChips"
+          :key="chip.key"
+          type="button"
+          :class="{ active: queryView === chip.key }"
+          :aria-pressed="queryView === chip.key"
+          @click="setView(chip.key)"
         >
-          <option value="all">全部数据状态</option>
-          <option value="ready">就绪</option>
-          <option value="attention">需处理</option>
-          <option value="none">无需数据</option>
-        </select>
+          {{ chip.label }}<span class="count">{{ chip.count }}</span>
+        </button>
+      </div>
 
-        <select :value="querySort" aria-label="排序" @change="setSort($event.target.value)">
-          <option value="updated">最近更新</option>
-          <option value="id">名称</option>
-          <option value="size">大小</option>
-        </select>
+      <div class="spacer"></div>
 
-        <div ref="colsetEl" class="skills-colset">
-          <button
-            class="btn-icon"
-            type="button"
-            aria-label="列设置"
-            aria-haspopup="dialog"
-            :aria-expanded="colOpen"
-            @click="colOpen = !colOpen"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="4" y="5" width="16" height="14" rx="2" />
-              <path d="M10 5v14" />
-            </svg>
-          </button>
-          <div v-if="colOpen" class="skills-colset-pop" role="dialog" aria-label="列设置">
-            <label>
-              <input v-model="columns.source" type="checkbox" @change="persistColumns" />
-              来源
-            </label>
-            <label>
-              <input v-model="columns.fileCount" type="checkbox" @change="persistColumns" />
-              文件数
-            </label>
-          </div>
+      <select
+        :value="queryDataStatus"
+        aria-label="数据状态"
+        @change="setDataStatus($event.target.value)"
+      >
+        <option value="all">全部数据状态</option>
+        <option value="ready">就绪</option>
+        <option value="attention">需处理</option>
+        <option value="none">无需数据</option>
+      </select>
+
+      <select :value="querySort" aria-label="排序" @change="setSort($event.target.value)">
+        <option value="updated">最近更新</option>
+        <option value="id">名称</option>
+        <option value="size">大小</option>
+      </select>
+
+      <div ref="colsetEl" class="skills-colset">
+        <button
+          class="btn-icon"
+          type="button"
+          aria-label="列设置"
+          aria-haspopup="dialog"
+          :aria-expanded="colOpen"
+          @click="colOpen = !colOpen"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="5" width="16" height="14" rx="2" />
+            <path d="M10 5v14" />
+          </svg>
+        </button>
+        <div v-if="colOpen" class="skills-colset-pop" role="dialog" aria-label="列设置">
+          <label>
+            <input v-model="columns.source" type="checkbox" @change="persistColumns" />
+            来源
+          </label>
+          <label>
+            <input v-model="columns.fileCount" type="checkbox" @change="persistColumns" />
+            文件数
+          </label>
         </div>
       </div>
+    </div>
 
-      <div v-if="error && !skills.length" class="skills-error" role="alert">
-        <span>{{ error }}</span>
-        <button class="subtle sm" type="button" @click="load">重试</button>
-      </div>
+    <div v-if="error && !skills.length" class="skills-error" role="alert">
+      <span>{{ error }}</span>
+      <button class="subtle sm" type="button" @click="load">重试</button>
+    </div>
 
-      <div v-else-if="loading && !skills.length" class="skills-table-wrap">
-        <SkeletonRows :rows="6" :columns="['34%', '10%', '9%', '7%', '15%', '10%']" />
-      </div>
+    <div v-else-if="loading && !skills.length" class="table-wrap">
+      <SkeletonRows :rows="6" :columns="['34%', '10%', '9%', '7%', '15%', '10%']" />
+    </div>
 
-      <div v-else-if="skills.length" class="skills-table-wrap">
-        <table class="skills-table" aria-label="技能列表" :aria-busy="loading">
-          <thead>
-            <tr>
-              <th class="col-skill">技能</th>
-              <th v-if="columns.source">来源</th>
-              <th>状态</th>
-              <th>绑定</th>
-              <th>版本</th>
-              <th v-if="columns.fileCount" class="num">文件数</th>
-              <th>最近更新</th>
-              <th class="col-actions"><span class="sr-only">操作</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="skill in skills"
-              :key="skill.id"
-              :class="{ 'row-attention': isAttention(skill) }"
-              @click="openSkill(skill)"
-            >
-              <td class="col-skill">
-                <div class="skill-cell">
-                  <SkillTile :id="skill.id" :description="skill.description" />
-                  <div class="skill-cell-text">
-                    <span class="skill-cell-id">{{ skill.id }}</span>
-                    <span class="skill-cell-desc" :class="{ 'is-empty': !skill.description }">
-                      {{ skill.description || '暂无说明' }}
-                    </span>
-                  </div>
+    <div v-else-if="skills.length" class="table-wrap">
+      <table class="table skills-table" aria-label="技能列表" :aria-busy="loading">
+        <thead>
+          <tr>
+            <th class="col-skill">技能</th>
+            <th v-if="columns.source">来源</th>
+            <th>状态</th>
+            <th>绑定</th>
+            <th>版本</th>
+            <th v-if="columns.fileCount" class="num">文件数</th>
+            <th>最近更新</th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="skill in skills"
+            :key="skill.id"
+            :class="{ 'row-attention': isAttention(skill) }"
+            @click="openSkill(skill)"
+          >
+            <td class="col-skill">
+              <div class="skill-cell">
+                <SkillTile :id="skill.id" :description="skill.description" />
+                <div class="skill-cell-text">
+                  <span class="skill-cell-id">{{ skill.id }}</span>
+                  <span class="skill-cell-desc" :class="{ 'is-empty': !skill.description }">
+                    {{ skill.description || '暂无说明' }}
+                  </span>
                 </div>
-              </td>
-              <td v-if="columns.source">
-                <span class="tag">{{ sourceLabel(skill) }}</span>
-              </td>
-              <td>
+              </div>
+            </td>
+            <td v-if="columns.source">
+              <span class="badge">{{ sourceLabel(skill) }}</span>
+            </td>
+            <td>
+              <button
+                type="button"
+                class="cell-button"
+                :title="statusOf(skill).tooltip"
+                @click.stop="openTab(skill, 'data')"
+              >
+                <SkillStatusPill
+                  :needs-data="skill.needsData ?? null"
+                  :data-state="dataStateOf(skill)"
+                  :sandbox-enabled="sandboxEnabled"
+                />
+              </button>
+            </td>
+            <td>
+              <button
+                type="button"
+                class="cell-button"
+                :title="boundCount(skill) ? '查看引用方' : '还没有智能体引用'"
+                @click.stop="openTab(skill, 'bindings')"
+              >
+                <template v-if="boundCount(skill)">
+                  <AgentAvatars :agents="agentsOf(skill)" />
+                  <span class="bind-count">{{ boundCount(skill) }} 个</span>
+                </template>
+                <span v-else class="muted-dash">未绑定</span>
+              </button>
+            </td>
+            <td>
+              <span class="mono">{{ versionLabel(skill) }}</span>
+            </td>
+            <td v-if="columns.fileCount" class="num">
+              <span class="mono">{{ skill.fileCount || 0 }}</span>
+            </td>
+            <td>
+              <div class="updated-cell" :title="updatedTitle(skill)">
+                <span>{{ formatRelative(skill.updatedAt) }}</span>
+                <span class="user">· {{ updatedUser(skill) }}</span>
+              </div>
+            </td>
+            <td class="col-actions">
+              <div class="skill-actions">
                 <button
+                  v-if="isAttention(skill)"
                   type="button"
-                  class="cell-button"
-                  :title="statusOf(skill).tooltip"
+                  class="link-btn warn"
                   @click.stop="openTab(skill, 'data')"
                 >
-                  <SkillStatusPill
-                    :needs-data="skill.needsData ?? null"
-                    :data-state="dataStateOf(skill)"
-                    :sandbox-enabled="sandboxEnabled"
-                  />
+                  查看原因
                 </button>
-              </td>
-              <td>
-                <button
-                  type="button"
-                  class="cell-button"
-                  :title="boundCount(skill) ? '查看引用方' : '还没有智能体引用'"
-                  @click.stop="openTab(skill, 'bindings')"
-                >
-                  <template v-if="boundCount(skill)">
-                    <AgentAvatars :agents="agentsOf(skill)" />
-                    <span class="bind-count">{{ boundCount(skill) }} 个</span>
-                  </template>
-                  <span v-else class="muted-dash">未绑定</span>
+                <button v-else type="button" class="link-btn" @click.stop="openSkill(skill)">
+                  打开
                 </button>
-              </td>
-              <td>
-                <span class="mono">{{ versionLabel(skill) }}</span>
-              </td>
-              <td v-if="columns.fileCount" class="num">
-                <span class="mono">{{ skill.fileCount || 0 }}</span>
-              </td>
-              <td>
-                <div class="updated-cell" :title="updatedTitle(skill)">
-                  <span>{{ formatRelative(skill.updatedAt) }}</span>
-                  <span class="user">· {{ updatedUser(skill) }}</span>
-                </div>
-              </td>
-              <td class="col-actions">
-                <div class="skill-actions">
+                <div class="skill-menu">
                   <button
-                    v-if="isAttention(skill)"
                     type="button"
-                    class="link-btn warn"
-                    @click.stop="openTab(skill, 'data')"
+                    class="btn-icon"
+                    :aria-label="`${skill.id} 的更多操作`"
+                    aria-haspopup="menu"
+                    :aria-expanded="menuFor === skill.id"
+                    @click.stop="toggleMenu(skill, $event)"
                   >
-                    查看原因
+                    ⋯
                   </button>
-                  <button v-else type="button" class="link-btn" @click.stop="openSkill(skill)">
-                    打开
-                  </button>
-                  <div class="skill-menu">
+                  <div v-if="menuFor === skill.id" class="row-menu" role="menu" @click.stop>
                     <button
                       type="button"
-                      class="btn-icon"
-                      :aria-label="`${skill.id} 的更多操作`"
-                      aria-haspopup="menu"
-                      :aria-expanded="menuFor === skill.id"
-                      @click.stop="toggleMenu(skill, $event)"
+                      role="menuitem"
+                      :disabled="!canEdit(skill)"
+                      :title="editDisabledReason(skill)"
+                      @click="runMenu(() => openEdit(skill))"
                     >
-                      ⋯
+                      编辑
                     </button>
-                    <div v-if="menuFor === skill.id" class="row-menu" role="menu" @click.stop>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        :disabled="!canEdit(skill)"
-                        :title="editDisabledReason(skill)"
-                        @click="runMenu(() => openEdit(skill))"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        :disabled="!canEdit(skill)"
-                        :title="editDisabledReason(skill)"
-                        @click="runMenu(() => importVersion(skill))"
-                      >
-                        导入新版本
-                      </button>
-                      <button type="button" role="menuitem" @click="runMenu(() => copyId(skill))">
-                        复制 ID
-                      </button>
-                      <div class="sep"></div>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="danger"
-                        :disabled="!canDelete(skill)"
-                        :title="deleteDisabledReason(skill)"
-                        @click="runMenu(() => askDelete(skill))"
-                      >
-                        删除
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      :disabled="!canEdit(skill)"
+                      :title="editDisabledReason(skill)"
+                      @click="runMenu(() => importVersion(skill))"
+                    >
+                      导入新版本
+                    </button>
+                    <button type="button" role="menuitem" @click="runMenu(() => copyId(skill))">
+                      复制 ID
+                    </button>
+                    <div class="sep"></div>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="danger"
+                      :disabled="!canDelete(skill)"
+                      :title="deleteDisabledReason(skill)"
+                      @click="runMenu(() => askDelete(skill))"
+                    >
+                      删除
+                    </button>
                   </div>
                 </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
-      <div v-else class="skills-empty">
-        <EmptyState
-          v-if="hasFilters"
-          title="没有匹配的技能"
-          description="当前筛选条件下没有结果，清空筛选后重新查看。"
+    <div v-else class="skills-empty">
+      <EmptyState
+        v-if="hasFilters"
+        title="没有匹配的技能"
+        description="当前筛选条件下没有结果，清空筛选后重新查看。"
+      >
+        <template #actions>
+          <button class="ghost" type="button" @click="clearFilters">清空筛选</button>
+        </template>
+      </EmptyState>
+      <EmptyState v-else title="还没有技能" description="从空白新建、从模板开始，或导入一个技能包。">
+        <template #actions>
+          <button class="primary" type="button" :disabled="!writable" @click="goCreate">
+            新建技能
+          </button>
+          <button class="ghost" type="button" :disabled="!writable" @click="goImport">
+            导入技能
+          </button>
+        </template>
+      </EmptyState>
+    </div>
+
+    <div v-if="skills.length" class="pager">
+      <span>共 {{ total }} 个 · 每页 {{ PAGE_SIZE }}</span>
+      <div class="skills-pages" role="navigation" aria-label="分页">
+        <button
+          type="button"
+          class="ghost sm"
+          :disabled="queryPage <= 1 || loading"
+          aria-label="上一页"
+          @click="goPage(queryPage - 1)"
         >
-          <template #actions>
-            <button class="ghost" type="button" @click="clearFilters">清空筛选</button>
-          </template>
-        </EmptyState>
-        <EmptyState v-else title="还没有技能" description="从空白新建、从模板开始，或导入一个技能包。">
-          <template #actions>
-            <button class="primary" type="button" :disabled="!writable" @click="goCreate">
-              新建技能
-            </button>
-            <button class="ghost" type="button" :disabled="!writable" @click="goImport">
-              导入技能
-            </button>
-          </template>
-        </EmptyState>
-      </div>
-
-      <div v-if="skills.length" class="skills-pager">
-        <span>共 {{ total }} 个 · 每页 {{ PAGE_SIZE }}</span>
-        <div class="skills-pages" role="navigation" aria-label="分页">
+          上一页
+        </button>
+        <template v-for="item in pageItems" :key="item">
+          <span v-if="typeof item === 'string'" class="gap" aria-hidden="true">…</span>
           <button
+            v-else
             type="button"
-            :disabled="queryPage <= 1 || loading"
-            aria-label="上一页"
-            @click="goPage(queryPage - 1)"
+            class="ghost sm"
+            :class="{ active: item === queryPage }"
+            :aria-current="item === queryPage ? 'page' : undefined"
+            :disabled="loading"
+            @click="goPage(item)"
           >
-            上一页
+            {{ item }}
           </button>
-          <template v-for="item in pageItems" :key="item">
-            <span v-if="typeof item === 'string'" class="gap" aria-hidden="true">…</span>
-            <button
-              v-else
-              type="button"
-              :class="{ active: item === queryPage }"
-              :aria-current="item === queryPage ? 'page' : undefined"
-              :disabled="loading"
-              @click="goPage(item)"
-            >
-              {{ item }}
-            </button>
-          </template>
-          <button
-            type="button"
-            :disabled="queryPage >= pageCount || loading"
-            aria-label="下一页"
-            @click="goPage(queryPage + 1)"
-          >
-            下一页
-          </button>
-        </div>
+        </template>
+        <button
+          type="button"
+          class="ghost sm"
+          :disabled="queryPage >= pageCount || loading"
+          aria-label="下一页"
+          @click="goPage(queryPage + 1)"
+        >
+          下一页
+        </button>
       </div>
     </div>
 
@@ -791,25 +780,6 @@ onUnmounted(() => {
 <style scoped>
 .skills-empty {
   padding: 40px 16px;
-}
-.skills-search kbd {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  min-width: 18px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--surface-2);
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 16px;
-  text-align: center;
-  pointer-events: none;
-}
-.skills-search input {
-  padding-right: 30px;
 }
 .skills-statline .stat-strong {
   font-weight: 600;

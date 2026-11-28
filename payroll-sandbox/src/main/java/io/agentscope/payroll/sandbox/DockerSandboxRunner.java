@@ -4,6 +4,7 @@ import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
@@ -137,7 +138,8 @@ public class DockerSandboxRunner implements SandboxRunner {
         }
     }
 
-    private List<String> command(String containerName, Path src, SandboxRequest request) {
+    private List<String> command(String containerName, Path src, SandboxRequest request)
+            throws IOException {
         List<String> command = new ArrayList<>();
         command.add(settings.dockerBinary());
         command.addAll(

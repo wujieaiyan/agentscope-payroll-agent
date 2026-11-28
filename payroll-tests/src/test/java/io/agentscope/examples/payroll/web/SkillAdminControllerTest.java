@@ -1,5 +1,6 @@
 package io.agentscope.examples.payroll.web;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -9,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -44,7 +46,9 @@ import io.agentscope.examples.payroll.skill.SkillVersion;
 import io.agentscope.examples.payroll.skill.SkillVersionContent;
 import io.agentscope.examples.payroll.support.AuditContext;
 import io.agentscope.examples.payroll.support.Permissions;
+import java.io.InputStream;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -52,6 +56,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
@@ -1518,8 +1523,8 @@ class SkillAdminControllerTest {
     }
 
     @Test
-    @DisplayName("非 db 来源、未声明 setup 或沙箱关闭时拒绝浏览，不触达网关")
-    void dataBrowseRequiresDbSetupAndSandbox() {
+    @DisplayName("非 db 来源或沙箱关闭时拒绝浏览，不触达网关")
+    void dataBrowseRequiresDbAndSandbox() {
         SkillDetail nacos =
                 new SkillDetail(
                         "poetry", "诗词", "正文", "nacos", false, false, 1L, List.of(), false,
@@ -1529,16 +1534,27 @@ class SkillAdminControllerTest {
 
         when(registry.detail("payroll-auditor"))
                 .thenReturn(detail("payroll-auditor", "审计", "正文", List.of(), "1", 1));
+        when(gateway.enabled()).thenReturn(false);
         assertThrows(
                 PayrollException.class, () -> controller.dataFile("payroll-auditor", "a.txt", null));
 
-        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
-        when(gateway.enabled()).thenReturn(false);
-        assertThrows(
-                PayrollException.class, () -> controller.dataTree("poetry-skill", null, null));
-
         verify(gateway, never()).dataTree(any(), any(), anyInt());
         verify(gateway, never()).dataFile(any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("未声明 setup 的 db 技能也能浏览 data/，未初始化时返回空目录树")
+    void dataBrowseWorksWithoutSetup() {
+        when(registry.detail("poetry-skill"))
+                .thenReturn(detail("poetry-skill", "诗词", "正文", List.of(), "1", 1));
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.dataTree("poetry-skill", null, SkillDataProtocol.DEFAULT_DEPTH))
+                .thenReturn(new SandboxGateway.DataTree("poetry-skill", "", List.of(), false, 500));
+
+        Map<?, ?> data = (Map<?, ?>) controller.dataTree("poetry-skill", null, null).data();
+
+        assertEquals("poetry-skill", data.get("skillId"));
+        assertEquals(List.of(), data.get("entries"));
     }
 
     @Test
@@ -1555,9 +1571,10 @@ class SkillAdminControllerTest {
     }
 
     @Test
-    @DisplayName("数据浏览接口同样要求 skill:manage")
-    void dataBrowseEndpointsRequireSkillManage() {
-        for (String name : List.of("dataTree", "dataFile")) {
+    @DisplayName("数据浏览与写入接口都要求 skill:manage")
+    void dataEndpointsRequireSkillManage() {
+        for (String name :
+                List.of("dataTree", "dataFile", "uploadDataFile", "deleteDataFile")) {
             Method method =
                     Arrays.stream(SkillAdminController.class.getDeclaredMethods())
                             .filter(candidate -> candidate.getName().equals(name))
@@ -1569,6 +1586,159 @@ class SkillAdminControllerTest {
                             && Arrays.asList(required.value()).contains(Permissions.SKILL_MANAGE),
                     name + " 缺少 skill:manage");
         }
+    }
+
+    @Test
+    @DisplayName("上传与删除同样要求 db 来源与沙箱开关")
+    void dataWriteRequiresDbAndSandbox() {
+        SkillDetail nacos =
+                new SkillDetail(
+                        "poetry", "诗词", "正文", "nacos", false, false, 1L, List.of(), false,
+                        Map.of("setup", "bash setup.sh"), "", 0);
+        when(registry.detail("poetry")).thenReturn(nacos);
+        when(gateway.enabled()).thenReturn(true);
+        assertThrows(
+                PayrollException.class,
+                () -> controller.uploadDataFile("poetry", file("a.txt", "x"), null, null));
+        assertThrows(PayrollException.class, () -> controller.deleteDataFile("poetry", "a.txt"));
+
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(false);
+        assertThrows(
+                PayrollException.class,
+                () -> controller.uploadDataFile(
+                        "poetry-skill", file("a.txt", "x"), null, null));
+        assertThrows(
+                PayrollException.class, () -> controller.deleteDataFile("poetry-skill", "a.txt"));
+
+        verify(gateway, never()).uploadDataFile(any(), any(), anyBoolean(), anyLong(), any(), any());
+        verify(gateway, never()).deleteDataFile(any(), any());
+    }
+
+    @Test
+    @DisplayName("未声明 setup 也可上传：先落临时文件算摘要再转发，审计带 sha/version 且不含正文")
+    void uploadDataStagesDigestAndAudits() throws Exception {
+        byte[] content = "hello".getBytes(StandardCharsets.UTF_8);
+        String digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        when(registry.detail("notes-skill"))
+                .thenReturn(detail("notes-skill", "笔记", "正文", List.of(), "7", 3));
+        when(gateway.enabled()).thenReturn(true);
+        AtomicReference<byte[]> forwarded = new AtomicReference<>();
+        when(gateway.uploadDataFile(
+                        eq("notes-skill"),
+                        eq("notes/a.txt"),
+                        eq(true),
+                        eq(5L),
+                        eq(digest),
+                        any()))
+                .thenAnswer(
+                        invocation -> {
+                            InputStream body = invocation.getArgument(5);
+                            forwarded.set(body.readAllBytes());
+                            return new SandboxGateway.DataWrite("notes/a.txt", 5, 9L, digest, true);
+                        });
+
+        Map<?, ?> data =
+                (Map<?, ?>)
+                        controller.uploadDataFile(
+                                        "notes-skill", file("a.txt", "hello"), "notes/a.txt", true)
+                                .data();
+
+        assertEquals("a.txt", data.get("originalName"));
+        assertEquals("notes/a.txt", data.get("path"));
+        assertEquals(5L, data.get("size"));
+        assertEquals(digest, data.get("sha256"));
+        assertEquals(true, data.get("overwritten"));
+        assertArrayEquals(content, forwarded.get());
+
+        ArgumentCaptor<Map<String, Object>> after = mapCaptor();
+        verify(auditService)
+                .record(
+                        eq("skill.data.upload"),
+                        eq("skill"),
+                        eq("notes-skill"),
+                        eq(null),
+                        after.capture());
+        assertEquals(digest, after.getValue().get("sha256"));
+        assertEquals(3, after.getValue().get("versionNo"));
+        assertFalse(after.getValue().containsKey("content"));
+        assertFalse(after.getValue().containsKey("area"));
+    }
+
+    @Test
+    @DisplayName("未指定路径时用原始文件名作为 data/ 内的相对路径")
+    void uploadDataDefaultsToOriginalName() throws Exception {
+        when(registry.detail("poetry-skill"))
+                .thenReturn(detail("poetry-skill", "诗词", "正文", List.of(), "1", 1));
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.uploadDataFile(
+                        eq("poetry-skill"),
+                        eq("a.txt"),
+                        eq(false),
+                        eq(5L),
+                        any(),
+                        any()))
+                .thenReturn(new SandboxGateway.DataWrite("a.txt", 5, 9L, "digest", false));
+
+        Map<?, ?> data =
+                (Map<?, ?>) controller.uploadDataFile(
+                                "poetry-skill", file("a.txt", "hello"), " ", null)
+                        .data();
+
+        assertEquals("a.txt", data.get("path"));
+    }
+
+    @Test
+    @DisplayName("上传拒绝空文件与可执行扩展名")
+    void uploadDataRejectsBadFiles() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+
+        assertThrows(
+                PayrollException.class,
+                () -> controller.uploadDataFile(
+                        "poetry-skill", file("a.txt", ""), null, null));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> controller.uploadDataFile(
+                        "poetry-skill", file("run.sh", "echo"), null, null));
+        verify(gateway, never()).uploadDataFile(any(), any(), anyBoolean(), anyLong(), any(), any());
+    }
+
+    @Test
+    @DisplayName("删除数据文件在 before 快照里记路径、大小、摘要与版本")
+    void deleteDataAuditsSnapshot() {
+        when(registry.detail("poetry-skill")).thenReturn(scriptedDetail());
+        when(gateway.enabled()).thenReturn(true);
+        when(gateway.deleteDataFile("poetry-skill", "a.txt"))
+                .thenReturn(new SandboxGateway.DataWrite("a.txt", 5, 9L, "digest", false));
+
+        Map<?, ?> data = (Map<?, ?>) controller.deleteDataFile("poetry-skill", "a.txt").data();
+
+        assertEquals("a.txt", data.get("path"));
+        assertEquals(false, data.get("overwritten"));
+        ArgumentCaptor<Map<String, Object>> before = mapCaptor();
+        verify(auditService)
+                .record(
+                        eq("skill.data.upload.delete"),
+                        eq("skill"),
+                        eq("poetry-skill"),
+                        before.capture(),
+                        eq(null));
+        assertEquals(5L, before.getValue().get("sizeBytes"));
+        assertEquals("digest", before.getValue().get("sha256"));
+        assertEquals(4, before.getValue().get("versionNo"));
+    }
+
+    private static MockMultipartFile file(String name, String content) {
+        return new MockMultipartFile(
+                "file", name, "text/plain", content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Map<String, Object>> mapCaptor() {
+        return (ArgumentCaptor<Map<String, Object>>)
+                (ArgumentCaptor<?>) ArgumentCaptor.forClass(Map.class);
     }
 
     /** 已落库、带版本行的技能详情：管理台初始化与数据删除的审计要带 version_no。 */

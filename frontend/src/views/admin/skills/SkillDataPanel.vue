@@ -157,7 +157,7 @@ const confirmCopy = computed(() => {
       title: '删除技能数据',
       confirmText: '删除数据',
       danger: true,
-      body: `将清空 ${props.skillId} 的 data/ 工作区，技能正文与文件包不受影响；下次执行脚本时会重新初始化。`,
+      body: `将清空 ${props.skillId} 的 data/ 工作区，包括初始化产物与手动上传的文件；技能正文与文件包不受影响；下次执行脚本时会重新初始化。`,
     };
   }
   if (pending.value === 'init-rebuild') {
@@ -165,14 +165,14 @@ const confirmCopy = computed(() => {
       title: '重建技能数据',
       confirmText: '清空并重建',
       danger: true,
-      body: '当前数据已就绪，重建会先清空 data/ 再执行初始化脚本，已有数据不可恢复。',
+      body: '重建会先清空 data/（含已上传文件）再执行初始化脚本，已有数据不可恢复。',
     };
   }
   return {
     title: '初始化技能数据',
     confirmText: '开始初始化',
     danger: false,
-    body: `将在独立初始化容器中执行 ${state.value?.setupPath || '初始化脚本'}，生成的 data/ 会持久保留。`,
+    body: `将在独立初始化容器中执行 ${state.value?.setupPath || '初始化脚本'}；执行前会清空 data/（含已上传文件），生成的 data/ 会持久保留。`,
   };
 });
 </script>
@@ -248,15 +248,16 @@ const confirmCopy = computed(() => {
         </div>
       </div>
 
-      <p v-if="effectiveNeedsData === false" class="file-hint warn">
-        该技能未声明 <code>setup</code> 或 <code>setup.sh</code>，无需初始化数据。
+      <p v-if="effectiveNeedsData === false" class="file-hint">
+        该技能未声明 <code>setup</code> 或 <code>setup.sh</code>，无需初始化；可直接上传数据文件到
+        <code>data/</code>，脚本运行时只读挂载到 <code>/data</code>。
       </p>
       <p v-else-if="effectiveNeedsData === null" class="file-hint warn">
         当前来源不提供数据状态，无法判断是否需要初始化。
       </p>
       <p v-else class="file-hint">
         setup 在独立初始化容器中执行（允许联网）；生成的 <code>data/</code> 会持久保留，并在脚本运行时只读挂载到容器内
-        <code>/data</code>。
+        <code>/data</code>。手动上传的文件也写入同一目录，<strong>重建数据会清空它们</strong>。
       </p>
 
       <div v-if="logLines.length" class="log-block">
@@ -268,10 +269,11 @@ const confirmCopy = computed(() => {
       </div>
 
       <SkillDataBrowser
-        v-if="requiresData"
+        v-if="sandboxEnabled"
         :skill-id="skillId"
         :status="status"
         :sandbox-enabled="sandboxEnabled"
+        @changed="load(true)"
       />
     </template>
 

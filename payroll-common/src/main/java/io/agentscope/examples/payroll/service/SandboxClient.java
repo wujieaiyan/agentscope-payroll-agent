@@ -4,12 +4,14 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.agentscope.examples.payroll.domain.PayrollConflictException;
 import io.agentscope.examples.payroll.domain.PayrollException;
 import io.agentscope.examples.payroll.domain.PayrollNotFoundException;
+import io.agentscope.examples.payroll.domain.PayrollTooLargeException;
 import io.agentscope.examples.payroll.domain.SandboxUnavailableException;
 import io.agentscope.examples.payroll.sandbox.SandboxProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillDataProtocol;
 import io.agentscope.examples.payroll.sandbox.SkillInitProtocol;
 import io.agentscope.examples.payroll.skill.SkillExecutionSettings;
 import io.agentscope.examples.payroll.support.JsonSupport;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -222,6 +224,49 @@ public final class SandboxClient implements SandboxGateway {
         throw dataFailure(status, response.body());
     }
 
+    @Override
+    public DataWrite uploadDataFile(
+            String skillId,
+            String path,
+            boolean overwrite,
+            long size,
+            String sha256,
+            InputStream body) {
+        requireEnabled("数据文件上传");
+        String canonical = SkillDataProtocol.uploadPath(skillId, path, overwrite, size, sha256);
+        HttpResponse<String> response =
+                sendStream("POST", canonical, size, body, uploadTimeout(size));
+        int status = response.statusCode();
+        if (status == 401 || status == 403) {
+            throw signatureFailure();
+        }
+        if (status >= 200 && status < 300) {
+            return parseDataWrite(response.body());
+        }
+        throw writeFailure(status, response.body(), "数据文件写入失败");
+    }
+
+    @Override
+    public DataWrite deleteDataFile(String skillId, String path) {
+        requireEnabled("数据文件删除");
+        String canonical = SkillDataProtocol.deletePath(skillId, path);
+        HttpResponse<String> response = send("DELETE", canonical, "", Duration.ofSeconds(10));
+        int status = response.statusCode();
+        if (status == 401 || status == 403) {
+            throw signatureFailure();
+        }
+        if (status >= 200 && status < 300) {
+            return parseDataWrite(response.body());
+        }
+        throw writeFailure(status, response.body(), "数据文件删除失败");
+    }
+
+    /** 上传超时按体积放宽：30 秒起步，每 MiB 再加 1 秒，最多 15 分钟。 */
+    private static Duration uploadTimeout(long size) {
+        long bonusSeconds = Math.min(870L, Math.max(0L, size / (1024 * 1024)));
+        return Duration.ofSeconds(30 + bonusSeconds);
+    }
+
     private SkillData skillDataOf(HttpResponse<String> response) {
         int status = response.statusCode();
         if (status == 401 || status == 403) {
@@ -263,6 +308,31 @@ public final class SandboxClient implements SandboxGateway {
                                         ? HttpRequest.BodyPublishers.ofString(payload)
                                         : HttpRequest.BodyPublishers.noBody())
                         .build();
+        return execute(request);
+    }
+
+    /** 正文以流式发送；签名串只覆盖规范路径与 query，正文完整性由 size/sha256 复核。 */
+    private HttpResponse<String> sendStream(
+            String method, String path, long contentLength, InputStream body, Duration timeout) {
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        HttpRequest request =
+                HttpRequest.newBuilder(URI.create(baseUrl + path))
+                        .timeout(timeout)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("X-Payroll-Timestamp", timestamp)
+                        .header(
+                                "X-Payroll-Internal",
+                                InternalAuth.sign(token, method, path, timestamp, null))
+                        .method(
+                                method,
+                                HttpRequest.BodyPublishers.fromPublisher(
+                                        HttpRequest.BodyPublishers.ofInputStream(() -> body),
+                                        contentLength))
+                        .build();
+        return execute(request);
+    }
+
+    private HttpResponse<String> execute(HttpRequest request) {
         try {
             return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (InterruptedException e) {
@@ -351,6 +421,16 @@ public final class SandboxClient implements SandboxGateway {
                 text(raw.get("mime"), "application/octet-stream"));
     }
 
+    private static DataWrite parseDataWrite(String body) {
+        Map<String, Object> raw = parseMap(body);
+        return new DataWrite(
+                text(raw.get("path"), ""),
+                longValue(raw.get("size"), 0),
+                longValue(raw.get("modifiedAt"), 0),
+                raw.get("sha256") == null ? null : String.valueOf(raw.get("sha256")),
+                truthy(raw.get("overwritten")));
+    }
+
     private static RuntimeException dataFailure(int status, String body) {
         String message = messageOf(body, "技能数据读取失败");
         if (status == 404) {
@@ -358,6 +438,23 @@ public final class SandboxClient implements SandboxGateway {
         }
         if (status == 409 || status == 429) {
             return new PayrollConflictException(message);
+        }
+        if (status >= 500) {
+            return new SandboxUnavailableException(message);
+        }
+        return new PayrollException(message);
+    }
+
+    private static RuntimeException writeFailure(int status, String body, String fallback) {
+        String message = messageOf(body, fallback);
+        if (status == 404) {
+            return new PayrollNotFoundException(message);
+        }
+        if (status == 409) {
+            return new PayrollConflictException(message);
+        }
+        if (status == 413) {
+            return new PayrollTooLargeException(message);
         }
         if (status >= 500) {
             return new SandboxUnavailableException(message);
