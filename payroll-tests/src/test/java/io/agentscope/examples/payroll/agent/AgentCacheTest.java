@@ -9,6 +9,7 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.AgentSkillRepositoryInfo;
 import io.agentscope.examples.payroll.domain.AgentDefinition;
+import io.agentscope.examples.payroll.model.AgentModelSettings;
 import io.agentscope.examples.payroll.skill.RoleSkills;
 import io.agentscope.examples.payroll.skill.SkillManifests;
 import java.time.Duration;
@@ -129,6 +130,30 @@ class AgentCacheTest {
                 PayrollAgentFactory.definitionSignature(same));
         assertNotSameSignature(base, renamed);
         assertNotSameSignature(base, rechained);
+    }
+
+    @Test
+    @DisplayName("定义签名覆盖声明的业务工具，改白名单必须换缓存条目")
+    void definitionSignatureCoversDeclaredTools() {
+        AgentDefinition legacy = definition("a1", "薪酬计算", "计算工资", List.of("payroll-calculator"));
+        AgentDefinition declared =
+                new AgentDefinition(
+                        "a1",
+                        "薪酬计算",
+                        "avatar",
+                        "计算工资",
+                        List.of(),
+                        List.of("payroll-calculator"),
+                        AgentDefinition.VISIBILITY_PUBLIC,
+                        AgentDefinition.STATUS_ONLINE,
+                        "tester",
+                        LocalDateTime.now(),
+                        LocalDateTime.now(),
+                        List.of(),
+                        List.of("get_payroll_policy"),
+                        AgentModelSettings.none());
+
+        assertNotSameSignature(legacy, declared);
     }
 
     private static void assertNotSameSignature(AgentDefinition left, AgentDefinition right) {
