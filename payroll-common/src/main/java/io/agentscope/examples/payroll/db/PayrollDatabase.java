@@ -267,15 +267,19 @@ public final class PayrollDatabase {
                         .locations(MIGRATION_LOCATION)
                         .dataSource(url, user, password)
                         .load();
-        for (var info : flyway.info().all()) {
-            if (info.getVersion() == null
-                    || info.getScript() == null
-                    || !appliedBaseline(info.getVersion().toString(), H2_BASELINE_VERSION)) {
-                continue;
+        try (Connection connection = connection()) {
+            for (var info : flyway.info().all()) {
+                if (info.getVersion() == null
+                        || info.getScript() == null
+                        || !appliedBaseline(info.getVersion().toString(), H2_BASELINE_VERSION)) {
+                    continue;
+                }
+                for (String statement : splitStatements(readMigration(info.getScript()))) {
+                    executeIfNotExists(connection, statement);
+                }
             }
-            for (String statement : splitStatements(readMigration(info.getScript()))) {
-                executeIfNotExists(statement);
-            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("补建历史 H2 表结构失败：" + e.getMessage(), e);
         }
     }
 
@@ -365,7 +369,7 @@ public final class PayrollDatabase {
         current.setLength(0);
     }
 
-    private void executeIfNotExists(String statement) {
+    private void executeIfNotExists(Connection connection, String statement) throws SQLException {
         String idempotent =
                 statement
                         .replaceFirst(
@@ -380,8 +384,7 @@ public final class PayrollDatabase {
                         .replaceFirst(
                                 "(?is)^(ALTER\\s+TABLE\\s+\\S+\\s+ADD\\s+COLUMN\\s+)(?!IF\\s+NOT\\s+EXISTS)",
                                 "$1IF NOT EXISTS ");
-        try (Connection connection = connection();
-                Statement jdbc = connection.createStatement()) {
+        try (Statement jdbc = connection.createStatement()) {
             jdbc.execute(idempotent);
         } catch (SQLException e) {
             throw new IllegalStateException(
