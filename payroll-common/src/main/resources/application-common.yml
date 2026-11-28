@@ -21,6 +21,12 @@ spring:
       - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
       - org.springframework.boot.autoconfigure.session.SessionAutoConfiguration
+      # DataSource/Flyway 由 PayrollDatabase 自己拥有：容器里一旦出现 DataSource Bean，
+      # Boot 会再对 classpath:db/migration 迁移一次，与 PayrollDatabase.migrate() 抢历史表。
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
   jackson:
     property-naming-strategy: SNAKE_CASE
     default-property-inclusion: non_null
@@ -37,6 +43,18 @@ spring:
       max-request-size: "${PAYROLL_UPLOAD_MAX_REQUEST_SIZE:512MB}"
   lifecycle:
     timeout-per-shutdown-phase: 10s
+
+mybatis:
+  # XML 随各模块放在 resources/mapper/<module>/，用 classpath*: 统一加载（common + backend）。
+  mapper-locations: "classpath*:mapper/**/*.xml"
+  configuration:
+    # 全部显式 resultMap，禁止隐式下划线推断：列名映射错了必须编译期就能看出来。
+    map-underscore-to-camel-case: false
+    jdbc-type-for-null: 'NULL'
+    # 不开一级会话缓存：同一 SqlSession 内重复查询拿到旧行会让跨语句读到脏数据。
+    local-cache-scope: statement
+    default-statement-timeout: 30
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
 
 payroll:
   # legacy=手写三阶段状态机；graph=langgraph4j 图编排（POC，仅切换路由层）
@@ -400,8 +418,20 @@ payroll:
 logging:
   level:
     root: INFO
+    # Mapper 包默认 info（SQL 与耗时可见）；MyBatis 在 DEBUG 打印全量参数，四类敏感
+    # namespace（凭证 / 审计 / 聊天 / 画像）固定 WARN，任何环境都不得调成 debug。
+    io.agentscope.examples.payroll.db.mapper: info
+    io.agentscope.examples.payroll.db.mapper.ModelCredentialMapper: WARN
+    io.agentscope.examples.payroll.db.mapper.AuditMapper: WARN
+    io.agentscope.examples.payroll.db.mapper.ChatMapper: WARN
+    io.agentscope.examples.payroll.db.mapper.UserProfileMapper: WARN
 
 management:
+  # DataSource 现在是容器 Bean，Boot 会为此自动加 db 健康项；关闭它保持 /actuator/health
+  # 形状不变，readiness 仍由 PayrollReadinessHealthIndicator 自己探测 DB。
+  health:
+    db:
+      enabled: false
   endpoints:
     web:
       exposure:

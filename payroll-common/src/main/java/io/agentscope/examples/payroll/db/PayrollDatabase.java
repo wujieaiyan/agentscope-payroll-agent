@@ -179,6 +179,7 @@ public final class PayrollDatabase {
     }
 
     public Connection connection() throws SQLException {
+        DbMetrics.connectionAcquired();
         return pool != null ? pool.getConnection() : DriverManager.getConnection(url, user, password);
     }
 

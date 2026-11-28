@@ -2,9 +2,14 @@
 # --spring.profiles.active=redis（或 dept=mysql,redis）
 spring:
   # 重新放开 Redis 自动装配（application.yml 默认关闭），仅排除手动管理的 ES 客户端。
+  # 列表整体替换 application-common.yml 的排除项，JDBC/Flyway 四项必须在此重复声明。
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
   data:
     redis:
       host: "${PAYROLL_REDIS_HOST:127.0.0.1}"

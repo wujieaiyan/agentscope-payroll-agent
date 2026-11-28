@@ -4,12 +4,18 @@
 # 表结构由 Flyway 在启动时按 db/migration/common 版本化创建（H2/MySQL 共用）。
 spring:
   # 该 profile 不启用 Redis 自动装配，保持与本地 H2 一致的行为。
+  # 注意：Spring 对列表属性是「整体替换」而不是合并，下面这份会盖掉 application-common.yml 的排除项，
+  # 新增排除必须同步到这里与 application-redis.yml。
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
       - org.springframework.boot.autoconfigure.session.SessionAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
 
 payroll:
   db:

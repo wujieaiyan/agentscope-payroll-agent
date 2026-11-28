@@ -18,6 +18,7 @@ import io.agentscope.examples.payroll.db.H2PayrollRunStore;
 import io.agentscope.examples.payroll.db.JdbcAgentDefinitionRepository;
 import io.agentscope.examples.payroll.db.ModelCredentialStore;
 import io.agentscope.examples.payroll.db.PayrollDatabase;
+import io.agentscope.examples.payroll.db.PayrollDatabaseDataSource;
 import io.agentscope.examples.payroll.domain.PayrollPolicy;
 import io.agentscope.examples.payroll.repository.AgentDefinitionRepository;
 import io.agentscope.examples.payroll.health.PayrollReadinessHealthIndicator;
@@ -117,6 +118,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
+import org.mybatis.spring.annotation.MapperScan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -128,8 +131,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * 后端与智能体运行期共享的基础设施装配。
@@ -139,6 +144,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
  * Web 节点没有这些 Bean 时自动退化为“只落轮次、不执行模型”。
  */
 @Configuration(proxyBeanMethods = false)
+@MapperScan("io.agentscope.examples.payroll.db.mapper")
 public class PayrollCoreConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollCoreConfiguration.class);
@@ -150,6 +156,23 @@ public class PayrollCoreConfiguration {
             @Value("${payroll.db.password}") String password,
             @Value("${payroll.db.pool-size:16}") int poolSize) {
         return PayrollDatabase.open(url, user, password, poolSize);
+    }
+
+    /** MyBatis 与 Spring 事务的唯一连接来源；适配器不改变 autoCommit 语义。 */
+    @Bean
+    public DataSource dataSource(PayrollDatabase database) {
+        return new PayrollDatabaseDataSource(database);
+    }
+
+    /**
+     * 显式声明事务管理器：Boot 的自动装配已排除，避免与手写连接路径抢同一份 DataSource 配置。
+     *
+     * <p>隔离级别由各处 {@code @Transactional(isolation = READ_COMMITTED)} 指定，不在此设默认值：
+     * MySQL 默认 REPEATABLE READ，双引擎测试会把差异掩盖掉（规格 §5.0.3）。
+     */
+    @Bean
+    public PlatformTransactionManager transactionManager(DataSource dataSource) {
+        return new DataSourceTransactionManager(dataSource);
     }
 
     /** 启动/周期任务的数据库租约；多副本只允许持约节点执行。 */
